@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpha-lab"
+version = "0.1.0"
+description = "Transparent quantitative investment research for paper portfolios"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=1.26", "pandas>=2.2", "pydantic>=2.7", "PyYAML>=6.0",
+  "SQLAlchemy>=2.0", "streamlit>=1.35", "plotly>=5.22", "yfinance>=0.2.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["alpha_lab*"]
