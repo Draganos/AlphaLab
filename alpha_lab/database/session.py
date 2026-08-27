@@ -58,17 +58,23 @@ def _migrate_legacy_fundamentals(engine: Engine) -> None:
         Fundamental.__table__.create(connection)
         legacy_columns = {item["name"] for item in inspect(connection).get_columns("fundamentals_phase1_legacy")}
         copy_columns = [column.name for column in Fundamental.__table__.columns
-                        if column.name in legacy_columns and column.name != "observation_hash"]
-        names = ", ".join(f'"{name}"' for name in copy_columns)
-        select_names = ", ".join(
-            "COALESCE(\"provider\", 'unknown')" if name == "provider"
-            else "COALESCE(\"ingested_at\", CURRENT_TIMESTAMP)" if name == "ingested_at"
-            else f'"{name}"'
-            for name in copy_columns
-        )
+                        if column.name in legacy_columns
+                        and column.name not in {"observation_hash", "provider", "ingested_at"}]
+        insert_columns = [*copy_columns, "provider", "ingested_at", "observation_hash"]
+        names = ", ".join(f'"{name}"' for name in insert_columns)
+        copied_values = [f'"{name}"' for name in copy_columns]
+        provider_value = "COALESCE(\"provider\", 'unknown')" if "provider" in legacy_columns else "'unknown'"
+        ingested_at_value = ("COALESCE(\"ingested_at\", CURRENT_TIMESTAMP)"
+                             if "ingested_at" in legacy_columns else "CURRENT_TIMESTAMP")
+        select_names = ", ".join([
+            *copied_values,
+            provider_value,
+            ingested_at_value,
+            "printf('legacy-%d', id)",
+        ])
         connection.execute(text(
-            f'INSERT INTO fundamentals ({names}, observation_hash) '
-            f"SELECT {select_names}, printf('legacy-%d', id) FROM fundamentals_phase1_legacy"
+            f"INSERT INTO fundamentals ({names}) "
+            f"SELECT {select_names} FROM fundamentals_phase1_legacy"
         ))
         connection.execute(text("DROP TABLE fundamentals_phase1_legacy"))
 

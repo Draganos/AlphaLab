@@ -44,17 +44,21 @@ def test_legacy_fundamental_constraint_is_migrated_without_data_loss():
         connection.execute(text("""
             CREATE TABLE fundamentals (
                 id INTEGER PRIMARY KEY, ticker VARCHAR(32) NOT NULL, period DATE NOT NULL,
-                publication_date DATE, eps FLOAT, provider VARCHAR(64), ingested_at DATETIME,
+                publication_date DATE, eps FLOAT,
                 CONSTRAINT legacy_unique UNIQUE (ticker, period)
             )
         """))
         connection.execute(text("""
-            INSERT INTO fundamentals (id, ticker, period, publication_date, eps, provider)
-            VALUES (1, 'LEGACY', '2023-12-31', '2024-02-01', 1.0, 'legacy-provider')
+            INSERT INTO fundamentals (id, ticker, period, publication_date, eps)
+            VALUES (1, 'LEGACY', '2023-12-31', '2024-02-01', 1.0)
         """))
     create_schema(engine)
+    create_schema(engine)
     with Session(engine) as session:
-        migrated = session.scalar(select(Fundamental))
+        migrated = session.scalars(select(Fundamental)).all()
+        assert len(migrated) == 1
+        migrated = migrated[0]
         assert migrated.eps == 1.0
+        assert migrated.provider == "unknown"
         assert migrated.observation_hash == "legacy-1"
         assert migrated.ingested_at is not None
