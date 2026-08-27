@@ -1,6 +1,8 @@
 """Idempotent provider-to-database ingestion."""
 
 from datetime import date
+import hashlib
+import json
 import logging
 import pandas as pd
 from sqlalchemy import Engine
@@ -36,16 +38,29 @@ class IngestionService:
                     session.add(Price(ticker=symbol, date=pd.Timestamp(index).date(), **values))
             for row in financials.to_dict("records"):
                 period = pd.Timestamp(row.pop("period")).date()
-                existing = session.query(Fundamental).filter_by(ticker=symbol, period=period).one_or_none()
-                values = {key: (pd.Timestamp(value).date() if key == "publication_date" and value else self._number(value)) for key, value in row.items() if key != "source"}
-                values.update(currency=currency, provider=provider_name, source=row.get("source"))
-                if existing:
-                    for key, value in values.items():
-                        setattr(existing, key, value)
-                else:
-                    session.add(Fundamental(ticker=symbol, period=period, **values))
+                values = {key: (self._date(value) if key == "publication_date" else self._number(value))
+                          for key, value in row.items() if key != "source"}
+                source = row.get("source")
+                values.update(currency=currency, provider=provider_name,
+                              source=None if source is None or pd.isna(source) else str(source))
+                observation_hash = self._fundamental_hash(symbol, period, values)
+                existing = session.query(Fundamental.id).filter_by(observation_hash=observation_hash).one_or_none()
+                if existing is None:
+                    session.add(Fundamental(ticker=symbol, period=period,
+                                            observation_hash=observation_hash, **values))
         logger.info("ingestion_complete", extra={"ticker": symbol, "prices": len(prices), "fundamentals": len(financials)})
 
     @staticmethod
     def _number(value):
         return None if value is None or pd.isna(value) else float(value)
+
+    @staticmethod
+    def _date(value):
+        return None if value is None or pd.isna(value) else pd.Timestamp(value).date()
+
+    @staticmethod
+    def _fundamental_hash(ticker: str, period: date, values: dict) -> str:
+        """Identify an exact provider observation while excluding ingestion time."""
+        canonical = {"ticker": ticker, "period": period.isoformat(), **values}
+        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode()).hexdigest()

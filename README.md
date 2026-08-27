@@ -101,6 +101,8 @@ The core suite uses in-memory or temporary SQLite databases and deterministic lo
 - Configuration validation checked only the total weight; it now rejects missing/extra categories, negative or non-finite weights, and invalid position ranges.
 - SQLite tests created sessions ad hoc; a rollback-isolated session fixture and idempotent schema test now protect test independence.
 - The existing additive schema initializer could not upgrade Phase 1 databases; it now adds Phase 1.5 metadata columns without rewriting existing records.
+- Fundamental revisions are append-only and exactly idempotent: an observation hash prevents duplicate versions, while point-in-time queries select the newest publication available for each fiscal period as of the requested date.
+- Coverage confidence thresholds are configurable. Below 40% coverage the label is `Insufficient data`; from 40% to below 70% it is provisional; at 70% and above the normal interpretation is shown. The raw numerical score and raw interpretation remain available for audit.
 
 ## Database and point-in-time discipline
 

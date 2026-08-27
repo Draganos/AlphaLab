@@ -27,11 +27,23 @@ class RiskSettings(BaseModel):
     no_leverage: bool = True
 
 
+class CoverageSettings(BaseModel):
+    insufficient_below: float = Field(0.40, ge=0, le=1)
+    full_confidence_at: float = Field(0.70, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def valid_threshold_order(self) -> "CoverageSettings":
+        if self.insufficient_below >= self.full_confidence_at:
+            raise ValueError("insufficient_below must be less than full_confidence_at")
+        return self
+
+
 class Settings(BaseModel):
     database_url: str = "sqlite:///data/alpha_lab.db"
     universe: dict[str, list[str]]
     strategy: StrategySettings
     weights: dict[str, float]
+    coverage: CoverageSettings
     risk: RiskSettings
     paper_trading: dict[str, float]
     data_quality: dict[str, int]

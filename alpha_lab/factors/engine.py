@@ -27,6 +27,11 @@ def calculate_factors(
             else:
                 published = pd.to_datetime(fund["publication_date"], errors="coerce")
                 fund = fund.loc[published.notna() & (published <= cutoff)]
+    if not fund.empty and "publication_date" in fund:
+        ordering = ["period", "publication_date"]
+        if "ingested_at" in fund:
+            ordering.append("ingested_at")
+        fund = fund.sort_values(ordering).drop_duplicates("period", keep="last")
     result: dict[str, float] = {}
     result["last_price"] = close.iloc[-1] if not close.empty else np.nan
     for days, name in [(21, "return_1m"), (63, "return_3m"), (126, "return_6m"), (252, "return_12m")]:

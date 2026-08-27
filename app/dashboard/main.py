@@ -12,11 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
-from alpha_lab.database.models import Fundamental, Price, Security
+from alpha_lab.database.models import Price, Security
+from alpha_lab.database.queries import latest_fundamentals_as_of
 from alpha_lab.database.session import make_engine
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.factors import calculate_factors, percentile_scores
-from alpha_lab.strategy import composite_score, interpretation
+from alpha_lab.strategy import composite_score
 
 st.set_page_config(page_title="AlphaLab", page_icon="α", layout="wide")
 settings = load_settings()
@@ -25,16 +26,19 @@ engine = make_engine(settings.database_url)
 
 @st.cache_data(ttl=60)
 def build_screener() -> pd.DataFrame:
+    evaluation_date = date.today()
     with Session(engine) as session:
         securities = session.scalars(select(Security)).all()
         raw: dict[str, dict[str, float]] = {}
         metadata: dict[str, Security] = {}
         for security in securities:
             prices = session.scalars(select(Price).where(Price.ticker == security.ticker).order_by(Price.date)).all()
-            fundamentals = session.scalars(select(Fundamental).where(Fundamental.ticker == security.ticker).order_by(Fundamental.period)).all()
+            fundamentals = latest_fundamentals_as_of(session, security.ticker, evaluation_date)
             price_series = pd.Series({p.date: p.adjusted_close or p.close for p in prices}, dtype=float)
-            fund_frame = pd.DataFrame([{column: getattr(f, column) for column in ["period", "revenue", "ebitda", "net_income", "eps", "free_cash_flow", "total_debt", "cash", "total_equity"]} for f in fundamentals])
-            raw[security.ticker] = calculate_factors(price_series, fund_frame, date.today())
+            fund_frame = pd.DataFrame([{column: getattr(f, column) for column in
+                ["period", "publication_date", "ingested_at", "revenue", "ebitda", "net_income", "eps",
+                 "free_cash_flow", "total_debt", "cash", "total_equity"]} for f in fundamentals])
+            raw[security.ticker] = calculate_factors(price_series, fund_frame, evaluation_date)
             metadata[security.ticker] = security
     if not raw:
         return pd.DataFrame()
@@ -52,11 +56,12 @@ def build_screener() -> pd.DataFrame:
             "ai": None, "dividend": None,
         }
         categories = {k: (None if pd.isna(v) else float(v)) for k, v in categories.items()}
-        result = composite_score(categories, settings.weights, date.today())
+        result = composite_score(categories, settings.weights, evaluation_date, settings.coverage)
         security = metadata[ticker]
         rows.append({"Ticker": ticker, "Company": security.company_name, "Sector": security.sector,
                      "Price": raw_frame.at[ticker, "last_price"] if "last_price" in raw_frame else None,
-                     "Composite score": result.score, "Interpretation": interpretation(result.score),
+                     "Composite score": result.score, "Raw interpretation": result.raw_interpretation,
+                     "Confidence label": result.confidence_label,
                      "Data coverage": result.coverage, "EPS score": categories["earnings"],
                      "Revision score": None, "Valuation score": None, "Momentum score": categories["momentum"],
                      "Quality score": categories["fundamentals"], "Balance sheet score": categories["balance_sheet"],
@@ -84,7 +89,14 @@ else:
     filtered = screen[(screen["Composite score"].fillna(-1) >= minimum)]
     if selected:
         filtered = filtered[filtered["Sector"].isin(selected)]
-    st.dataframe(filtered, width="stretch", hide_index=True)
+    low_confidence = filtered["Confidence label"].str.startswith(("Insufficient", "Provisional"), na=False).sum()
+    if low_confidence:
+        st.warning(f"{low_confidence} displayed score(s) have insufficient or provisional data coverage.")
+    st.dataframe(filtered, width="stretch", hide_index=True, column_config={
+        "Data coverage": st.column_config.ProgressColumn("Data coverage", min_value=0.0, max_value=1.0,
+                                                         format="percent"),
+        "Confidence label": st.column_config.TextColumn("Coverage confidence"),
+    })
     ticker = st.selectbox("Factor breakdown", filtered["Ticker"] if not filtered.empty else screen["Ticker"])
     row = screen.set_index("Ticker").loc[ticker]
     factor_columns = [c for c in screen if c.endswith("score") and c != "Composite score"]

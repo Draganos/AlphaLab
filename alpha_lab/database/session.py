@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session
 
-from alpha_lab.database.models import Base
+from alpha_lab.database.models import Base, Fundamental
 
 
 def make_engine(url: str) -> Engine:
@@ -17,6 +17,8 @@ def make_engine(url: str) -> Engine:
 
 
 def create_schema(engine: Engine) -> None:
+    if engine.dialect.name == "sqlite":
+        _migrate_legacy_fundamentals(engine)
     Base.metadata.create_all(engine)
     # Phase 1.5 additive migration for databases created by Phase 1. No data is rewritten.
     additions = {
@@ -38,6 +40,37 @@ def create_schema(engine: Engine) -> None:
                     if name not in existing:
                         connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_factor_scores_config_hash ON factor_scores (config_hash)"))
+
+
+def _migrate_legacy_fundamentals(engine: Engine) -> None:
+    """Rebuild the Phase 1 table whose ticker/period uniqueness destroyed revisions."""
+    inspector = inspect(engine)
+    if "fundamentals" not in inspector.get_table_names():
+        return
+    unique_sets = {tuple(item["column_names"]) for item in inspector.get_unique_constraints("fundamentals")}
+    columns = {item["name"] for item in inspector.get_columns("fundamentals")}
+    if ("ticker", "period") not in unique_sets and "observation_hash" in columns:
+        return
+    with engine.begin() as connection:
+        for index in inspect(connection).get_indexes("fundamentals"):
+            connection.execute(text(f'DROP INDEX IF EXISTS "{index["name"]}"'))
+        connection.execute(text("ALTER TABLE fundamentals RENAME TO fundamentals_phase1_legacy"))
+        Fundamental.__table__.create(connection)
+        legacy_columns = {item["name"] for item in inspect(connection).get_columns("fundamentals_phase1_legacy")}
+        copy_columns = [column.name for column in Fundamental.__table__.columns
+                        if column.name in legacy_columns and column.name != "observation_hash"]
+        names = ", ".join(f'"{name}"' for name in copy_columns)
+        select_names = ", ".join(
+            "COALESCE(\"provider\", 'unknown')" if name == "provider"
+            else "COALESCE(\"ingested_at\", CURRENT_TIMESTAMP)" if name == "ingested_at"
+            else f'"{name}"'
+            for name in copy_columns
+        )
+        connection.execute(text(
+            f'INSERT INTO fundamentals ({names}, observation_hash) '
+            f"SELECT {select_names}, printf('legacy-%d', id) FROM fundamentals_phase1_legacy"
+        ))
+        connection.execute(text("DROP TABLE fundamentals_phase1_legacy"))
 
 
 @contextmanager

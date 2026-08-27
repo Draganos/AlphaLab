@@ -16,6 +16,9 @@ weights:
   balance_sheet: 0.10
   ai: 0.05
   dividend: 0.05
+coverage:
+  insufficient_below: 0.40
+  full_confidence_at: 0.70
 risk:
   max_position: 0.20
   max_sector: 0.30

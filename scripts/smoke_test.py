@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
-from alpha_lab.database.models import Fundamental, Price
+from alpha_lab.database.models import Price
+from alpha_lab.database.queries import latest_fundamentals_as_of
 from alpha_lab.factors import calculate_factors
 from alpha_lab.ingestion import IngestionService
 from alpha_lab.providers import SyntheticFixtureProvider
@@ -31,7 +32,7 @@ def run() -> None:
         )
         with Session(engine) as session:
             prices = session.scalars(select(Price).order_by(Price.date)).all()
-            fundamentals = session.scalars(select(Fundamental).order_by(Fundamental.period)).all()
+            fundamentals = latest_fundamentals_as_of(session, "FIXTURE", evaluation_date)
         price_series = pd.Series({row.date: row.adjusted_close for row in prices})
         frame = pd.DataFrame([{name: getattr(row, name) for name in
             ["period", "publication_date", "revenue", "ebitda", "net_income", "eps", "free_cash_flow",
@@ -40,7 +41,7 @@ def run() -> None:
         settings = load_settings()
         categories = {name: None for name in settings.weights}
         categories.update(earnings=75.0, fundamentals=70.0, momentum=65.0, balance_sheet=80.0)
-        score = composite_score(categories, settings.weights, evaluation_date)
+        score = composite_score(categories, settings.weights, evaluation_date, settings.coverage)
         assert len(prices) >= 250, "fixture must support long-horizon momentum"
         assert factors["return_12m"] > 0
         assert factors["eps_yoy_growth"] > 0

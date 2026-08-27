@@ -42,7 +42,7 @@ class Price(Base):
 
 class Fundamental(Base):
     __tablename__ = "fundamentals"
-    __table_args__ = (UniqueConstraint("ticker", "period"),)
+    __table_args__ = (UniqueConstraint("observation_hash", name="uq_fundamentals_observation_hash"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
     period: Mapped[date] = mapped_column(Date)
@@ -61,6 +61,7 @@ class Fundamental(Base):
     provider: Mapped[str] = mapped_column(String(64), default="unknown", server_default="unknown")
     source: Mapped[str | None] = mapped_column(String(512))
     ingested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    observation_hash: Mapped[str] = mapped_column(String(64), index=True)
 
 
 class Estimate(Base):
