@@ -7,6 +7,11 @@ import pandas as pd
 
 
 class MarketDataProvider(ABC):
+    @property
+    def provider_name(self) -> str:
+        """Stable provenance identifier stored with every observation."""
+        return type(self).__name__
+
     @abstractmethod
     def get_price_history(self, ticker: str, start: date, end: date) -> pd.DataFrame: ...
 

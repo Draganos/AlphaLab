@@ -1,6 +1,6 @@
 """Relational audit store. Nullable fields mean unavailable, never fabricated."""
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
@@ -34,6 +34,10 @@ class Price(Base):
     close: Mapped[float | None] = mapped_column(Float)
     adjusted_close: Mapped[float | None] = mapped_column(Float)
     volume: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(String(8))
+    provider: Mapped[str] = mapped_column(String(64), default="unknown", server_default="unknown")
+    source: Mapped[str | None] = mapped_column(String(512))
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class Fundamental(Base):
@@ -53,6 +57,10 @@ class Fundamental(Base):
     cash: Mapped[float | None] = mapped_column(Float)
     total_equity: Mapped[float | None] = mapped_column(Float)
     shares_outstanding: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(String(8))
+    provider: Mapped[str] = mapped_column(String(64), default="unknown", server_default="unknown")
+    source: Mapped[str | None] = mapped_column(String(512))
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class Estimate(Base):
@@ -64,6 +72,10 @@ class Estimate(Base):
     consensus_eps: Mapped[float | None] = mapped_column(Float)
     consensus_revenue: Mapped[float | None] = mapped_column(Float)
     analyst_count: Mapped[int | None] = mapped_column(Integer)
+    currency: Mapped[str | None] = mapped_column(String(8))
+    provider: Mapped[str] = mapped_column(String(64), default="unknown", server_default="unknown")
+    source: Mapped[str | None] = mapped_column(String(512))
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class CompanyDocument(Base):
@@ -107,6 +119,9 @@ class FactorScore(Base):
     percentile_rank: Mapped[float | None] = mapped_column(Float)
     normalized_score: Mapped[float | None] = mapped_column(Float)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    score_version: Mapped[str] = mapped_column(String(32), server_default="legacy")
+    config_hash: Mapped[str] = mapped_column(String(64), index=True, server_default="legacy")
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class PortfolioSnapshot(Base):

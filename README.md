@@ -25,7 +25,7 @@ scripts/           schema initialization and real-data ingestion
 tests/             focused unit/integration tests
 ```
 
-Missing values stay `NULL`/`NaN`. Composite scoring reports its data coverage and renormalizes only across available categories, so absence is not silently treated as either strength or weakness. This policy is visible in the dashboard.
+Missing values stay `NULL`/`NaN`. Composite scoring reports its data coverage and renormalizes only across available categories, so absence is not silently treated as either strength or weakness. Missing, stale, and provider-unsupported states are distinct, explicit states. Scores carry a score-engine version, canonical configuration hash, and evaluation date so identical inputs and configuration reproduce the same result.
 
 ## Requirements and installation
 
@@ -39,6 +39,21 @@ pip install -r requirements.txt
 cp .env.example .env
 python scripts/init_db.py
 ```
+
+Direct runtime and test dependencies are exact-version pinned in `pyproject.toml` and `requirements.txt`. Teams requiring a fully transitive lock should generate and commit a platform-appropriate lock file in their controlled package environment.
+
+## Verify installation (offline deterministic workflow)
+
+After dependencies have been installed, this exact workflow requires no market-data API or internet access:
+
+```bash
+python scripts/init_db.py
+python scripts/smoke_test.py
+pytest
+streamlit run app/dashboard/main.py --server.headless true
+```
+
+The smoke test creates a temporary SQLite database, loads data clearly identified as a deterministic synthetic fixture, runs the same ingestion, factor, and composite-scoring path, asserts usable output, and deletes the database. Synthetic observations use the `synthetic-fixture-v1` provider provenance and must never be interpreted as actual securities or market history. Stop the final dashboard command with `Ctrl-C` after its health check succeeds.
 
 All important defaults live in `config/default.yaml`. Set `ALPHALAB_CONFIG` to use another YAML file or `ALPHALAB_DATABASE_URL` to override the database. There are no required secrets in Phase 1; `OPENAI_API_KEY` is merely documented for the optional future AI analyst.
 
@@ -73,6 +88,19 @@ pytest
 ```
 
 The Phase 1 suite covers database CRUD, idempotent ingestion, unknown publication dates, momentum and fundamental calculations, missing-data propagation, percentile ranking, scoring contributions, coverage, and configuration validation.
+The core suite uses in-memory or temporary SQLite databases and deterministic local CSV fixtures. It does not call yfinance or require network access; external-provider behavior is exercised through injected fakes.
+
+## Phase 1.5 reliability fixes
+
+- Runtime and test dependency ranges were ambiguous; direct dependencies are now exact-version pinned.
+- There was no offline end-to-end path; committed synthetic price/fundamental CSV fixtures and `scripts/smoke_test.py` now provide one with unmistakable fixture provenance.
+- Observations lacked ingestion provenance; prices, fundamentals, and estimates now carry provider, source, currency, and ingestion-time metadata.
+- Scores could not identify their implementation/configuration; composite results and stored factor scores now carry a stable version and canonical SHA-256 configuration hash.
+- Factor evaluation had no as-of boundary; an explicit evaluation date now filters prices and filters fundamentals by publication date, never by fiscal period alone.
+- Missing values were implicit and NaN could enter scoring; missing, stale, and unsupported states are distinct, and non-finite factor inputs are excluded explicitly.
+- Configuration validation checked only the total weight; it now rejects missing/extra categories, negative or non-finite weights, and invalid position ranges.
+- SQLite tests created sessions ad hoc; a rollback-isolated session fixture and idempotent schema test now protect test independence.
+- The existing additive schema initializer could not upgrade Phase 1 databases; it now adds Phase 1.5 metadata columns without rewriting existing records.
 
 ## Database and point-in-time discipline
 

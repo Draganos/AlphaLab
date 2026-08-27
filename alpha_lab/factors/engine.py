@@ -3,15 +3,30 @@
 import numpy as np
 import pandas as pd
 
+FACTOR_VERSION = "phase1.5-v1"
+
 
 def _safe_growth(current: float, prior: float) -> float:
     return np.nan if pd.isna(current) or pd.isna(prior) or prior == 0 else current / abs(prior) - (1 if prior > 0 else -1)
 
 
-def calculate_factors(prices: pd.Series, fundamentals: pd.DataFrame) -> dict[str, float]:
-    """Return raw factors using only supplied observations, oldest to newest."""
+def calculate_factors(
+    prices: pd.Series, fundamentals: pd.DataFrame, evaluation_date: str | pd.Timestamp | None = None
+) -> dict[str, float]:
+    """Return raw factors using only observations available by ``evaluation_date``."""
     close = prices.dropna().astype(float).sort_index()
     fund = fundamentals.sort_values("period").copy() if "period" in fundamentals else fundamentals.copy()
+    if evaluation_date is not None:
+        cutoff = pd.Timestamp(evaluation_date)
+        if isinstance(close.index, pd.DatetimeIndex):
+            close = close.loc[close.index <= cutoff]
+        if not fund.empty:
+            if "publication_date" not in fund:
+                # Unknown availability must never be inferred from fiscal period.
+                fund = fund.iloc[0:0]
+            else:
+                published = pd.to_datetime(fund["publication_date"], errors="coerce")
+                fund = fund.loc[published.notna() & (published <= cutoff)]
     result: dict[str, float] = {}
     result["last_price"] = close.iloc[-1] if not close.empty else np.nan
     for days, name in [(21, "return_1m"), (63, "return_3m"), (126, "return_6m"), (252, "return_12m")]:
