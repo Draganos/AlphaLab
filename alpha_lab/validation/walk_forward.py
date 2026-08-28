@@ -41,7 +41,9 @@ def evaluate_walk_forward(folds: list[WalkForwardFold],
         in_sample = evaluator(fold.train_start, fold.train_end)
         out_of_sample = evaluator(fold.test_start, fold.test_end)
         in_sharpe, out_sharpe = in_sample.get("sharpe"), out_of_sample.get("sharpe")
-        degradation = (out_sharpe / in_sharpe if in_sharpe not in (None, 0) and out_sharpe is not None else None)
+        meaningful = (in_sharpe is not None and out_sharpe is not None
+                      and in_sharpe > 0 and out_sharpe > 0)
+        degradation = out_sharpe / in_sharpe if meaningful else None
         conclusion = ("No repeatable edge demonstrated." if degradation is None or degradation < 0.5
                       else "Out-of-sample performance retained; continued validation required.")
         results.append(WalkForwardResult(fold, in_sample, out_of_sample, degradation, conclusion))

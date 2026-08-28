@@ -19,3 +19,14 @@ def test_expanding_folds_are_separate_and_combine():
 def test_overlapping_fold_rejected():
     with pytest.raises(ValueError):
         WalkForwardFold(date(2020, 1, 1), date(2023, 1, 1), date(2023, 1, 1), date(2024, 1, 1))
+
+
+@pytest.mark.parametrize(("in_sharpe", "out_sharpe"), [
+    (None, 1), (0, 1), (-1, 1), (1, 0), (1, -1), (-1, -1),
+])
+def test_non_positive_or_undefined_sharpes_never_claim_retention(in_sharpe, out_sharpe):
+    fold = expanding_folds(2020, 2023, 2023)[0]
+    values = iter([in_sharpe, out_sharpe])
+    result = evaluate_walk_forward([fold], lambda _start, _end: {"sharpe": next(values)})[0]
+    assert result.sharpe_degradation is None
+    assert result.conclusion == "No repeatable edge demonstrated."

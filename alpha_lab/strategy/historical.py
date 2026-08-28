@@ -76,20 +76,24 @@ class HistoricalScoringService:
                                               raw[security.ticker]["average_volume_20d"]))
         if not raw:
             return []
-        percentiles = percentile_scores(pd.DataFrame.from_dict(raw, orient="index"))
+        valid_tickers = [ticker for ticker, details in metadata.items() if details[2] is None]
+        raw_frame = pd.DataFrame.from_dict(raw, orient="index")
+        percentiles = _percentiles_against_valid_universe(raw_frame, valid_tickers)
         results: list[HistoricalScore] = []
         score_floor = self.settings.strategy.min_score if min_score is None else min_score
         coverage_floor = (self.settings.strategy.minimum_data_coverage
                           if minimum_coverage is None else minimum_coverage)
         for ticker in sorted(raw):
-            category = self._categories(percentiles.loc[ticker])
+            percentile_row = (percentiles.loc[ticker] if ticker in percentiles.index
+                              else pd.Series(index=raw_frame.columns, dtype=float))
+            category = self._categories(percentile_row)
             composite = composite_score(category, self.settings.weights, evaluation_date, self.settings.coverage)
             pre_reason = metadata[ticker][2]
             reason = pre_reason or ("insufficient coverage" if composite.coverage < coverage_floor else
                                     "score below threshold" if composite.score is None or composite.score < score_floor
                                     else None)
             results.append(HistoricalScore(ticker, metadata[ticker][0], metadata[ticker][1], raw[ticker],
-                {key: _optional(value) for key, value in percentiles.loc[ticker].items()}, category,
+                {key: _optional(value) for key, value in percentile_row.items()}, category,
                 composite.score, composite.coverage, composite.confidence_label, reason is None, reason,
                 composite.score_version, _historical_hash(composite.config_hash, score_floor, coverage_floor),
                 evaluation_date))
@@ -123,6 +127,25 @@ class HistoricalScoringService:
 
 def _optional(value: Any) -> float | None:
     return None if value is None or pd.isna(value) else float(value)
+
+
+def _percentiles_against_valid_universe(raw: pd.DataFrame, valid_tickers: list[str]) -> pd.DataFrame:
+    """Score excluded rows against—but never as part of—the valid reference distribution."""
+    if not valid_tickers:
+        return pd.DataFrame(index=raw.index, columns=raw.columns, dtype=float)
+    lower_is_better = {"volatility", "debt_to_ebitda"}
+    result = percentile_scores(raw.loc[valid_tickers], lower_is_better)
+    for ticker in raw.index.difference(valid_tickers):
+        for column in raw.columns:
+            value = raw.at[ticker, column]
+            reference = raw.loc[valid_tickers, column].dropna()
+            if pd.isna(value) or reference.empty:
+                result.at[ticker, column] = float("nan")
+            elif column in lower_is_better:
+                result.at[ticker, column] = float((reference >= value).mean() * 100)
+            else:
+                result.at[ticker, column] = float((reference <= value).mean() * 100)
+    return result.reindex(raw.index)
 
 
 def _historical_hash(composite_hash: str, min_score: float, minimum_coverage: float) -> str:

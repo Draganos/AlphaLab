@@ -53,3 +53,25 @@ def test_accounting_reconciles_and_costs_reduce_return():
     assert (net.cash >= -1e-9).all()
     final_value = net.cash.iloc[-1] + net.holdings["A"] * _prices()["A"].iloc[-1]["close"]
     assert net.nav.iloc[-1] == pytest.approx(final_value)
+
+
+def test_each_security_executes_on_its_own_next_open_and_missing_open_never_zeros_nav():
+    dates_a = pd.to_datetime(["2024-01-30", "2024-01-31", "2024-02-01", "2024-02-05"])
+    dates_b = pd.to_datetime(["2024-01-30", "2024-01-31", "2024-02-02", "2024-02-05"])
+    prices = {
+        "A": pd.DataFrame({"open": [50, 50, 50, 50], "close": [50, 50, 50, 50]}, index=dates_a),
+        "B": pd.DataFrame({"open": [100, 100, 100, 100], "close": [100, 100, 100, 100]}, index=dates_b),
+    }
+
+    def scores(day):
+        return [HistoricalScore(ticker, ticker, "Test", {"last_price": 1, "volatility": .1}, {}, {},
+            90, 1, "Strong", True, None, "test", "hash", day) for ticker in ("A", "B")]
+
+    result = BacktestEngine(prices, scores, _settings(), min_score=0, minimum_coverage=0,
+        min_positions=2, max_positions=2, max_position=.5, max_sector=None).run(
+            date(2024, 1, 30), date(2024, 2, 5))
+    buys = {trade.ticker: trade.execution_date for trade in result.trades if trade.side == "BUY"}
+    assert buys == {"A": date(2024, 2, 1), "B": date(2024, 2, 2)}
+    assert (result.nav == 1000).all()
+    assert all(snapshot.total_nav == pytest.approx(snapshot.cash + snapshot.market_value)
+               for snapshot in result.snapshots)

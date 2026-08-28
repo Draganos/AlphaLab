@@ -106,19 +106,25 @@ class BacktestEngine:
         trades: list[SimulatedTradeRecord] = []
         decisions: list[RebalanceDecision] = []
         snapshots: list[PortfolioSnapshotRecord] = []
-        pending: tuple[date, dict[str, float], dict[str, str], list[HistoricalScore]] | None = None
+        pending: list[tuple[date, dict[str, float], dict[str, date]]] = []
         traded_notional = total_costs = 0.0
         for timestamp in calendar:
             current_date = timestamp.date()
-            if pending is not None:
-                signal_date, targets, construction_excluded, scores = pending
-                new_trades, cash, notional, costs = self._execute(
-                    signal_date, current_date, targets, holdings, cash)
-                trades.extend(new_trades)
-                traded_notional += notional
-                total_costs += costs
-                decisions.append(_decision(signal_date, current_date, targets, construction_excluded, scores))
-                pending = None
+            remaining: list[tuple[date, dict[str, float], dict[str, date]]] = []
+            for signal_date, targets, execution_dates in pending:
+                due = {ticker for ticker, execution_date in execution_dates.items()
+                       if execution_date == current_date}
+                if due:
+                    new_trades, cash, notional, costs = self._execute(
+                        signal_date, current_date, targets, due, holdings, cash)
+                    trades.extend(new_trades)
+                    traded_notional += notional
+                    total_costs += costs
+                outstanding = {ticker: execution_date for ticker, execution_date in execution_dates.items()
+                               if execution_date > current_date}
+                if outstanding:
+                    remaining.append((signal_date, targets, outstanding))
+            pending = remaining
             nav = cash + sum(quantity * self._price_on(ticker, timestamp, "close")
                              for ticker, quantity in holdings.items())
             nav_values[timestamp] = nav
@@ -130,8 +136,19 @@ class BacktestEngine:
                     min_score=self.min_score, minimum_coverage=self.minimum_coverage,
                     min_positions=self.min_positions, max_positions=self.max_positions,
                     max_position=self.max_position, max_sector=self.max_sector)
-                if timestamp != calendar[-1]:
-                    pending = (current_date, construction.weights, construction.excluded, scores)
+                execution_dates = self._next_open_dates(current_date,
+                    set(holdings) | set(construction.weights), end)
+                missing_execution = ((set(holdings) | set(construction.weights)) - set(execution_dates))
+                targets = {ticker: weight for ticker, weight in construction.weights.items()
+                           if ticker not in missing_execution}
+                exclusions = dict(construction.excluded)
+                exclusions.update({ticker: "missing next available open" for ticker in missing_execution})
+                execution_dates = {ticker: execution_date for ticker, execution_date in execution_dates.items()
+                                   if ticker in set(holdings) | set(targets)}
+                decision_execution = min(execution_dates.values()) if execution_dates else current_date
+                decisions.append(_decision(current_date, decision_execution, targets, exclusions, scores))
+                if execution_dates:
+                    pending.append((current_date, targets, execution_dates))
         nav_series = pd.Series(nav_values, name="strategy_nav")
         cash_series = pd.Series(cash_values, name="cash")
         metrics = performance_metrics(nav_series, benchmark, self.settings.risk_free_rate)
@@ -143,16 +160,15 @@ class BacktestEngine:
         return BacktestResult(nav_series, cash_series, trades, decisions, metrics,
                               total_costs, turnover, holdings, snapshots)
 
-    def _execute(self, signal_date: date, execution_date: date, targets: dict[str, float],
+    def _execute(self, signal_date: date, execution_date: date, targets: dict[str, float], due: set[str],
                  holdings: dict[str, float], cash: float) -> tuple[list[SimulatedTradeRecord], float, float, float]:
         timestamp = pd.Timestamp(execution_date)
-        raw_prices = {ticker: self._price_on(ticker, timestamp, "open")
-                      for ticker in set(holdings) | set(targets) if self._has_price(ticker, timestamp, "open")}
-        nav = cash + sum(quantity * raw_prices.get(ticker, 0) for ticker, quantity in holdings.items())
+        raw_prices = {ticker: self._price_on(ticker, timestamp, "open") for ticker in due}
+        nav = cash + sum(quantity * self._price_on(ticker, timestamp, "close")
+                         for ticker, quantity in holdings.items())
         desired = {ticker: nav * weight / raw_prices[ticker] for ticker, weight in targets.items()
                    if ticker in raw_prices and raw_prices[ticker] > 0}
-        orders = [(ticker, desired.get(ticker, 0) - holdings.get(ticker, 0))
-                  for ticker in sorted(set(holdings) | set(desired)) if ticker in raw_prices]
+        orders = [(ticker, desired.get(ticker, 0) - holdings.get(ticker, 0)) for ticker in sorted(due)]
         orders.sort(key=lambda item: item[1] > 0)  # sells first
         records: list[SimulatedTradeRecord] = []
         total_notional = total_cost = 0.0
@@ -176,8 +192,9 @@ class BacktestEngine:
             cost = self.costs.commission(notional)
             if quantity <= 0 or notional < self.costs.minimum_trade_amount:
                 continue
-            pre_nav = cash + sum(q * raw_prices.get(t, 0) for t, q in holdings.items())
-            pre_weight = holdings.get(ticker, 0) * raw_prices[ticker] / pre_nav if pre_nav > 0 else 0
+            valuation_prices = {held: self._price_on(held, timestamp, "close") for held in holdings}
+            pre_nav = cash + sum(q * valuation_prices[t] for t, q in holdings.items())
+            pre_weight = holdings.get(ticker, 0) * valuation_prices.get(ticker, raw_prices[ticker]) / pre_nav if pre_nav > 0 else 0
             if side == "BUY":
                 cash -= notional + cost
                 holdings[ticker] = holdings.get(ticker, 0) + quantity
@@ -186,8 +203,9 @@ class BacktestEngine:
                 holdings[ticker] = max(0.0, holdings.get(ticker, 0) - quantity)
                 if holdings[ticker] < 1e-12:
                     holdings.pop(ticker, None)
-            post_nav = cash + sum(q * raw_prices.get(t, 0) for t, q in holdings.items())
-            post_weight = holdings.get(ticker, 0) * raw_prices[ticker] / post_nav if post_nav > 0 else 0
+            post_prices = {held: self._price_on(held, timestamp, "close") for held in holdings}
+            post_nav = cash + sum(q * post_prices[t] for t, q in holdings.items())
+            post_weight = holdings.get(ticker, 0) * post_prices.get(ticker, raw_prices[ticker]) / post_nav if post_nav > 0 else 0
             records.append(SimulatedTradeRecord(ticker, side, quantity, signal_date, execution_date,
                                                  execution_price, cost, pre_weight, post_weight))
             total_notional += notional
@@ -211,6 +229,18 @@ class BacktestEngine:
             return float(frame.at[timestamp, field])
         earlier = frame.loc[frame.index <= timestamp, field].dropna()
         return float(earlier.iloc[-1]) if not earlier.empty else 0.0
+
+    def _next_open_dates(self, signal_date: date, tickers: set[str], end: date) -> dict[str, date]:
+        result = {}
+        for ticker in tickers:
+            if ticker not in self.prices:
+                continue
+            opens = self.prices[ticker].loc[
+                (self.prices[ticker].index.date > signal_date) & (self.prices[ticker].index.date <= end), "open"
+            ].dropna()
+            if not opens.empty:
+                result[ticker] = opens.index[0].date()
+        return result
 
 
 def _normalize(frame: pd.DataFrame) -> pd.DataFrame:

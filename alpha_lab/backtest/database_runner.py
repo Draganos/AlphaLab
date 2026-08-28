@@ -1,6 +1,7 @@
 """Database-backed orchestration shared by CLI and Streamlit."""
 
 from datetime import date
+import math
 import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -12,6 +13,21 @@ from alpha_lab.database.models import Price
 from alpha_lab.strategy import HistoricalScoringService
 
 
+def adjusted_price_values(price: Price) -> dict[str, object]:
+    """Return a split-consistent open/close pair from a raw provider observation."""
+    raw_close = price.close
+    adjusted_close = price.adjusted_close
+    factor = adjusted_close / raw_close if _valid(adjusted_close) and _valid(raw_close) and raw_close != 0 else 1.0
+    factor = factor if math.isfinite(factor) and factor > 0 else 1.0
+    adjusted_open = price.open * factor if _valid(price.open) else None
+    valuation_close = adjusted_close if _valid(adjusted_close) else raw_close
+    return {"date": price.date, "open": adjusted_open, "close": valuation_close, "volume": price.volume}
+
+
+def _valid(value: float | None) -> bool:
+    return value is not None and math.isfinite(value)
+
+
 def load_price_frames(engine: Engine, tickers: list[str] | tuple[str, ...], start: date, end: date) -> dict[str, pd.DataFrame]:
     frames = {}
     with Session(engine) as session:
@@ -19,8 +35,7 @@ def load_price_frames(engine: Engine, tickers: list[str] | tuple[str, ...], star
             rows = session.scalars(select(Price).where(
                 Price.ticker == ticker, Price.date >= start, Price.date <= end).order_by(Price.date)).all()
             if rows:
-                frames[ticker] = pd.DataFrame([{"date": row.date, "open": row.open,
-                    "close": row.adjusted_close or row.close, "volume": row.volume} for row in rows]).set_index("date")
+                frames[ticker] = pd.DataFrame([adjusted_price_values(row) for row in rows]).set_index("date")
     return frames
 
 

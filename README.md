@@ -138,6 +138,8 @@ streamlit run app/dashboard/main.py
 
 > **SURVIVORSHIP BIAS RISK:** `data/universes/us_research_sample.csv` is a configurable present-day-style research list, not historical index membership. AlphaLab displays this limitation and does not claim to correct it.
 
+Phase 2 does not apply `membership_start` or `membership_end` columns during scoring. Those columns do not convert a CSV into validated historical membership data; enforcing dated membership remains future work.
+
 yfinance does not provide reliable point-in-time publication history for all fundamentals. Such records remain unavailable, so real-data Phase 2 tests may be mostly momentum-driven. Current estimate snapshots are never reconstructed into fictional revision histories. Results remain research/paper simulations, not investment advice or evidence of a repeatable edge.
 
 ## Phase 1.5 reliability fixes

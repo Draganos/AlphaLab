@@ -13,10 +13,8 @@ class ResearchUniverse:
 
     @property
     def limitation(self) -> str:
-        if self.historical_membership:
-            return "Historical membership dates supplied."
         return ("SURVIVORSHIP BIAS RISK: this symbol list is not historical constituent data; "
-                "results may include securities selected with present-day knowledge.")
+                "membership_start/membership_end columns are not applied in Phase 2.")
 
 
 def load_universe(path: str | Path) -> ResearchUniverse:
@@ -26,6 +24,4 @@ def load_universe(path: str | Path) -> ResearchUniverse:
     tickers = tuple(dict.fromkeys(frame["ticker"].dropna().astype(str).str.upper().str.strip()))
     if not tickers:
         raise ValueError("Universe must contain at least one ticker")
-    historical = ("membership_start" in frame and "membership_end" in frame
-                  and bool(frame["membership_start"].notna().all()))
-    return ResearchUniverse(tickers=tickers, name=Path(path).stem, historical_membership=historical)
+    return ResearchUniverse(tickers=tickers, name=Path(path).stem)

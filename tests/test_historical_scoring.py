@@ -36,3 +36,33 @@ def test_historical_scoring_ignores_future_prices_and_fundamentals():
         assert result.config_hash
     finally:
         engine.dispose()
+
+
+def test_pre_score_liquidity_exclusion_cannot_change_valid_percentiles():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    evaluation = date(2024, 2, 15)
+    with Session(engine) as session:
+        for ticker in ("A", "B", "EXTREME"):
+            session.add(Security(ticker=ticker, sector="Test"))
+        for offset in range(70):
+            day = evaluation - timedelta(days=69 - offset)
+            for ticker, slope, volume in (("A", 1, 1000), ("B", .5, 1000), ("EXTREME", 1000, 1)):
+                close = 10 + slope * offset
+                session.add(Price(ticker=ticker, date=day, open=close, close=close,
+                                  adjusted_close=close, volume=volume, provider="test"))
+        session.commit()
+    settings = load_settings().model_copy(deep=True)
+    settings.strategy.minimum_average_daily_volume = 100
+    service = HistoricalScoringService(engine, settings)
+    try:
+        with_extreme = {item.ticker: item for item in service.score_universe_as_of(
+            evaluation, ["A", "B", "EXTREME"], min_score=0, minimum_coverage=0)}
+        without_extreme = {item.ticker: item for item in service.score_universe_as_of(
+            evaluation, ["A", "B"], min_score=0, minimum_coverage=0)}
+        assert with_extreme["EXTREME"].exclusion_reason == "liquidity rule"
+        assert with_extreme["EXTREME"].score is not None
+        assert with_extreme["A"].percentile_factors["return_1m"] == without_extreme["A"].percentile_factors["return_1m"]
+        assert with_extreme["B"].percentile_factors["return_1m"] == without_extreme["B"].percentile_factors["return_1m"]
+    finally:
+        engine.dispose()
