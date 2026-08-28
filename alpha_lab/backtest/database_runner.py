@@ -17,15 +17,23 @@ def adjusted_price_values(price: Price) -> dict[str, object]:
     """Return a split-consistent open/close pair from a raw provider observation."""
     raw_close = price.close
     adjusted_close = price.adjusted_close
-    factor = adjusted_close / raw_close if _valid(adjusted_close) and _valid(raw_close) and raw_close != 0 else 1.0
-    factor = factor if math.isfinite(factor) and factor > 0 else 1.0
-    adjusted_open = price.open * factor if _valid(price.open) else None
-    valuation_close = adjusted_close if _valid(adjusted_close) else raw_close
+    adjusted_open = None
+    if _valid(adjusted_close):
+        valuation_close = adjusted_close
+        if _valid(raw_close):
+            factor = adjusted_close / raw_close
+            if math.isfinite(factor) and factor > 0 and _valid(price.open):
+                adjusted_open = price.open * factor
+    elif _valid(raw_close):
+        valuation_close = raw_close
+        adjusted_open = price.open if _valid(price.open) else None
+    else:
+        valuation_close = None
     return {"date": price.date, "open": adjusted_open, "close": valuation_close, "volume": price.volume}
 
 
 def _valid(value: float | None) -> bool:
-    return value is not None and math.isfinite(value)
+    return value is not None and math.isfinite(value) and value > 0
 
 
 def load_price_frames(engine: Engine, tickers: list[str] | tuple[str, ...], start: date, end: date) -> dict[str, pd.DataFrame]:

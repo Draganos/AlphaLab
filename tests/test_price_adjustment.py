@@ -20,10 +20,15 @@ def test_split_adjusts_open_and_close_to_same_basis_and_preserves_nav():
     assert nav.iloc[1] == pytest.approx(1000)
 
 
-@pytest.mark.parametrize(("raw_close", "adjusted_close", "expected_open"), [
-    (0, 50, 100), (None, 50, 100), (100, None, 100), (float("nan"), 50, 100),
+@pytest.mark.parametrize(("raw_close", "adjusted_close", "expected_open", "expected_close"), [
+    (0, 50, None, 50), (None, 50, None, 50), (100, None, 100, 100),
+    (float("nan"), 50, None, 50),
 ])
-def test_adjustment_factor_handles_null_and_zero_safely(raw_close, adjusted_close, expected_open):
+def test_adjustment_factor_never_mixes_unreconciled_raw_open_with_adjusted_close(
+    raw_close, adjusted_close, expected_open, expected_close,
+):
     price = Price(ticker="SAFE", date=date(2024, 1, 2), open=100, close=raw_close,
                   adjusted_close=adjusted_close, provider="test")
-    assert adjusted_price_values(price)["open"] == expected_open
+    values = adjusted_price_values(price)
+    assert values["open"] == expected_open
+    assert values["close"] == expected_close

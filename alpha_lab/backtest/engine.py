@@ -114,14 +114,19 @@ class BacktestEngine:
             for signal_date, targets, execution_dates in pending:
                 due = {ticker for ticker, execution_date in execution_dates.items()
                        if execution_date == current_date}
+                outstanding = {ticker: execution_date for ticker, execution_date in execution_dates.items()
+                               if execution_date > current_date}
+                unfilled_buys: set[str] = set()
                 if due:
-                    new_trades, cash, notional, costs = self._execute(
+                    new_trades, cash, notional, costs, unfilled_buys = self._execute(
                         signal_date, current_date, targets, due, holdings, cash)
                     trades.extend(new_trades)
                     traded_notional += notional
                     total_costs += costs
-                outstanding = {ticker: execution_date for ticker, execution_date in execution_dates.items()
-                               if execution_date > current_date}
+                if unfilled_buys and self._has_pending_reduction(
+                    set(outstanding), targets, holdings, cash, timestamp
+                ):
+                    outstanding.update(self._next_open_dates(current_date, unfilled_buys, end))
                 if outstanding:
                     remaining.append((signal_date, targets, outstanding))
             pending = remaining
@@ -161,7 +166,8 @@ class BacktestEngine:
                               total_costs, turnover, holdings, snapshots)
 
     def _execute(self, signal_date: date, execution_date: date, targets: dict[str, float], due: set[str],
-                 holdings: dict[str, float], cash: float) -> tuple[list[SimulatedTradeRecord], float, float, float]:
+                 holdings: dict[str, float], cash: float
+                 ) -> tuple[list[SimulatedTradeRecord], float, float, float, set[str]]:
         timestamp = pd.Timestamp(execution_date)
         raw_prices = {ticker: self._price_on(ticker, timestamp, "open") for ticker in due}
         nav = cash + sum(quantity * self._price_on(ticker, timestamp, "close")
@@ -171,12 +177,14 @@ class BacktestEngine:
         orders = [(ticker, desired.get(ticker, 0) - holdings.get(ticker, 0)) for ticker in sorted(due)]
         orders.sort(key=lambda item: item[1] > 0)  # sells first
         records: list[SimulatedTradeRecord] = []
+        unfilled_buys: set[str] = set()
         total_notional = total_cost = 0.0
         for ticker, delta in orders:
             if abs(delta * raw_prices[ticker]) < self.costs.minimum_trade_amount:
                 continue
             side = "BUY" if delta > 0 else "SELL"
-            quantity = abs(delta)
+            requested_quantity = abs(delta)
+            quantity = requested_quantity
             if not self.settings.fractional_shares:
                 quantity = math.floor(quantity)
             if quantity <= 0:
@@ -185,9 +193,12 @@ class BacktestEngine:
             if side == "BUY":
                 max_quantity = max(0.0, (cash - self.costs.fixed_commission) /
                                    (execution_price * (1 + self.costs.percentage_commission)))
+                cash_limited = max_quantity + 1e-12 < quantity
                 quantity = min(quantity, max_quantity)
                 if not self.settings.fractional_shares:
                     quantity = math.floor(quantity)
+                if cash_limited:
+                    unfilled_buys.add(ticker)
             notional = quantity * execution_price
             cost = self.costs.commission(notional)
             if quantity <= 0 or notional < self.costs.minimum_trade_amount:
@@ -212,7 +223,7 @@ class BacktestEngine:
             total_cost += cost
         if cash < -1e-8:
             raise RuntimeError("Negative cash would violate no-leverage constraint")
-        return records, max(cash, 0.0), total_notional, total_cost
+        return records, max(cash, 0.0), total_notional, total_cost, unfilled_buys
 
     def _calendar(self, start: date, end: date) -> pd.DatetimeIndex:
         dates = set()
@@ -241,6 +252,19 @@ class BacktestEngine:
             if not opens.empty:
                 result[ticker] = opens.index[0].date()
         return result
+
+    def _has_pending_reduction(self, pending_tickers: set[str], targets: dict[str, float],
+                               holdings: dict[str, float], cash: float, timestamp: pd.Timestamp) -> bool:
+        nav = cash + sum(quantity * self._price_on(ticker, timestamp, "close")
+                         for ticker, quantity in holdings.items())
+        if nav <= 0:
+            return False
+        return any(
+            ticker in holdings
+            and holdings[ticker] * self._price_on(ticker, timestamp, "close") / nav
+            > targets.get(ticker, 0.0) + 1e-9
+            for ticker in pending_tickers
+        )
 
 
 def _normalize(frame: pd.DataFrame) -> pd.DataFrame:

@@ -75,3 +75,36 @@ def test_each_security_executes_on_its_own_next_open_and_missing_open_never_zero
     assert (result.nav == 1000).all()
     assert all(snapshot.total_nav == pytest.approx(snapshot.cash + snapshot.market_value)
                for snapshot in result.snapshots)
+
+
+def test_buy_waiting_on_later_sell_is_retried_and_reaches_rotation_target():
+    dates_a = pd.to_datetime([
+        "2024-01-30", "2024-01-31", "2024-02-01", "2024-02-29", "2024-03-02", "2024-03-03",
+    ])
+    dates_b = pd.to_datetime([
+        "2024-01-30", "2024-01-31", "2024-02-01", "2024-02-29", "2024-03-01", "2024-03-02", "2024-03-03",
+    ])
+    prices = {
+        "A": pd.DataFrame({"open": [100] * len(dates_a), "close": [100] * len(dates_a)}, index=dates_a),
+        "B": pd.DataFrame({"open": [100] * len(dates_b), "close": [100] * len(dates_b)}, index=dates_b),
+    }
+
+    def scores(day):
+        selected = "A" if day < date(2024, 2, 29) else "B"
+        return [HistoricalScore(ticker, ticker, "Test", {"last_price": 100, "volatility": .1}, {}, {},
+            90 if ticker == selected else 40, 1, "Strong", ticker == selected,
+            None if ticker == selected else "score below threshold", "test", "hash", day)
+            for ticker in ("A", "B")]
+
+    result = BacktestEngine(prices, scores, _settings(), min_score=70, minimum_coverage=0,
+        min_positions=1, max_positions=1, max_position=1, max_sector=None).run(
+            date(2024, 1, 30), date(2024, 3, 3))
+    rotation = [trade for trade in result.trades if trade.signal_date == date(2024, 2, 29)]
+    assert [(trade.ticker, trade.side, trade.execution_date) for trade in rotation] == [
+        ("A", "SELL", date(2024, 3, 2)),
+        ("B", "BUY", date(2024, 3, 2)),
+    ]
+    assert set(result.holdings) == {"B"}
+    assert result.holdings["B"] == pytest.approx(10)
+    assert result.cash.iloc[-1] == pytest.approx(0)
+    assert result.nav.iloc[-1] == pytest.approx(1000)
