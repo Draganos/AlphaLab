@@ -69,16 +69,52 @@ class Settings(BaseModel):
     paper_trading: dict[str, float]
     data_quality: dict[str, int]
     backtest: BacktestSettings
+    rating_weights: dict[str, float]
+    ethics_policy_path: str = "config/ethics.yaml"
 
     @model_validator(mode="after")
     def weights_total_one(self) -> "Settings":
-        expected = {"earnings", "revisions", "fundamentals", "valuation", "momentum", "balance_sheet", "ai", "dividend"}
+        expected = {
+            "earnings",
+            "revisions",
+            "fundamentals",
+            "valuation",
+            "momentum",
+            "balance_sheet",
+            "ai",
+            "dividend",
+        }
         if set(self.weights) != expected:
-            raise ValueError(f"Composite weights must contain exactly: {sorted(expected)}")
-        if any(not math.isfinite(value) or value < 0 for value in self.weights.values()):
+            raise ValueError(
+                f"Composite weights must contain exactly: {sorted(expected)}"
+            )
+        if any(
+            not math.isfinite(value) or value < 0 for value in self.weights.values()
+        ):
             raise ValueError("Composite weights must be finite and non-negative")
         if abs(sum(self.weights.values()) - 1.0) > 1e-8:
             raise ValueError("Composite weights must total 1.0")
+        expected_live = {
+            "earnings_growth",
+            "analyst_revisions",
+            "business_quality",
+            "valuation",
+            "momentum",
+            "financial_strength",
+            "ai_research",
+            "shareholder_return",
+        }
+        if set(self.rating_weights) != expected_live:
+            raise ValueError(
+                f"Phase 3 rating_weights must contain exactly: {sorted(expected_live)}"
+            )
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in self.rating_weights.values()
+        ):
+            raise ValueError("Phase 3 rating_weights must be finite and non-negative")
+        if abs(sum(self.rating_weights.values()) - 1.0) > 1e-8:
+            raise ValueError("Phase 3 rating_weights must total 1.0")
         return self
 
 

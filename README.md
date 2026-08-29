@@ -182,3 +182,89 @@ Historical performance—even when correctly computed—is not evidence that ret
 ## Logging and safety
 
 Commands use structured JSON logging for lifecycle events and errors. API keys must be supplied only through environment variables and never committed. There is no leverage, margin, options, short selling, automatic stop-loss selling, or real-money execution in this release.
+
+## Phase 3 market discovery and research
+
+Phase 3 adds a scalable, provider-neutral market-discovery layer without changing Phase 2 backtest execution or accounting. `SecurityUniverseProvider`, `FundamentalDataProvider`, `EstimateProvider`, `CompanyDocumentProvider`, `BusinessClassificationProvider`, `ResearchNewsProvider`, and `AIResearchProvider` keep external integrations replaceable. The included CSV universe provider and deterministic fixtures work offline; optional credentialed providers may be added without becoming a core dependency.
+
+### Sharia-preferred methodology
+
+The versioned policy in `config/ethics.yaml` screens **primary business activity** into `PASS`, `REVIEW`, `EXCLUDED`, or `UNKNOWN`. Conventional banking/interest-based lending and weapon production are deterministic hard exclusions, along with the other enabled policy activities. Payment infrastructure is not treated as banking, and airlines are not excluded merely because they carry debt. Debt and interest exposure are displayed as warning metrics rather than silently becoming a business-activity exclusion. Manual allow/exclude lists are auditable; a manual allow cannot defeat a deterministic hard exclusion.
+
+> **Sharia-preferred screening is a configurable research filter and is not a religious ruling or formal certification.** Users remain responsible for their own investment and values decisions.
+
+When the ethical filter is enabled, portfolio construction defaults to `PASS` only and `EXCLUDED` securities cannot enter regardless of their investment score. `REVIEW`, `EXCLUDED`, and `UNKNOWN` companies remain researchable. Only eligible companies form the live investable percentile/rank reference universe.
+
+### Coverage and rating model
+
+The configurable live model weights Earnings & Growth (15%), Analyst Revisions (15%), Business Quality (15%), Valuation (15%), Momentum (15%), Financial Strength (10%), AI Research (10%), and Shareholder Return (5%). Missing inputs remain unavailable and available categories are transparently renormalized. The UI separately reports overall live, quantitative, AI, and historical point-in-time coverage. Live information is never retroactively admitted into a historical backtest.
+
+Timestamped estimate snapshots are append-only and idempotent. A 7/30/90-day revision exists only where at least two genuine observations support it; AlphaLab never reconstructs history from a current estimate. Valuation and quality helpers reject negative/zero invalid denominators rather than turning missing evidence into zero.
+
+### Pull search, themes, saved screens, and research pages
+
+The **Market Screener** page supports structured filters and a deterministic natural-language interpreter. The interpreter converts recognized phrases into visible `ScreenCriteria`; it never generates a ticker list. Database filtering supplies results, and unsupported requests are labeled **Unsupported / insufficient data**. Evidence-derived theme tags carry source and confidence. Saved screeners persist structured criteria locally and can be saved, loaded through the repository API, renamed, and deleted.
+
+The **Company Research** page shows category scores with raw metrics, coverage, confidence, provenance, the full Sharia-preferred values card, and evidence-bearing AI research. AI is optional and is an analyst layer only: structured Pydantic validation prohibits price-target language, evidence references and prompt/model versions are retained, and provider failure leaves AI missing without crashing screening. Python—not AI—enforces ethical eligibility, ranking, coverage, portfolio rules, and historical point-in-time constraints.
+
+Run all offline verification workflows:
+
+```bash
+python scripts/smoke_test.py
+python scripts/smoke_test_phase2.py
+python scripts/smoke_test_phase3.py
+pytest -v
+streamlit run app/dashboard/main.py --server.headless true
+```
+
+Windows PowerShell:
+
+```powershell
+python scripts/smoke_test.py
+python scripts/smoke_test_phase2.py
+python scripts/smoke_test_phase3.py
+pytest -v
+streamlit run app/dashboard/main.py --server.headless true
+```
+
+### Current provider and coverage limitations
+
+With the bundled provider, live prices and a subset of current company metadata/fundamentals may populate when yfinance and network access are available. Deterministic fixtures populate all smoke-test evidence but are never represented as real market data. Historical categories can populate only from stored prices and fundamentals with real publication dates; estimate revisions require AlphaLab's timestamped snapshots, and AI/document signals are not backfilled into history. Free sources do not consistently provide gross margin, ROIC, buybacks, dividend history, estimate dispersion, or attributable news for every company, so expected live coverage varies and is not promised at 100%. Historical coverage is normally lower. `UNKNOWN` remains `UNKNOWN`.
+
+A configured present-day universe can introduce **SURVIVORSHIP BIAS RISK** in historical research. CSV metadata supports hundreds or thousands of records, but AlphaLab does not claim historically correct index membership unless the supplied data actually establishes it. No paid credentials are required for tests, the application still starts without an AI key, and no Phase 3 feature performs brokerage execution, leverage, shorting, options, ML return prediction, or parameter mining.
+
+### Phase 3 review-correction workflows
+
+The live screener now performs deterministic ethical classification automatically from stored company descriptions, sectors, industries, and metadata provenance. An evaluation is reused only while both its evidence fingerprint and the deterministic `config/ethics.yaml` policy version remain unchanged. Unknown and mixed Financials businesses are `REVIEW`; explicit conventional banking, deposit/lending, consumer/mortgage/specialty-finance, and weapons activity is `EXCLUDED`. Payment networks/processors and attributable passenger-airline businesses remain allowed. Neither an AI result nor a high investment score can override a hard exclusion.
+
+Load a broad credential-free active US symbol universe, then enrich and load whatever current evidence the free provider genuinely returns:
+
+```bash
+python scripts/load_universe.py --market US --limit 500
+python scripts/load_live_research.py --limit 500 --years 2
+```
+
+`load_universe.py` reads and stores the full NASDAQ Trader active non-test, non-ETF NYSE/NASDAQ directory with source provenance. `--limit` applies only to expensive metadata enrichment, not symbol persistence. The enrichment subset alternates deterministically between NYSE and NASDAQ and orders each exchange by genuine stored market cap when available, otherwise ticker; it is exchange-balanced, not claimed to be liquid until price-volume evidence exists. Use `--skip-enrichment` for a symbols-only run. Provider errors remain visible and do not create invented metadata.
+
+The live investable percentile reference applies the configured stale-price, history, and liquidity checks before ranking; `data_quality.live_minimum_average_daily_volume` defaults to 100,000 shares. Securities that fail remain visible for audit but cannot distort valid live percentiles.
+
+For companies with adequate price history and two usable current fundamental periods, the free live workflow can generally populate the Growth, Quality, Valuation, Momentum, and Financial Strength categories—70% of the configured rating weight. Actual coverage varies by issuer and provider response and can be lower. Analyst Revisions require multiple genuine timestamped snapshots; AI Research requires attributable stored documents plus optional configuration; Shareholder Return requires genuine dividend/buyback evidence. None are manufactured to cross the 70% threshold. Fundamentals with unknown publication dates may support the **present-day live** screener but never historical scoring.
+
+Live coverage is metric-complete rather than category-present: each category reports available expected metrics divided by its documented metric set, and overall live coverage is the weighted sum of those per-category fractions. A category score can therefore exist from partial evidence while showing, for example, 43% category coverage; one available metric never makes a category 100% covered.
+
+Live price eligibility counts only finite, positive closes. Analyst revisions require two timestamped observations from one provider and use the nearest current/upcoming forecast period; expired forecasts remain unavailable. When price and shares outstanding produce a current market capitalization, that value is used consistently across valuation, shareholder-return factors, and display, with security metadata serving only as fallback.
+
+Natural-language pull search uses a provider pipeline: user text → deterministic or optional AI interpretation → strict `ScreenCriteria` validation → deterministic database filtering. It supports overall score, coverage, sector, industry, theme, market cap, all eight category scores, debt/EBITDA, and Sharia status. Unsupported conditions are displayed rather than ignored, and the interpreter schema has no field capable of returning a stock list.
+
+Optional providers are disabled by default:
+
+```env
+ALPHALAB_QUERY_PROVIDER=deterministic
+ALPHALAB_AI_PROVIDER=disabled
+# To opt in explicitly:
+# ALPHALAB_QUERY_PROVIDER=openai
+# ALPHALAB_AI_PROVIDER=openai
+# OPENAI_API_KEY=...
+```
+
+The live AI provider consumes only stored `CompanyDocument` records, validates the existing strict evidence-bearing schema, rejects evidence IDs not supplied to it, and fails closed to missing AI. It never performs ethical classification or portfolio selection.
