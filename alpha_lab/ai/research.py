@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any
+import re
 import json
 import os
 from urllib.request import Request, urlopen
@@ -12,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class EvidenceReference(BaseModel):
     document_id: int
     excerpt: str
+
+    @field_validator("excerpt")
+    @classmethod
+    def no_price_target(cls, value: str) -> str:
+        return _reject_price_target(value)
 
 
 class AIResearchResult(BaseModel):
@@ -38,9 +44,12 @@ class AIResearchResult(BaseModel):
     @field_validator("summary")
     @classmethod
     def no_price_target(cls, value: str) -> str:
-        if "price target" in value.lower():
-            raise ValueError("AI research must not contain a price target")
-        return value
+        return _reject_price_target(value)
+
+    @field_validator("key_positives", "key_risks")
+    @classmethod
+    def no_price_targets_in_lists(cls, values: list[str]) -> list[str]:
+        return [_reject_price_target(value) for value in values]
 
     @property
     def ai_rating(self) -> float:
@@ -202,3 +211,9 @@ def analyze_documents(
         return provider.analyze(ticker, documents)
     except Exception:
         return None
+
+
+def _reject_price_target(value: str) -> str:
+    if re.search(r"\b(?:price\s+target|target\s+price)\b", value, re.IGNORECASE):
+        raise ValueError("AI research must not contain a price target")
+    return value

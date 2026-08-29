@@ -30,6 +30,24 @@ def test_ai_is_structured_evidence_bearing_and_optional():
         AIResearchResult.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("summary", "Our price target is 100"),
+        ("key_positives", ["Target price is 100"]),
+        ("key_risks", ["The price target may fall"]),
+        ("evidence", [{"document_id": 7, "excerpt": "Price target is 100"}]),
+    ],
+)
+def test_price_target_language_is_rejected_in_every_narrative_field(field, value):
+    result = DeterministicAIResearchProvider().analyze(
+        "X", [{"id": 7, "text": "Strong demand"}]
+    ).model_dump()
+    result[field] = value
+    with pytest.raises(ValidationError):
+        AIResearchResult.model_validate(result)
+
+
 def test_natural_language_becomes_filters_not_tickers():
     criteria = interpret_query(
         "Find Sharia-preferred semiconductor companies with strong growth and score above 75"
@@ -63,6 +81,40 @@ def test_unimplemented_raw_metric_comparison_is_explicitly_unsupported():
         "Find stocks with P/E below 10"
     )
     assert criteria.unsupported == ["P/E below 10"]
+
+
+def test_financial_strength_phrase_does_not_select_financials_sector():
+    criteria = DeterministicQueryInterpreter().interpret(
+        "financially strong semiconductor companies"
+    )
+    assert criteria.minimum_financial_strength_score == 70
+    assert criteria.themes == ["semiconductors"]
+    assert "Financials" not in criteria.sectors
+
+
+def test_out_of_bounds_query_is_disclosed_not_assigned():
+    criteria = DeterministicQueryInterpreter().interpret("score above 150")
+    assert criteria.minimum_overall_score is None
+    assert criteria.unsupported == ["score above 150"]
+
+
+@pytest.mark.parametrize("sort", ["overall_score_asc", "overall_score_desc"])
+def test_unscored_records_sort_after_scored_records(sort):
+    records = [
+        ScreenRecord(ticker="NONE", ethical_status="PASS", overall_score=None),
+        ScreenRecord(ticker="LOW", ethical_status="PASS", overall_score=20),
+        ScreenRecord(ticker="HIGH", ethical_status="PASS", overall_score=80),
+    ]
+    result = apply_screen(records, ScreenCriteria(sort=sort))
+    assert result[-1].ticker == "NONE"
+    assert result[-1].overall_rank == 3
+
+
+def test_unavailable_interpreted_theme_remains_a_filter():
+    criteria = ScreenCriteria(themes=["data centres"])
+    records = [ScreenRecord(ticker="OTHER", ethical_status="PASS", themes=[])]
+    assert criteria.themes == ["data centres"]
+    assert apply_screen(records, criteria) == []
 
 
 @pytest.mark.parametrize(

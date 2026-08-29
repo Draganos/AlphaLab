@@ -15,7 +15,7 @@ class Candidate:
     stale_price: bool = False
     sufficient_history: bool = True
     liquid: bool = True
-    ethical_status: str = "PASS"
+    ethical_status: str = "UNKNOWN"
 
 
 @dataclass

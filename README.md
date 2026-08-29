@@ -252,6 +252,8 @@ For companies with adequate price history and two usable current fundamental per
 
 Live coverage is metric-complete rather than category-present: each category reports available expected metrics divided by its documented metric set, and overall live coverage is the weighted sum of those per-category fractions. A category score can therefore exist from partial evidence while showing, for example, 43% category coverage; one available metric never makes a category 100% covered.
 
+Live price eligibility counts only finite, positive closes. Analyst revisions require two timestamped observations from one provider and use the nearest current/upcoming forecast period; expired forecasts remain unavailable. When price and shares outstanding produce a current market capitalization, that value is used consistently across valuation, shareholder-return factors, and display, with security metadata serving only as fallback.
+
 Natural-language pull search uses a provider pipeline: user text → deterministic or optional AI interpretation → strict `ScreenCriteria` validation → deterministic database filtering. It supports overall score, coverage, sector, industry, theme, market cap, all eight category scores, debt/EBITDA, and Sharia status. Unsupported conditions are displayed rather than ignored, and the interpreter schema has no field capable of returning a stock list.
 
 Optional providers are disabled by default:

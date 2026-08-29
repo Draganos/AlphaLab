@@ -86,6 +86,11 @@ class UniverseIngestionService:
                     continue
                 for key, value in _security_values(raw).items():
                     if key != "ticker" and value is not None:
+                        if key == "exchange" and existing.exchange in {
+                            "NASDAQ",
+                            "NYSE",
+                        }:
+                            continue
                         setattr(existing, key, value)
                 count += 1
         return count
@@ -108,5 +113,20 @@ def _security_values(raw: dict[str, Any]) -> dict[str, Any]:
     }
     values = {key: raw.get(key) for key in permitted}
     values["ticker"] = str(values["ticker"]).upper().strip()
+    values["exchange"] = _canonical_exchange(values.get("exchange"))
     values["metadata_updated_at"] = datetime.now(UTC)
     return values
+
+
+def _canonical_exchange(value: Any) -> str | None:
+    if value is None:
+        return None
+    label = str(value).upper().strip()
+    return {
+        "NMS": "NASDAQ",
+        "NGM": "NASDAQ",
+        "NCM": "NASDAQ",
+        "NAS": "NASDAQ",
+        "NYQ": "NYSE",
+        "NYE": "NYSE",
+    }.get(label, label)

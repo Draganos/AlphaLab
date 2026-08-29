@@ -3,6 +3,7 @@
 from datetime import date, datetime
 import hashlib
 import json
+import math
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -139,14 +140,20 @@ class MarketScreenerService:
             )
         repository = Phase3Repository(self.engine)
         for security in metadata:
+            theme_source = (
+                security.metadata_source
+                or security.metadata_provider
+                or "stored-security-metadata"
+            )
+            derived_theme_source = f"auto-derived-business-metadata:{theme_source}"
             repository.save_themes(
                 security.ticker,
                 derive_themes(
                     security.business_description,
-                    security.metadata_source
-                    or security.metadata_provider
-                    or "stored-security-metadata",
+                    derived_theme_source,
                 ),
+                source=derived_theme_source,
+                source_prefix="auto-derived-business-metadata:",
             )
         base = {
             item.ticker: item
@@ -166,7 +173,8 @@ class MarketScreenerService:
                         .order_by(Price.date)
                     )
                 )
-                price = prices[-1] if prices else None
+                usable_prices = [item for item in prices if _usable_close(item) is not None]
+                price = usable_prices[-1] if usable_prices else None
                 fundamentals = list(
                     session.scalars(
                         select(Fundamental)
@@ -203,12 +211,7 @@ class MarketScreenerService:
                         .order_by(Estimate.observation_date)
                     )
                 )
-                latest_period = max(
-                    (item.fiscal_period for item in estimates), default=None
-                )
-                estimates = [
-                    item for item in estimates if item.fiscal_period == latest_period
-                ]
+                estimates = _select_estimate_series(estimates, evaluation)
                 latest_estimate = estimates[-1] if estimates else None
                 estimate_frame = pd.DataFrame(
                     [
@@ -226,13 +229,7 @@ class MarketScreenerService:
                     ]
                 )
                 revisions = calculate_revision_factors(estimate_frame, evaluation)
-                current_price = (
-                    price.adjusted_close
-                    if price and price.adjusted_close is not None
-                    else price.close
-                    if price
-                    else None
-                )
+                current_price = _usable_close(price)
                 valuation = calculate_valuation_factors(
                     price=current_price,
                     shares=fundamental.shares_outstanding if fundamental else None,
@@ -245,8 +242,18 @@ class MarketScreenerService:
                     cash=fundamental.cash if fundamental else None,
                 )
                 quality = calculate_quality_factors(
-                    _fundamental_values(fundamental, security.market_cap),
-                    _fundamental_values(prior, security.market_cap),
+                    _fundamental_values(
+                        fundamental,
+                        valuation["market_cap"]
+                        if valuation["market_cap"] is not None
+                        else security.market_cap,
+                    ),
+                    _fundamental_values(
+                        prior,
+                        valuation["market_cap"]
+                        if valuation["market_cap"] is not None
+                        else security.market_cap,
+                    ),
                 )
                 ethics = session.scalar(
                     select(EthicalEvaluation)
@@ -416,7 +423,11 @@ class MarketScreenerService:
             ticker=ticker,
             company=security.company_name,
             price=data["price"],
-            market_cap=data["valuation"]["market_cap"] or security.market_cap,
+            market_cap=(
+                data["valuation"]["market_cap"]
+                if data["valuation"]["market_cap"] is not None
+                else security.market_cap
+            ),
             country=security.country,
             exchange=security.exchange,
             sector=security.sector,
@@ -465,13 +476,20 @@ class MarketScreenerService:
 def _live_data_quality_reason(
     prices: list[Price], evaluation: date, settings: Settings
 ) -> str:
-    if not prices:
+    usable = [item for item in prices if _usable_close(item) is not None]
+    if not usable:
         return "missing price"
-    if (evaluation - prices[-1].date).days > settings.data_quality["stale_price_days"]:
+    if (evaluation - usable[-1].date).days > settings.data_quality["stale_price_days"]:
         return "stale price"
-    if len(prices) < 22:
+    if len(usable) < 22:
         return "insufficient history"
-    volumes = [item.volume for item in prices[-20:] if item.volume is not None]
+    volumes = [
+        item.volume
+        for item in usable[-20:]
+        if item.volume is not None
+        and math.isfinite(item.volume)
+        and item.volume >= 0
+    ]
     minimum = max(
         settings.strategy.minimum_average_daily_volume,
         settings.data_quality.get("live_minimum_average_daily_volume", 100_000),
@@ -479,6 +497,45 @@ def _live_data_quality_reason(
     if minimum > 0 and (not volumes or sum(volumes) / len(volumes) < minimum):
         return "liquidity rule"
     return "valid"
+
+
+def _usable_close(price: Price | None) -> float | None:
+    if price is None:
+        return None
+    for value in (price.adjusted_close, price.close):
+        if value is not None and math.isfinite(value) and value > 0:
+            return float(value)
+    return None
+
+
+def _select_estimate_series(
+    estimates: list[Estimate], evaluation: date
+) -> list[Estimate]:
+    """Choose the nearest non-expired forecast and one deterministic provider."""
+    usable = [
+        item
+        for item in estimates
+        if item.observation_date <= evaluation and item.fiscal_period >= evaluation
+    ]
+    if not usable:
+        return []
+    period = min(item.fiscal_period for item in usable)
+    period_rows = [item for item in usable if item.fiscal_period == period]
+    provider = max(
+        {item.provider for item in period_rows},
+        key=lambda name: (
+            max(
+                item.observation_date
+                for item in period_rows
+                if item.provider == name
+            ),
+            name,
+        ),
+    )
+    return sorted(
+        (item for item in period_rows if item.provider == provider),
+        key=lambda item: (item.observation_date, item.id),
+    )
 
 
 def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
@@ -505,6 +562,9 @@ def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
             reference = raw.loc[eligible, column].dropna()
             if pd.isna(value) or reference.empty:
                 result.at[ticker, column] = float("nan")
+            elif (reference == value).any():
+                tied = result.loc[reference.index[reference == value], column]
+                result.at[ticker, column] = float(tied.mean())
             elif column in lower:
                 result.at[ticker, column] = float((reference >= value).mean() * 100)
             else:

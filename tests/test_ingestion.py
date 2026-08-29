@@ -3,7 +3,7 @@ import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from alpha_lab.database import create_schema, make_engine
-from alpha_lab.database.models import Fundamental, Price
+from alpha_lab.database.models import Fundamental, Price, Security
 from alpha_lab.database.queries import latest_fundamentals_as_of
 from alpha_lab.ingestion import IngestionService
 from alpha_lab.providers.base import MarketDataProvider
@@ -58,3 +58,21 @@ def test_fundamental_revisions_are_append_only_idempotent_and_point_in_time():
         assert before[0].source == "original filing"
         assert after[0].eps == 1.2
         assert after[0].source == "restated filing"
+
+
+def test_market_provider_cannot_replace_canonical_universe_exchange():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="ABC", exchange="NASDAQ"))
+        session.commit()
+
+    class ExchangeProvider(FakeProvider):
+        def get_company_info(self, ticker):
+            return {**super().get_company_info(ticker), "exchange": "NYQ"}
+
+    IngestionService(ExchangeProvider(), engine).ingest(
+        "ABC", date(2024, 1, 1), date(2024, 2, 1)
+    )
+    with Session(engine) as session:
+        assert session.get(Security, "ABC").exchange == "NASDAQ"

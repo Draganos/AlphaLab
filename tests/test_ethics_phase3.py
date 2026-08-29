@@ -236,3 +236,17 @@ def test_industry_aware_activity_classification(
         load_ethics_policy(),
     )
     assert result.ethical_status == expected
+
+
+def test_general_operating_business_respects_disabled_policy_switch():
+    policy = load_ethics_policy().model_copy(deep=True)
+    policy.allowed_categories["general_operating_business"] = False
+    result = evaluate_business(
+        BusinessEvidence(
+            ticker="GENERAL",
+            primary_business="Manufactures ordinary household equipment",
+            industry="Household Products",
+        ),
+        policy,
+    )
+    assert result.ethical_status == EthicalStatus.REVIEW

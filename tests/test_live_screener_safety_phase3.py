@@ -6,7 +6,13 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import Estimate, Fundamental, Price, Security
 from alpha_lab.screener import MarketScreenerService
-from alpha_lab.screener.service import CATEGORY_PROVENANCE, _merge_live_raw
+from alpha_lab.screener.service import (
+    CATEGORY_PROVENANCE,
+    _live_data_quality_reason,
+    _live_percentiles,
+    _merge_live_raw,
+    _select_estimate_series,
+)
 
 
 def test_category_provenance_mapping_is_semantically_correct():
@@ -15,6 +21,67 @@ def test_category_provenance_mapping_is_semantically_correct():
     assert CATEGORY_PROVENANCE["valuation"] == "fundamental"
     assert CATEGORY_PROVENANCE["business_quality"] == "fundamental"
     assert CATEGORY_PROVENANCE["ai_research"] == "ai"
+
+
+def test_invalid_price_rows_do_not_satisfy_live_history():
+    today = date.today()
+    prices = [
+        Price(
+            ticker="BAD",
+            date=today - timedelta(days=21 - offset),
+            close=(100 if offset == 21 else float("nan")),
+            adjusted_close=None,
+            volume=1_000_000,
+        )
+        for offset in range(22)
+    ]
+    assert _live_data_quality_reason(prices, today, load_settings()) == "insufficient history"
+
+
+def test_estimates_use_one_provider_and_nearest_unexpired_period():
+    today = date.today()
+    rows = [
+        Estimate(
+            id=identifier,
+            ticker="X",
+            observation_date=observation,
+            fiscal_period=period,
+            consensus_eps=value,
+            provider=provider,
+        )
+        for identifier, observation, period, value, provider in [
+            (1, today - timedelta(days=60), today - timedelta(days=1), 1, "old"),
+            (2, today - timedelta(days=30), today + timedelta(days=100), 2, "A"),
+            (3, today, today + timedelta(days=100), 3, "A"),
+            (4, today - timedelta(days=1), today + timedelta(days=100), 99, "B"),
+            (5, today, today + timedelta(days=365), 50, "A"),
+        ]
+    ]
+    selected = _select_estimate_series(rows, today)
+    assert {row.provider for row in selected} == {"A"}
+    assert [row.consensus_eps for row in selected] == [2, 3]
+    assert all(row.fiscal_period >= today for row in selected)
+
+
+def test_expired_forecast_period_produces_no_live_estimate_series():
+    today = date.today()
+    expired = Estimate(
+        id=1,
+        ticker="X",
+        observation_date=today - timedelta(days=30),
+        fiscal_period=today - timedelta(days=1),
+        consensus_eps=2,
+        provider="fixture",
+    )
+    assert _select_estimate_series([expired], today) == []
+
+
+def test_non_pass_exact_tie_receives_reference_average_tie_percentile():
+    import pandas as pd
+
+    raw = pd.DataFrame({"pe": [10.0, 10.0, 10.0]}, index=["A", "B", "REVIEW"])
+    scored = _live_percentiles(raw, ["A", "B"])
+    assert scored.loc["REVIEW", "pe"] == scored.loc["A", "pe"]
 
 
 def test_live_raw_values_override_unavailable_historical_overlap():
@@ -94,6 +161,7 @@ def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
                     cash=5,
                     total_equity=50,
                     shares_outstanding=10,
+                    dividends_paid=-12.9,
                     provider="fixture",
                     source="fixture-fundamentals",
                     observation_hash="known",
@@ -153,6 +221,8 @@ def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
         assert records["VALID"].raw_metrics["ebitda_margin"] == 0.2
         assert records["VALID"].raw_metrics["net_margin"] == 0.1
         assert records["VALID"].raw_metrics["roe"] == 0.2
+        assert records["VALID"].market_cap == 1290
+        assert records["VALID"].raw_metrics["dividend_yield"] == 0.01
         assert records["VALID"].category_coverage["business_quality"] < 1
         assert records["VALID"].overall_live_coverage < 0.7
         assert records["VALID"].data_quality_status == "valid"

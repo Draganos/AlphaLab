@@ -51,3 +51,19 @@ def test_full_universe_is_stored_and_limited_subset_is_exchange_balanced(tmp_pat
             assert subset[:4] == ["Q000", "N000", "Q001", "N001"]
     finally:
         engine.dispose()
+
+
+def test_enrichment_preserves_canonical_exchange_and_research_membership(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'canonical.db'}")
+    try:
+        create_schema(engine)
+        service = UniverseIngestionService(FixtureUniverse(), engine)
+        service.load()
+        assert service.enrich([{"ticker": "Q000", "exchange": "NMS", "sector": "Tech"}]) == 1
+        assert service.enrich([{"ticker": "N000", "exchange": "NYQ", "sector": "Finance"}]) == 1
+        with Session(engine) as session:
+            assert session.get(Security, "Q000").exchange == "NASDAQ"
+            assert session.get(Security, "N000").exchange == "NYSE"
+        assert {"Q000", "N000"} <= set(service.research_tickers(limit=None))
+    finally:
+        engine.dispose()

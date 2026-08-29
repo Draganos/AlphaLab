@@ -10,6 +10,7 @@ from sqlalchemy import Engine
 from alpha_lab.database.models import Fundamental, Price, Security
 from alpha_lab.database.session import session_scope
 from alpha_lab.providers.base import MarketDataProvider
+from alpha_lab.ingestion.universe import _canonical_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class IngestionService:
     def ingest(self, ticker: str, start: date, end: date) -> None:
         symbol = ticker.upper().strip()
         info = self.provider.get_company_info(symbol)
+        info["exchange"] = _canonical_exchange(info.get("exchange"))
         prices = self.provider.get_price_history(symbol, start, end)
         financials = self.provider.get_financials(symbol)
         provider_name = self.provider.provider_name
@@ -33,6 +35,11 @@ class IngestionService:
             else:
                 for key, value in info.items():
                     if key != "ticker" and value is not None:
+                        if key == "exchange" and security.exchange in {
+                            "NASDAQ",
+                            "NYSE",
+                        }:
+                            continue
                         setattr(security, key, value)
             security.metadata_updated_at = datetime.now(UTC)
             for index, row in prices.iterrows():

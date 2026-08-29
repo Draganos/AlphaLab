@@ -32,7 +32,7 @@ try:
             )
             for key in list(st.session_state):
                 del st.session_state[key]
-            st.session_state["loaded_screen"] = payload
+            st.session_state["active_screen"] = payload
             st.rerun()
         rename = c2.text_input("Rename to")
         if c2.button("Rename") and selected_saved and rename:
@@ -41,7 +41,7 @@ try:
         if c3.button("Delete") and selected_saved:
             repository.delete_screener(selected_saved)
             st.rerun()
-    loaded = ScreenCriteria.model_validate(st.session_state.pop("loaded_screen", {}))
+    loaded = ScreenCriteria.model_validate(st.session_state.get("active_screen", {}))
     query = st.text_input(
         "Natural-language pull search",
         placeholder="Find Sharia-preferred semiconductor companies with strong growth, low debt and score above 75",
@@ -53,24 +53,28 @@ try:
     exchanges = sorted({item.exchange for item in records if item.exchange})
     themes = sorted({theme for item in records for theme in item.themes})
     st.subheader("Structured filters")
+    sectors = sorted(set(sectors) | set(criteria.sectors))
+    industries = sorted(set(industries) | set(criteria.industries))
+    exchanges = sorted(set(exchanges) | set(criteria.exchanges))
+    themes = sorted(set(themes) | set(criteria.themes))
     row1 = st.columns(4)
     criteria.text_search = (
         row1[0].text_input("Company / ticker", value=criteria.text_search or "") or None
     )
     criteria.sectors = row1[1].multiselect(
-        "Sector", sectors, default=[v for v in criteria.sectors if v in sectors]
+        "Sector", sectors, default=criteria.sectors
     )
     criteria.industries = row1[2].multiselect(
         "Industry",
         industries,
-        default=[v for v in criteria.industries if v in industries],
+        default=criteria.industries,
     )
     criteria.exchanges = row1[3].multiselect(
-        "Exchange", exchanges, default=[v for v in criteria.exchanges if v in exchanges]
+        "Exchange", exchanges, default=criteria.exchanges
     )
     row2 = st.columns(4)
     criteria.themes = row2[0].multiselect(
-        "Theme", themes, default=[v for v in criteria.themes if v in themes]
+        "Theme", themes, default=criteria.themes
     )
     criteria.ethical_status = row2[1].multiselect(
         "Sharia status",
@@ -145,6 +149,7 @@ try:
         )
         or None
     )
+    st.session_state["active_screen"] = criteria.model_dump()
     if query:
         st.json(criteria.model_dump())
     if criteria.unsupported:

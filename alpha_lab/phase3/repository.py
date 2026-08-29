@@ -63,8 +63,29 @@ class Phase3Repository:
                 )
             )
 
-    def save_themes(self, ticker: str, themes: list[ThemeEvidence]) -> None:
+    def save_themes(
+        self,
+        ticker: str,
+        themes: list[ThemeEvidence],
+        *,
+        source: str | None = None,
+        source_prefix: str | None = None,
+    ) -> None:
         with Session(self.engine) as session:
+            derived_source = source or (themes[0].source if themes else None)
+            if derived_source is not None:
+                current = {theme.theme for theme in themes}
+                source_filter = (
+                    BusinessTheme.source.startswith(source_prefix)
+                    if source_prefix
+                    else BusinessTheme.source == derived_source
+                )
+                statement = delete(BusinessTheme).where(
+                    BusinessTheme.ticker == ticker, source_filter
+                )
+                if current:
+                    statement = statement.where(BusinessTheme.theme.not_in(current))
+                session.execute(statement)
             for theme in themes:
                 exists = session.scalar(
                     select(BusinessTheme.id).where(
@@ -77,7 +98,13 @@ class Phase3Repository:
                     session.add(BusinessTheme(ticker=ticker, **theme.model_dump()))
             session.commit()
 
-    def save_ai(self, ticker: str, result: AIResearchResult) -> AIResearchAnalysis:
+    def save_ai(
+        self,
+        ticker: str,
+        result: AIResearchResult,
+        *,
+        input_document_fingerprint: str | None = None,
+    ) -> AIResearchAnalysis:
         with Session(self.engine, expire_on_commit=False) as session:
             record = AIResearchAnalysis(
                 ticker=ticker,
@@ -93,7 +120,10 @@ class Phase3Repository:
                 provider=result.provider,
                 model=result.model,
                 prompt_version=result.prompt_version,
-                raw_output=result.raw_structured_output(),
+                raw_output={
+                    **result.raw_structured_output(),
+                    "input_document_fingerprint": input_document_fingerprint,
+                },
                 ai_rating=result.ai_rating,
                 confidence=result.confidence,
                 analysis_date=result.analysis_date,

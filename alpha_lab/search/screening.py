@@ -74,7 +74,11 @@ class DeterministicQueryInterpreter(QueryInterpretationProvider):
         lowered = query.casefold().strip()
         criteria = ScreenCriteria()
         criteria.sectors = sorted(
-            {value for word, value in _SECTORS.items() if word in lowered}
+            {
+                value
+                for word, value in _SECTORS.items()
+                if re.search(rf"\b{re.escape(word)}\b", lowered)
+            }
         )
         criteria.industries = sorted(
             {value for word, value in _INDUSTRIES.items() if word in lowered}
@@ -114,11 +118,11 @@ class DeterministicQueryInterpreter(QueryInterpretationProvider):
             "short interest": "short-interest history",
             "autonomous driving": "autonomous-driving exposure",
         }
-        criteria.unsupported = [
+        criteria.unsupported.extend(
             label for phrase, label in unsupported_terms.items() if phrase in lowered
-        ]
+        )
         criteria.unsupported.extend(_unsupported_comparisons(query))
-        return criteria
+        return ScreenCriteria.model_validate(criteria.model_dump())
 
 
 class OpenAIQueryInterpreter(QueryInterpretationProvider):
@@ -188,10 +192,15 @@ def apply_screen(
     filtered = [
         record.model_copy(deep=True) for record in records if _matches(record, criteria)
     ]
-    reverse = criteria.sort.endswith("_desc")
+    descending = criteria.sort.endswith("_desc")
     filtered.sort(
-        key=lambda item: (item.overall_score is not None, item.overall_score or -1),
-        reverse=reverse,
+        key=lambda item: (
+            item.overall_score is None,
+            (-item.overall_score if descending else item.overall_score)
+            if item.overall_score is not None
+            else 0,
+            item.ticker,
+        )
     )
     for rank, record in enumerate(filtered, 1):
         record.overall_rank = rank
@@ -255,15 +264,21 @@ def _score_threshold(text: str, criteria: ScreenCriteria) -> None:
         r"(?:score|rating)\s+(?:above|over|at least)\s+(\d+(?:\.\d+)?)", text
     )
     if score:
-        criteria.minimum_overall_score = float(score.group(1))
+        value = float(score.group(1))
+        if value <= 100:
+            criteria.minimum_overall_score = value
+        else:
+            criteria.unsupported.append(score.group(0))
     coverage = re.search(
         r"coverage\s+(?:above|over|at least)\s+(\d+(?:\.\d+)?)(%)?", text
     )
     if coverage:
         value = float(coverage.group(1))
-        criteria.minimum_coverage = (
-            value / 100 if coverage.group(2) or value > 1 else value
-        )
+        normalized = value / 100 if coverage.group(2) or value > 1 else value
+        if normalized <= 1:
+            criteria.minimum_coverage = normalized
+        else:
+            criteria.unsupported.append(coverage.group(0))
 
 
 def _market_cap(text: str, criteria: ScreenCriteria) -> None:

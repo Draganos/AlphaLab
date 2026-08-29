@@ -97,6 +97,19 @@ def test_zero_prior_estimate_is_unavailable_not_infinite():
     )
 
 
+def test_revision_calculation_never_mixes_estimate_providers():
+    data = pd.DataFrame(
+        {
+            "observation_date": [date(2026, 1, 1), date(2026, 3, 1)],
+            "consensus_eps": [1.0, 10.0],
+            "provider": ["A", "B"],
+        }
+    )
+    result = calculate_revision_factors(data, date(2026, 3, 1))
+    assert result["current_consensus_eps"] == 10
+    assert result["eps_revision_90d"] is None
+
+
 def test_coverage_and_quality_missing_are_not_zero():
     weights = {"growth": 0.5, "ai_research": 0.5}
     low = calculate_coverage(

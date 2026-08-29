@@ -27,6 +27,12 @@ class CSVSecurityUniverseProvider(SecurityUniverseProvider):
 
     def refresh_metadata(self, tickers: list[str]) -> list[dict[str, Any]]:
         wanted = {ticker.upper() for ticker in tickers}
+        frame = pd.read_csv(self.path)
+        if "ticker" not in frame:
+            raise ValueError("Universe CSV must include ticker")
+        clean = frame.astype(object).where(pd.notna(frame), None)
         return [
-            row for row in self.get_securities() if str(row["ticker"]).upper() in wanted
+            row
+            for row in clean.to_dict("records")
+            if str(row["ticker"]).upper() in wanted
         ]

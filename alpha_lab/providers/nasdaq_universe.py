@@ -1,6 +1,7 @@
 """Credential-free NASDAQ Trader universe discovery with explicit provenance."""
 
 from io import StringIO
+import re
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -88,14 +89,14 @@ class NasdaqTraderUniverseProvider(SecurityUniverseProvider):
 
 def _likely_common_stock(name: str) -> bool:
     lowered = name.casefold()
-    excluded = (
-        "warrant",
-        "rights",
-        " units",
-        "preferred",
-        "depositary",
-        "notes due",
-        "bond",
-        "fund",
+    excluded_tokens = (
+        r"\bwarrants?\b",
+        r"\brights?\b",
+        r"\bunits?\b",
+        r"\bpreferred\b",
+        r"\bdepositary\b",
+        r"\bnotes? due\b",
+        r"\bbonds?\b",
+        r"\bfunds?\b",
     )
-    return not any(term in lowered for term in excluded)
+    return not any(re.search(pattern, lowered) for pattern in excluded_tokens)

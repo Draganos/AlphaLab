@@ -1,6 +1,8 @@
 """Optional document-to-AI research workflow; absence or failure remains missing."""
 
 from collections import defaultdict
+import hashlib
+import json
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -35,10 +37,12 @@ class AIResearchService:
             grouped[document.ticker].append(document)
         stored = 0
         for ticker, rows in grouped.items():
-            document_ids = [row.id for row in rows]
-            if ticker in latest and sorted(
-                latest[ticker].source_document_ids
-            ) == sorted(document_ids):
+            input_fingerprint = _document_fingerprint(rows)
+            if (
+                ticker in latest
+                and latest[ticker].raw_output.get("input_document_fingerprint")
+                == input_fingerprint
+            ):
                 continue
             result = analyze_documents(
                 self.provider,
@@ -55,6 +59,24 @@ class AIResearchService:
                 ],
             )
             if result is not None:
-                Phase3Repository(self.engine).save_ai(ticker, result)
+                Phase3Repository(self.engine).save_ai(
+                    ticker, result, input_document_fingerprint=input_fingerprint
+                )
                 stored += 1
         return stored
+
+
+def _document_fingerprint(rows: list[CompanyDocument]) -> str:
+    payload = [
+        {
+            "id": row.id,
+            "date": row.document_date.isoformat(),
+            "title": row.title,
+            "text": row.text,
+            "source": row.source,
+        }
+        for row in rows
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()

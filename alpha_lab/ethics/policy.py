@@ -117,7 +117,10 @@ def evaluate_business(
         rule for rule, enabled in policy.allowed_categories.items() if enabled
     }:
         status = EthicalStatus.PASS
-    elif "general_operating_business" in tags:
+    elif (
+        "general_operating_business" in tags
+        and policy.allowed_categories.get("general_operating_business", False)
+    ):
         status = EthicalStatus.PASS
     else:
         status = (

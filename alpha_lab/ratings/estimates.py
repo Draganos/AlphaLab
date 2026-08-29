@@ -17,6 +17,17 @@ def calculate_revision_factors(
     )
     if frame.empty:
         return _empty()
+    if "provider" in frame:
+        providers = frame.loc[frame["provider"].notna(), "provider"].unique()
+        if len(providers):
+            provider = max(
+                providers,
+                key=lambda name: (
+                    frame.loc[frame["provider"] == name, "observation_date"].max(),
+                    str(name),
+                ),
+            )
+            frame = frame.loc[frame["provider"] == provider]
     current = frame.iloc[-1]
     result: dict[str, float | int | None] = {
         "current_consensus_eps": _number(current.get("consensus_eps")),
