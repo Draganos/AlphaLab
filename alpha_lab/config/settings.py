@@ -13,6 +13,8 @@ class StrategySettings(BaseModel):
     min_score: float = Field(70, ge=0, le=100)
     min_positions: int = Field(3, ge=1)
     max_positions: int = Field(10, ge=1)
+    minimum_data_coverage: float = Field(0.70, ge=0, le=1)
+    minimum_average_daily_volume: float = Field(0, ge=0)
 
     @model_validator(mode="after")
     def valid_position_range(self) -> "StrategySettings":
@@ -38,6 +40,25 @@ class CoverageSettings(BaseModel):
         return self
 
 
+class TransactionCostSettings(BaseModel):
+    fixed_commission: float = Field(0.0, ge=0)
+    percentage_commission: float = Field(0.001, ge=0)
+    spread: float = Field(0.001, ge=0, lt=1)
+    slippage: float = Field(0.0005, ge=0, lt=1)
+    minimum_trade_amount: float = Field(10.0, ge=0)
+
+
+class BacktestSettings(BaseModel):
+    initial_capital: float = Field(100_000, gt=0)
+    base_currency: str = "USD"
+    rebalance: str = "monthly"
+    weighting: str = "equal"
+    fractional_shares: bool = True
+    risk_free_rate: float = 0.0
+    execution: str = "next_available_open"
+    costs: TransactionCostSettings = Field(default_factory=TransactionCostSettings)
+
+
 class Settings(BaseModel):
     database_url: str = "sqlite:///data/alpha_lab.db"
     universe: dict[str, list[str]]
@@ -47,6 +68,7 @@ class Settings(BaseModel):
     risk: RiskSettings
     paper_trading: dict[str, float]
     data_quality: dict[str, int]
+    backtest: BacktestSettings
 
     @model_validator(mode="after")
     def weights_total_one(self) -> "Settings":

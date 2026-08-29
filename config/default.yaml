@@ -7,6 +7,8 @@ strategy:
   min_score: 70
   min_positions: 3
   max_positions: 10
+  minimum_data_coverage: 0.70
+  minimum_average_daily_volume: 0
 weights:
   earnings: 0.20
   revisions: 0.20
@@ -29,3 +31,17 @@ paper_trading:
   experimental_sleeve_max_after_validation: 0.10
 data_quality:
   stale_price_days: 5
+backtest:
+  initial_capital: 100000
+  base_currency: USD
+  rebalance: monthly
+  weighting: equal
+  fractional_shares: true
+  risk_free_rate: 0.0
+  execution: next_available_open
+  costs:
+    fixed_commission: 0.0
+    percentage_commission: 0.001
+    spread: 0.001
+    slippage: 0.0005
+    minimum_trade_amount: 10.0

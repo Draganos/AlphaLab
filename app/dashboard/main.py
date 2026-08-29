@@ -12,12 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
-from alpha_lab.database.models import Price, Security
-from alpha_lab.database.queries import latest_fundamentals_as_of
+from alpha_lab.database.models import Price
 from alpha_lab.database.session import make_engine
 from alpha_lab.data_quality import assess_freshness
-from alpha_lab.factors import calculate_factors, percentile_scores
-from alpha_lab.strategy import composite_score
+from alpha_lab.strategy import HistoricalScoringService, interpretation
 
 st.set_page_config(page_title="AlphaLab", page_icon="α", layout="wide")
 settings = load_settings()
@@ -27,44 +25,20 @@ engine = make_engine(settings.database_url)
 @st.cache_data(ttl=60)
 def build_screener() -> pd.DataFrame:
     evaluation_date = date.today()
-    with Session(engine) as session:
-        securities = session.scalars(select(Security)).all()
-        raw: dict[str, dict[str, float]] = {}
-        metadata: dict[str, Security] = {}
-        for security in securities:
-            prices = session.scalars(select(Price).where(Price.ticker == security.ticker).order_by(Price.date)).all()
-            fundamentals = latest_fundamentals_as_of(session, security.ticker, evaluation_date)
-            price_series = pd.Series({p.date: p.adjusted_close or p.close for p in prices}, dtype=float)
-            fund_frame = pd.DataFrame([{column: getattr(f, column) for column in
-                ["period", "publication_date", "ingested_at", "revenue", "ebitda", "net_income", "eps",
-                 "free_cash_flow", "total_debt", "cash", "total_equity"]} for f in fundamentals])
-            raw[security.ticker] = calculate_factors(price_series, fund_frame, evaluation_date)
-            metadata[security.ticker] = security
-    if not raw:
+    scores = HistoricalScoringService(engine, settings).score_universe_as_of(evaluation_date)
+    if not scores:
         return pd.DataFrame()
-    raw_frame = pd.DataFrame.from_dict(raw, orient="index")
-    scored = percentile_scores(raw_frame)
     rows = []
-    for ticker in scored.index:
-        categories = {
-            "earnings": scored.at[ticker, "eps_yoy_growth"] if "eps_yoy_growth" in scored else None,
-            "revisions": None,
-            "fundamentals": scored.loc[ticker, [c for c in ["revenue_yoy_growth", "ebitda_margin", "net_margin", "roe"] if c in scored]].mean(skipna=True),
-            "valuation": None,
-            "momentum": scored.loc[ticker, [c for c in ["return_3m", "return_6m", "momentum_12_1", "distance_ma200"] if c in scored]].mean(skipna=True),
-            "balance_sheet": scored.loc[ticker, [c for c in ["debt_to_ebitda"] if c in scored]].mean(skipna=True),
-            "ai": None, "dividend": None,
-        }
-        categories = {k: (None if pd.isna(v) else float(v)) for k, v in categories.items()}
-        result = composite_score(categories, settings.weights, evaluation_date, settings.coverage)
-        security = metadata[ticker]
-        rows.append({"Ticker": ticker, "Company": security.company_name, "Sector": security.sector,
-                     "Price": raw_frame.at[ticker, "last_price"] if "last_price" in raw_frame else None,
-                     "Composite score": result.score, "Raw interpretation": result.raw_interpretation,
-                     "Confidence label": result.confidence_label,
-                     "Data coverage": result.coverage, "EPS score": categories["earnings"],
-                     "Revision score": None, "Valuation score": None, "Momentum score": categories["momentum"],
-                     "Quality score": categories["fundamentals"], "Balance sheet score": categories["balance_sheet"],
+    for score in scores:
+        category = score.category_scores
+        rows.append({"Ticker": score.ticker, "Company": score.company, "Sector": score.sector,
+                     "Price": score.raw_factors.get("last_price"), "Composite score": score.score,
+                     "Raw interpretation": interpretation(score.score),
+                     "Confidence label": score.confidence_label, "Data coverage": score.coverage,
+                     "Eligibility": "Eligible" if score.eligible else f"Excluded: {score.exclusion_reason}",
+                     "EPS score": category["earnings"], "Revision score": None, "Valuation score": None,
+                     "Momentum score": category["momentum"], "Quality score": category["fundamentals"],
+                     "Balance sheet score": category["balance_sheet"],
                      "Dividend score": None, "AI score": None})
     return pd.DataFrame(rows)
 
