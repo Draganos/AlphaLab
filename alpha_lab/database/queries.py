@@ -5,7 +5,7 @@ from datetime import date
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from alpha_lab.database.models import Fundamental
+from alpha_lab.database.models import Estimate, Fundamental
 
 
 def latest_fundamentals_as_of_statement(ticker: str, as_of: date) -> Select[tuple[Fundamental]]:
@@ -29,3 +29,14 @@ def latest_fundamentals_as_of_statement(ticker: str, as_of: date) -> Select[tupl
 def latest_fundamentals_as_of(session: Session, ticker: str, as_of: date) -> list[Fundamental]:
     """Return point-in-time fundamental history without exposing later revisions."""
     return list(session.scalars(latest_fundamentals_as_of_statement(ticker, as_of)))
+
+
+def latest_estimates_as_of(session: Session, ticker: str, as_of: date) -> list[Estimate]:
+    """Return only estimate observations that existed by ``as_of``; no scoring is inferred."""
+    ranked = (select(Estimate.id.label("estimate_id"), func.row_number().over(
+        partition_by=(Estimate.ticker, Estimate.fiscal_period),
+        order_by=(Estimate.observation_date.desc(), Estimate.id.desc())).label("version_rank"))
+        .where(Estimate.ticker == ticker, Estimate.observation_date <= as_of).subquery())
+    statement = (select(Estimate).join(ranked, Estimate.id == ranked.c.estimate_id)
+                 .where(ranked.c.version_rank == 1).order_by(Estimate.fiscal_period))
+    return list(session.scalars(statement))

@@ -6,7 +6,7 @@ AlphaLab is a local, transparent quantitative investment-research application. P
 
 ## Phase status
 
-Phase 1 is a working vertical slice. Later phases—point-in-time backtesting and portfolio construction, estimate revisions and optional AI document analysis, UAE CSV ingestion and paper trading, then constrained experiments—are intentionally not represented by hollow implementations. The schema reserves their auditable records, but no dashboard result claims those capabilities today.
+Phase 1.5 provides the ingestion/scoring vertical slice. Phase 2 adds deterministic point-in-time backtesting, simple constrained portfolio construction, passive/manual/systematic comparisons, and expanding walk-forward validation. Estimate-revision scoring, AI analysis, UAE ingestion, brokerage execution, leverage, shorts, options, ML prediction, and parameter mining remain out of scope.
 
 ## Architecture
 
@@ -20,6 +20,11 @@ alpha_lab/
   strategy/        transparent composite score and contributions
   utils/           structured logging
 app/dashboard/     Streamlit screener and data-quality display
+alpha_lab/backtest/ next-open simulator, costs, benchmark, database runner
+alpha_lab/portfolio/eligibility and equal/score/inverse-volatility weights
+alpha_lab/analytics/finite-safe performance measures
+alpha_lab/validation/expanding walk-forward folds
+alpha_lab/experiments/passive/manual/systematic comparisons
 config/            editable strategy, universe, risk, and weight settings
 scripts/           schema initialization and real-data ingestion
 tests/             focused unit/integration tests
@@ -49,6 +54,7 @@ After dependencies have been installed, this exact workflow requires no market-d
 ```bash
 python scripts/init_db.py
 python scripts/smoke_test.py
+python scripts/smoke_test_phase2.py
 pytest
 streamlit run app/dashboard/main.py --server.headless true
 ```
@@ -90,6 +96,52 @@ pytest
 The Phase 1 suite covers database CRUD, idempotent ingestion, unknown publication dates, momentum and fundamental calculations, missing-data propagation, percentile ranking, scoring contributions, coverage, and configuration validation.
 The core suite uses in-memory or temporary SQLite databases and deterministic local CSV fixtures. It does not call yfinance or require network access; external-provider behavior is exercised through injected fakes.
 
+## Phase 2 backtesting
+
+Run a database-backed research backtest after loading the desired symbols and benchmark:
+
+```bash
+python scripts/load_us_data.py SPY NVDA MA AAL FTEC GDX --years 10
+python scripts/run_backtest.py --start 2023-01-01 --end 2025-12-31 --benchmark SPY --weighting equal
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python scripts/init_db.py
+python scripts/smoke_test.py
+python scripts/smoke_test_phase2.py
+pytest -v
+streamlit run app/dashboard/main.py
+```
+
+### Assumptions and controls
+
+- **No same-close execution:** a signal generated after the close on date T executes at the next available trading session's open. Weekends and missing dates are handled by the observed price calendar.
+- Prices and momentum are truncated at T. Fundamentals come from the append-only as-of query and require `publication_date <= T`; unknown dates remain unavailable. Estimates are not scored, and the estimate query permits only `observation_date <= T`.
+- `strategy.minimum_data_coverage` defaults to 70%. A raw score remains auditable below that threshold but is ineligible for systematic selection. Every omission carries an explicit reason.
+- Because Phase 2 deliberately does not fabricate revision, valuation, dividend, or AI histories, the currently implemented factor categories may provide less than 70% coverage for real securities. The honest default outcome can therefore be cash until richer point-in-time data exists; researchers may lower the threshold explicitly, but the lower-evidence status remains visible.
+- Portfolios are long-only, unlevered, and may remain partly or entirely in cash. Equal, score, and inverse-historical-volatility weighting respect position, sector, score, coverage, and portfolio-count constraints.
+- Costs include one fixed and percentage commission plus a single adverse execution-price adjustment composed of half the assumed spread and slippage. Passive and manual initial purchases use the same cost model as AlphaLab.
+- Daily NAV is cash plus holdings marked to the latest available close. The audit result contains rebalance candidates, exclusions, scores, coverage, targets, trades, costs, and cash history.
+- Performance analytics return `None`, not infinity, when volatility, downside, tracking error, duration, or benchmark overlap is insufficient.
+
+### Walk-forward validation
+
+`alpha_lab.validation` creates expanding, non-overlapping calibration/test folds and reports in-sample and out-of-sample metrics independently. It does not optimize thousands of combinations. An OOS/IS Sharpe ratio below 0.5—or an undefined comparison—reports **“No repeatable edge demonstrated.”**
+
+### Critical limitations
+
+> **SURVIVORSHIP BIAS RISK:** `data/universes/us_research_sample.csv` is a configurable present-day-style research list, not historical index membership. AlphaLab displays this limitation and does not claim to correct it.
+
+Phase 2 does not apply `membership_start` or `membership_end` columns during scoring. Those columns do not convert a CSV into validated historical membership data; enforcing dated membership remains future work.
+
+yfinance does not provide reliable point-in-time publication history for all fundamentals. Such records remain unavailable, so real-data Phase 2 tests may be mostly momentum-driven. Current estimate snapshots are never reconstructed into fictional revision histories. Results remain research/paper simulations, not investment advice or evidence of a repeatable edge.
+
 ## Phase 1.5 reliability fixes
 
 - Runtime and test dependency ranges were ambiguous; direct dependencies are now exact-version pinned.
@@ -121,9 +173,9 @@ The configured UAE universe is EMAAR, ALEC, DUBAIRESI, PARKIN, AIRARABIA, ALDAR,
 - Renormalized scores with low data coverage should not be compared as if they had complete evidence. Always inspect the coverage and breakdown.
 - Market data may be delayed, adjusted, incomplete, or changed by its upstream provider. AlphaLab stores what the provider returned and never fills a missing observation with invented data.
 
-## Roadmap and backtests
+## Interpretation of backtests
 
-Phase 2 will introduce transaction-cost-aware, point-in-time portfolio simulation, passive benchmarks, and expanding-window walk-forward validation. Until then, AlphaLab makes no backtest or alpha claim. Any later backtest must use only information whose observation/publication date is on or before the simulated decision time, keep in-sample and out-of-sample performance separate, account for spread/slippage/commission, and disclose survivorship limitations.
+Phase 2 reports transaction-cost-aware, point-in-time portfolio simulations, passive benchmarks, and expanding-window walk-forward results. These are research measurements rather than alpha claims. Every backtest must use only information whose observation/publication date is on or before the simulated decision time, keep in-sample and out-of-sample performance separate, account for spread/slippage/commission, and disclose survivorship limitations.
 
 Historical performance—even when correctly computed—is not evidence that returns will persist. Data mining, regime changes, survivorship bias, revisions, implementation costs, and parameter instability can erase apparent outperformance. AlphaLab is deliberately designed to surface these limitations rather than optimize until a compelling chart appears.
 

@@ -41,3 +41,13 @@ def test_unknown_publication_date_is_unavailable_for_as_of_scoring():
     factors = calculate_factors(pd.Series([10.0], index=pd.to_datetime(["2024-01-01"])),
                                 pd.DataFrame([{"period": "2023-12-31", "eps": 5.0}]), "2024-02-01")
     assert "eps_yoy_growth" not in factors
+
+
+def test_future_price_cannot_change_historical_signal():
+    historical = pd.Series(np.arange(1, 301, dtype=float), index=pd.date_range("2023-01-01", periods=300))
+    with_future = pd.concat([historical, pd.Series([1_000_000.0], index=[pd.Timestamp("2025-01-01")])])
+    as_of = historical.index[-1]
+    first = calculate_factors(historical, pd.DataFrame(), as_of)
+    second = calculate_factors(with_future, pd.DataFrame(), as_of)
+    for key in first:
+        assert first[key] == second[key] or (np.isnan(first[key]) and np.isnan(second[key]))
