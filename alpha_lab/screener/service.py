@@ -33,6 +33,17 @@ from alpha_lab.strategy import HistoricalScoringService, coverage_interpretation
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.themes import derive_themes
 
+CATEGORY_PROVENANCE = {
+    "earnings_growth": "fundamental",
+    "analyst_revisions": "estimate",
+    "business_quality": "fundamental",
+    "valuation": "fundamental",
+    "momentum": "price",
+    "financial_strength": "fundamental",
+    "ai_research": "ai",
+    "shareholder_return": "fundamental",
+}
+
 
 class LiveResearchRecord(BaseModel):
     ticker: str
@@ -152,6 +163,7 @@ class MarketScreenerService:
                 estimates = [
                     item for item in estimates if item.fiscal_period == latest_period
                 ]
+                latest_estimate = estimates[-1] if estimates else None
                 estimate_frame = pd.DataFrame(
                     [
                         {
@@ -221,6 +233,7 @@ class MarketScreenerService:
                     "valuation": valuation,
                     "quality": quality,
                     "revisions": revisions,
+                    "estimate_row": latest_estimate,
                     "ethical_status": ethics.ethical_status if ethics else "REVIEW",
                     "ai": ai,
                     "themes": themes,
@@ -230,7 +243,12 @@ class MarketScreenerService:
             return []
         raw = pd.DataFrame.from_dict(
             {
-                ticker: {**data["valuation"], **data["revisions"], **data["quality"]}
+                ticker: {
+                    **data["valuation"],
+                    **data["revisions"],
+                    **data["quality"],
+                    **(base[ticker].raw_factors if ticker in base else {}),
+                }
                 for ticker, data in rows.items()
             },
             orient="index",
@@ -298,9 +316,18 @@ class MarketScreenerService:
                 percentile,
                 ["pe", "forward_pe", "price_sales", "ev_ebitda", "price_fcf"],
             ),
-            "momentum": base.category_scores.get("momentum")
-            if base and data["quality_reason"] == "valid"
-            else None,
+            "momentum": _mean(
+                percentile,
+                [
+                    "return_1m",
+                    "return_3m",
+                    "return_6m",
+                    "return_12m",
+                    "momentum_12_1",
+                    "distance_ma50",
+                    "distance_ma200",
+                ],
+            ),
             "financial_strength": _mean(
                 percentile,
                 [
@@ -390,6 +417,15 @@ class MarketScreenerService:
             provenance={
                 "price": _provenance(price),
                 "fundamental": _provenance(fundamental),
+                "estimate": _provenance(data["estimate_row"]),
+                "ai": {
+                    "provider": data["ai"].provider,
+                    "model": data["ai"].model,
+                    "document_ids": data["ai"].source_document_ids,
+                    "analysis_date": data["ai"].analysis_date.isoformat(),
+                }
+                if data["ai"]
+                else {},
                 "evaluation": {
                     "as_of": evaluation.isoformat(),
                     "mode": "present-day-live",
@@ -434,8 +470,21 @@ def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
         "net_debt",
         "debt_ebitda",
         "debt_equity",
+        "volatility",
+        "debt_to_ebitda",
     }
-    return percentile_scores(raw.loc[eligible], lower).reindex(raw.index)
+    result = percentile_scores(raw.loc[eligible], lower)
+    for ticker in raw.index.difference(eligible):
+        for column in raw.columns:
+            value = raw.at[ticker, column]
+            reference = raw.loc[eligible, column].dropna()
+            if pd.isna(value) or reference.empty:
+                result.at[ticker, column] = float("nan")
+            elif column in lower:
+                result.at[ticker, column] = float((reference >= value).mean() * 100)
+            else:
+                result.at[ticker, column] = float((reference <= value).mean() * 100)
+    return result.reindex(raw.index)
 
 
 def _mean(row: pd.Series, names: list[str]) -> float | None:
@@ -455,7 +504,8 @@ def _provenance(record) -> dict:
         for key, value in {
             "provider": getattr(record, "provider", None),
             "source": getattr(record, "source", None),
-            "observation_date": getattr(record, "date", None),
+            "observation_date": getattr(record, "observation_date", None)
+            or getattr(record, "date", None),
             "publication_date": getattr(record, "publication_date", None),
             "ingested_at": getattr(record, "ingested_at", None),
         }.items()

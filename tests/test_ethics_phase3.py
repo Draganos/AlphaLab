@@ -1,3 +1,4 @@
+import pytest
 from alpha_lab.ethics import (
     BusinessEvidence,
     EthicalStatus,
@@ -155,3 +156,83 @@ def test_bank_tags_and_generic_bank_industry_are_excluded():
     )
     assert tagged.ethical_status == EthicalStatus.EXCLUDED
     assert generic.ethical_status == EthicalStatus.EXCLUDED
+
+
+@pytest.mark.parametrize(
+    ("ticker", "industry", "description", "expected"),
+    [
+        (
+            "TOB",
+            "Tobacco",
+            "Manufactures and sells cigarettes and cigars",
+            EthicalStatus.EXCLUDED,
+        ),
+        (
+            "CAS",
+            "Gambling",
+            "Operates casino resorts and sportsbooks",
+            EthicalStatus.EXCLUDED,
+        ),
+        (
+            "ALC",
+            "Beverages - Wineries & Distilleries",
+            "Produces and distributes spirits",
+            EthicalStatus.EXCLUDED,
+        ),
+        (
+            "ARM",
+            "Aerospace & Defense",
+            "Manufactures missile systems, weapons and munitions",
+            EthicalStatus.EXCLUDED,
+        ),
+        (
+            "AERO",
+            "Aerospace & Defense",
+            "Supplies non-weapon aerospace components for commercial aircraft",
+            EthicalStatus.REVIEW,
+        ),
+        (
+            "PAY2",
+            "Payment Processing",
+            "Operates payment processing and network infrastructure",
+            EthicalStatus.PASS,
+        ),
+        (
+            "LEND",
+            "Payment Processing",
+            "Operates payments and consumer lending as its primary business",
+            EthicalStatus.EXCLUDED,
+        ),
+        (
+            "AIR2",
+            "Airlines",
+            "Provides scheduled passenger air transportation and serves alcoholic beverages onboard",
+            EthicalStatus.PASS,
+        ),
+        (
+            "ADULT",
+            "Adult Entertainment",
+            "Operates adult entertainment venues",
+            EthicalStatus.EXCLUDED,
+        ),
+        (
+            "PORK",
+            "Pork Processing",
+            "Pork processing is the primary business",
+            EthicalStatus.EXCLUDED,
+        ),
+    ],
+)
+def test_industry_aware_activity_classification(
+    ticker, industry, description, expected
+):
+    result = evaluate_business(
+        BusinessEvidence(
+            ticker=ticker,
+            primary_business=description,
+            sector="Financials" if "Payment" in industry else "Industrials",
+            industry=industry,
+        ),
+        load_ethics_policy(),
+    )
+    assert result.ethical_status == expected

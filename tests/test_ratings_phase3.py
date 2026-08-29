@@ -89,3 +89,4 @@ def test_excluded_extreme_does_not_contaminate_investable_percentiles():
     with_excluded = _live_percentiles(raw, ["A", "B"])
     without_excluded = _live_percentiles(raw.loc[["A", "B"]], ["A", "B"])
     assert with_excluded.loc["A", "pe"] == without_excluded.loc["A", "pe"]
+    assert with_excluded.loc["EXCLUDED", "pe"] == 100

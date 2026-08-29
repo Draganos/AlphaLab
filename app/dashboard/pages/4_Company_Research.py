@@ -8,6 +8,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
 from alpha_lab.screener import MarketScreenerService
+from alpha_lab.screener.service import CATEGORY_PROVENANCE
 
 st.set_page_config(page_title="AlphaLab Company Research", layout="wide")
 st.title("Company Research")
@@ -117,8 +118,9 @@ try:
                     "Metric": metric,
                     "Value": item.raw_metrics.get(metric),
                     "Percentile / normalized": item.percentile_metrics.get(metric),
-                    "Source": item.provenance.get("fundamental", {}).get("source")
-                    or item.provenance.get("price", {}).get("source"),
+                    "Source": item.provenance.get(
+                        CATEGORY_PROVENANCE[category], {}
+                    ).get("source"),
                 }
                 for metric in metric_groups[category]
                 if item.raw_metrics.get(metric) is not None

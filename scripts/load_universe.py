@@ -24,23 +24,10 @@ def main() -> None:
     try:
         create_schema(engine)
         service = UniverseIngestionService(NasdaqTraderUniverseProvider(), engine)
-        count = service.load(
-            country=args.market, exchanges=("NASDAQ", "NYSE"), limit=args.limit
-        )
-        print(f"Loaded {count} active non-ETF NYSE/NASDAQ symbols from NASDAQ Trader")
+        count = service.load(country=args.market, exchanges=("NASDAQ", "NYSE"))
+        print(f"Loaded the full {count}-symbol active non-ETF NYSE/NASDAQ directory")
         if not args.skip_enrichment:
-            from sqlalchemy import select
-            from sqlalchemy.orm import Session
-            from alpha_lab.database.models import Security
-
-            with Session(engine) as session:
-                tickers = list(
-                    session.scalars(
-                        select(Security.ticker)
-                        .order_by(Security.ticker)
-                        .limit(args.limit)
-                    )
-                )
+            tickers = service.research_tickers(limit=args.limit)
             provider = YFinanceProvider()
             enriched = []
             for ticker in tickers:

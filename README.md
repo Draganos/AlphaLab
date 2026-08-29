@@ -244,7 +244,7 @@ python scripts/load_universe.py --market US --limit 500
 python scripts/load_live_research.py --limit 500 --years 2
 ```
 
-`load_universe.py` reads the NASDAQ Trader symbol directories, filters their active non-test, non-ETF NYSE/NASDAQ listings, stores source provenance, and optionally enriches company, industry, market-cap, and business-description metadata through yfinance. Use `--skip-enrichment` for a symbols-only run. Provider errors remain visible and do not create invented metadata.
+`load_universe.py` reads and stores the full NASDAQ Trader active non-test, non-ETF NYSE/NASDAQ directory with source provenance. `--limit` applies only to expensive metadata enrichment, not symbol persistence. The enrichment subset alternates deterministically between NYSE and NASDAQ and orders each exchange by genuine stored market cap when available, otherwise ticker; it is exchange-balanced, not claimed to be liquid until price-volume evidence exists. Use `--skip-enrichment` for a symbols-only run. Provider errors remain visible and do not create invented metadata.
 
 The live investable percentile reference applies the configured stale-price, history, and liquidity checks before ranking; `data_quality.live_minimum_average_daily_volume` defaults to 100,000 shares. Securities that fail remain visible for audit but cannot distort valid live percentiles.
 

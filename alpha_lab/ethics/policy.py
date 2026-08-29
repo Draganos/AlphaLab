@@ -5,6 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 import hashlib
 import json
+import re
 
 from pydantic import BaseModel, Field
 import yaml
@@ -159,81 +160,189 @@ def _infer_business_tags(
     primary_business: str | None, sector: str | None = None, industry: str | None = None
 ) -> set[str]:
     """Conservatively classify explicit business descriptions, never ticker names."""
-    text = " ".join(
-        value or "" for value in (primary_business, sector, industry)
-    ).casefold()
-    if not text.strip():
+    description = (primary_business or "").casefold()
+    industry_text = (industry or "").casefold()
+    sector_text = (sector or "").casefold()
+    text = " ".join((description, sector_text, industry_text)).strip()
+    if not text:
         return set()
-    rules = {
-        "conventional_banking": (
-            "conventional bank",
-            "commercial bank",
-            "investment bank",
-            "bank holding company",
-            "banking services",
-            "accepts deposits",
-            "deposit-taking",
-            "deposit taking",
-            "commercial lending",
-            "deposits",
-            "banking products",
+    tags: set[str] = set()
+    payment = _matches_any(
+        text,
+        (
+            "payment processing",
+            "payment processor",
+            "payment network",
+            "merchant acquiring",
         ),
-        "interest_based_lending": (
-            "interest-based lending",
-            "interest based lending",
-            "mortgage lender",
-            "payday lender",
+    )
+    lending = _matches_any(
+        description,
+        (
+            "lending",
+            "lender",
+            "loans",
+            "consumer credit",
             "consumer finance",
-            "consumer lending",
-            "mortgage finance",
-            "credit lending",
+            "mortgage",
+            "credit finance",
             "specialty finance",
             "loan origination",
-            "provides loans",
-            "loans",
+            "commercial credit",
         ),
-        "weapons": (
-            "weapons manufacturing",
-            "firearms manufacturing",
-            "missile systems",
-            "ammunition",
-            "arms manufacturer",
-            "weapon systems",
-            "missile system",
+    ) or _matches_any(
+        industry_text,
+        ("lending", "consumer finance", "mortgage finance", "specialty finance"),
+    )
+    banking_industry = _matches_any(industry_text, ("bank", "banks", "banking"))
+    banking_description = _matches_any(
+        description,
+        (
+            "bank holding company",
+            "commercial bank",
+            "investment bank",
+            "banking services",
+            "accepts deposits",
+            "deposit taking",
+            "deposit-taking",
+            "banking products",
+            "operates a bank",
+            "is a bank",
+            "national bank",
+            "community bank",
+            "retail bank",
         ),
-        "gambling": ("casino operator", "gambling operator", "sports betting"),
-        "alcohol_production": ("alcohol producer", "brewery", "distillery"),
-        "tobacco": ("tobacco producer", "nicotine products"),
-        "adult_entertainment": ("adult entertainment",),
-        "pork_primary_business": ("pork producer", "pork processing"),
-        "payment_processing": ("payment processing", "payment processor"),
-        "payment_networks": ("payment network",),
-        "airlines": ("passenger aviation", "airline operator"),
-        "mixed_financial_services": ("financial services", "financial conglomerate"),
-        "conventional_insurance": (
-            "insurance carrier",
-            "life insurance",
-            "property insurance",
-        ),
-        "defence_non_weapon_supplier": (
-            "aerospace & defense",
-            "defence contractor",
-            "defense contractor",
-        ),
-    }
-    tags = {
-        tag
-        for tag, phrases in rules.items()
-        if any(phrase in text for phrase in phrases)
-    }
-    if industry and "bank" in industry.casefold():
+    ) or bool(re.search(r"^(?:a |an |the )?banks?\b", description))
+    if banking_industry or banking_description:
         tags.add("conventional_banking")
-    payment = bool(tags & {"payment_processing", "payment_networks"})
-    hard = bool(tags & {"conventional_banking", "interest_based_lending"})
-    if payment and not hard:
-        tags.discard("mixed_financial_services")
-    financial = "financial" in text or "bank" in text or "finance" in text
-    if financial and not payment and not hard:
+    if lending:
+        tags.add("interest_based_lending")
+    if payment:
+        tags.add(
+            "payment_processing"
+            if "processing" in text or "processor" in text
+            else "payment_networks"
+        )
+
+    weapons_terms = (
+        "weapon",
+        "weapons",
+        "firearm",
+        "firearms",
+        "ammunition",
+        "missile",
+        "missiles",
+        "munitions",
+        "combat weapons",
+        "military weapons systems",
+        "ordnance",
+    )
+    weapons_description = re.sub(
+        r"\b(?:non[- ]weapon|without weapons?)\b", "", description
+    )
+    defence_industry = _matches_any(
+        industry_text, ("aerospace & defense", "aerospace and defense", "defence")
+    )
+    arms_activity = _matches_any(
+        description, ("arms manufacturer", "arms manufacturing", "produces arms")
+    ) or (defence_industry and _matches_any(description, ("arms",)))
+    if (
+        _matches_any(weapons_description, weapons_terms)
+        or arms_activity
+        or _matches_any(
+            industry_text,
+            ("weapons", "firearms", "ammunition", "munitions", "ordnance"),
+        )
+    ):
+        tags.add("weapons")
+
+    if _matches_any(
+        industry_text, ("tobacco", "cigarettes", "nicotine")
+    ) or _matches_any(
+        description,
+        (
+            "tobacco",
+            "cigarette",
+            "cigarettes",
+            "cigar",
+            "cigars",
+            "nicotine",
+            "vaping",
+            "vape",
+        ),
+    ):
+        tags.add("tobacco")
+    gambling_industry = _matches_any(
+        industry_text, ("gambling", "casino", "sportsbook", "betting", "wagering")
+    )
+    gambling_description = _matches_any(
+        description,
+        ("gambling", "casino", "casinos", "sportsbook", "betting", "wagering"),
+    )
+    gaming_operator = "gaming operator" in description and gambling_industry
+    if gambling_industry or gambling_description or gaming_operator:
+        tags.add("gambling")
+    alcohol_industry = _matches_any(
+        industry_text, ("winery", "wineries", "distillery", "distilleries", "breweries")
+    )
+    alcohol_description = _matches_any(
+        description,
+        (
+            "brewery",
+            "breweries",
+            "brewer",
+            "distillery",
+            "distilleries",
+            "spirits producer",
+            "wine producer",
+            "winery",
+        ),
+    ) or (
+        "alcoholic beverages" in description
+        and _matches_any(description, ("produces", "manufactures", "brews", "distills"))
+    )
+    if alcohol_industry or alcohol_description:
+        tags.add("alcohol_production")
+    if _matches_any(
+        industry_text, ("adult entertainment", "pornography")
+    ) or _matches_any(
+        description,
+        ("adult entertainment", "pornographic", "pornography", "sexually explicit"),
+    ):
+        tags.add("adult_entertainment")
+    if _matches_any(industry_text, ("pork", "hog farming", "swine")) or _matches_any(
+        description,
+        (
+            "pork producer",
+            "pork processing",
+            "hog farming",
+            "raises hogs",
+            "swine production",
+        ),
+    ):
+        tags.add("pork_primary_business")
+
+    airline = _matches_any(
+        text,
+        ("passenger aviation", "airline operator", "airlines", "air transportation"),
+    )
+    if airline:
+        tags.add("airlines")
+    defence = defence_industry or _matches_any(
+        description, ("defence contractor", "defense contractor", "military supplier")
+    )
+    if defence and "weapons" not in tags:
+        tags.add("defence_non_weapon_supplier")
+    if _matches_any(
+        text, ("insurance carrier", "life insurance", "property insurance")
+    ):
+        tags.add("conventional_insurance")
+
+    hard_finance = bool(tags & {"conventional_banking", "interest_based_lending"})
+    financial = sector_text == "financials" or _matches_any(
+        industry_text, ("financial services", "finance")
+    )
+    if financial and not payment and not hard_finance:
         tags.add("mixed_financial_services")
     clearly_described = bool(
         primary_business and len(primary_business.strip()) >= 24 and industry
@@ -242,6 +351,14 @@ def _infer_business_tags(
         clearly_described
         and not financial
         and not (tags & {"defence_non_weapon_supplier"})
+        and not _matches_any(
+            industry_text, ("gaming", "beverages", "conglomerate", "miscellaneous")
+        )
     ):
         tags.add("general_operating_business")
     return tags
+
+
+def _matches_any(text: str, terms: tuple[str, ...]) -> bool:
+    """Match complete words/phrases so e.g. 'arms' does not match 'pharmaceuticals'."""
+    return any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text) for term in terms)

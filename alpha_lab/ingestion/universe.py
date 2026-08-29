@@ -3,7 +3,8 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session
 
 from alpha_lab.database.models import Security
 from alpha_lab.database.session import session_scope
@@ -22,8 +23,6 @@ class UniverseIngestionService:
         limit: int | None = None,
     ) -> int:
         rows = self.provider.get_securities(country=country, exchanges=exchanges)
-        if limit is not None:
-            rows = rows[:limit]
         with session_scope(self.engine) as session:
             for raw in rows:
                 values = _security_values(raw)
@@ -39,6 +38,43 @@ class UniverseIngestionService:
                         }:
                             setattr(existing, key, value)
         return len(rows)
+
+    def research_tickers(
+        self, *, limit: int | None, exchanges: tuple[str, ...] = ("NASDAQ", "NYSE")
+    ) -> list[str]:
+        """Select an exchange-balanced subset; market cap orders each exchange when known."""
+        with Session(self.engine) as session:
+            securities = list(
+                session.scalars(
+                    select(Security).where(Security.exchange.in_(exchanges))
+                )
+            )
+        groups: dict[str, list[Security]] = {exchange: [] for exchange in exchanges}
+        for security in securities:
+            groups.setdefault(security.exchange or "Unknown", []).append(security)
+        for values in groups.values():
+            values.sort(
+                key=lambda item: (
+                    item.market_cap is None,
+                    -(item.market_cap or 0),
+                    item.ticker,
+                )
+            )
+        ordered: list[str] = []
+        positions = {exchange: 0 for exchange in exchanges}
+        while any(
+            positions[exchange] < len(groups.get(exchange, []))
+            for exchange in exchanges
+        ):
+            for exchange in exchanges:
+                position = positions[exchange]
+                values = groups.get(exchange, [])
+                if position < len(values):
+                    ordered.append(values[position].ticker)
+                    positions[exchange] += 1
+                    if limit is not None and len(ordered) >= limit:
+                        return ordered
+        return ordered
 
     def enrich(self, metadata: list[dict[str, Any]]) -> int:
         with session_scope(self.engine) as session:
