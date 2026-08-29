@@ -182,3 +182,53 @@ Historical performance—even when correctly computed—is not evidence that ret
 ## Logging and safety
 
 Commands use structured JSON logging for lifecycle events and errors. API keys must be supplied only through environment variables and never committed. There is no leverage, margin, options, short selling, automatic stop-loss selling, or real-money execution in this release.
+
+## Phase 3 market discovery and research
+
+Phase 3 adds a scalable, provider-neutral market-discovery layer without changing Phase 2 backtest execution or accounting. `SecurityUniverseProvider`, `FundamentalDataProvider`, `EstimateProvider`, `CompanyDocumentProvider`, `BusinessClassificationProvider`, `ResearchNewsProvider`, and `AIResearchProvider` keep external integrations replaceable. The included CSV universe provider and deterministic fixtures work offline; optional credentialed providers may be added without becoming a core dependency.
+
+### Sharia-preferred methodology
+
+The versioned policy in `config/ethics.yaml` screens **primary business activity** into `PASS`, `REVIEW`, `EXCLUDED`, or `UNKNOWN`. Conventional banking/interest-based lending and weapon production are deterministic hard exclusions, along with the other enabled policy activities. Payment infrastructure is not treated as banking, and airlines are not excluded merely because they carry debt. Debt and interest exposure are displayed as warning metrics rather than silently becoming a business-activity exclusion. Manual allow/exclude lists are auditable; a manual allow cannot defeat a deterministic hard exclusion.
+
+> **Sharia-preferred screening is a configurable research filter and is not a religious ruling or formal certification.** Users remain responsible for their own investment and values decisions.
+
+When the ethical filter is enabled, portfolio construction defaults to `PASS` only and `EXCLUDED` securities cannot enter regardless of their investment score. `REVIEW`, `EXCLUDED`, and `UNKNOWN` companies remain researchable. Only eligible companies form the live investable percentile/rank reference universe.
+
+### Coverage and rating model
+
+The configurable live model weights Earnings & Growth (15%), Analyst Revisions (15%), Business Quality (15%), Valuation (15%), Momentum (15%), Financial Strength (10%), AI Research (10%), and Shareholder Return (5%). Missing inputs remain unavailable and available categories are transparently renormalized. The UI separately reports overall live, quantitative, AI, and historical point-in-time coverage. Live information is never retroactively admitted into a historical backtest.
+
+Timestamped estimate snapshots are append-only and idempotent. A 7/30/90-day revision exists only where at least two genuine observations support it; AlphaLab never reconstructs history from a current estimate. Valuation and quality helpers reject negative/zero invalid denominators rather than turning missing evidence into zero.
+
+### Pull search, themes, saved screens, and research pages
+
+The **Market Screener** page supports structured filters and a deterministic natural-language interpreter. The interpreter converts recognized phrases into visible `ScreenCriteria`; it never generates a ticker list. Database filtering supplies results, and unsupported requests are labeled **Unsupported / insufficient data**. Evidence-derived theme tags carry source and confidence. Saved screeners persist structured criteria locally and can be saved, loaded through the repository API, renamed, and deleted.
+
+The **Company Research** page shows category scores with raw metrics, coverage, confidence, provenance, the full Sharia-preferred values card, and evidence-bearing AI research. AI is optional and is an analyst layer only: structured Pydantic validation prohibits price-target language, evidence references and prompt/model versions are retained, and provider failure leaves AI missing without crashing screening. Python—not AI—enforces ethical eligibility, ranking, coverage, portfolio rules, and historical point-in-time constraints.
+
+Run all offline verification workflows:
+
+```bash
+python scripts/smoke_test.py
+python scripts/smoke_test_phase2.py
+python scripts/smoke_test_phase3.py
+pytest -v
+streamlit run app/dashboard/main.py --server.headless true
+```
+
+Windows PowerShell:
+
+```powershell
+python scripts/smoke_test.py
+python scripts/smoke_test_phase2.py
+python scripts/smoke_test_phase3.py
+pytest -v
+streamlit run app/dashboard/main.py --server.headless true
+```
+
+### Current provider and coverage limitations
+
+With the bundled provider, live prices and a subset of current company metadata/fundamentals may populate when yfinance and network access are available. Deterministic fixtures populate all smoke-test evidence but are never represented as real market data. Historical categories can populate only from stored prices and fundamentals with real publication dates; estimate revisions require AlphaLab's timestamped snapshots, and AI/document signals are not backfilled into history. Free sources do not consistently provide gross margin, ROIC, buybacks, dividend history, estimate dispersion, or attributable news for every company, so expected live coverage varies and is not promised at 100%. Historical coverage is normally lower. `UNKNOWN` remains `UNKNOWN`.
+
+A configured present-day universe can introduce **SURVIVORSHIP BIAS RISK** in historical research. CSV metadata supports hundreds or thousands of records, but AlphaLab does not claim historically correct index membership unless the supplied data actually establishes it. No paid credentials are required for tests, the application still starts without an AI key, and no Phase 3 feature performs brokerage execution, leverage, shorting, options, ML return prediction, or parameter mining.
