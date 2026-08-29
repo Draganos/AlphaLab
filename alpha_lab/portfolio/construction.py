@@ -15,6 +15,7 @@ class Candidate:
     stale_price: bool = False
     sufficient_history: bool = True
     liquid: bool = True
+    ethical_status: str = "UNKNOWN"
 
 
 @dataclass
@@ -29,8 +30,17 @@ class PortfolioTargets:
 
 
 def construct_portfolio(
-    candidates: list[Candidate], *, method: str, min_score: float, minimum_coverage: float,
-    min_positions: int, max_positions: int, max_position: float, max_sector: float | None,
+    candidates: list[Candidate],
+    *,
+    method: str,
+    min_score: float,
+    minimum_coverage: float,
+    min_positions: int,
+    max_positions: int,
+    max_position: float,
+    max_sector: float | None,
+    ethical_filter_enabled: bool = False,
+    allowed_ethical_statuses: tuple[str, ...] = ("PASS",),
 ) -> PortfolioTargets:
     """Select and weight candidates without forcing the configured minimum count."""
     if method not in {"equal", "score", "inverse_volatility"}:
@@ -38,7 +48,13 @@ def construct_portfolio(
     result = PortfolioTargets()
     eligible: list[Candidate] = []
     for candidate in candidates:
-        reason = _eligibility_reason(candidate, min_score, minimum_coverage)
+        reason = _eligibility_reason(
+            candidate,
+            min_score,
+            minimum_coverage,
+            ethical_filter_enabled,
+            allowed_ethical_statuses,
+        )
         if reason:
             result.excluded[candidate.ticker] = reason
         else:
@@ -48,7 +64,9 @@ def construct_portfolio(
     for candidate in eligible[max_positions:]:
         result.excluded[candidate.ticker] = "position limit"
     if len(selected) < min_positions:
-        result.notes.append(f"Only {len(selected)} of {min_positions} desired positions qualified; remainder is cash")
+        result.notes.append(
+            f"Only {len(selected)} of {min_positions} desired positions qualified; remainder is cash"
+        )
     raw = _raw_weights(selected, method)
     sector_used: dict[str, float] = {}
     for candidate in selected:
@@ -65,7 +83,18 @@ def construct_portfolio(
     return result
 
 
-def _eligibility_reason(candidate: Candidate, min_score: float, minimum_coverage: float) -> str | None:
+def _eligibility_reason(
+    candidate: Candidate,
+    min_score: float,
+    minimum_coverage: float,
+    ethical_filter_enabled: bool = False,
+    allowed_ethical_statuses: tuple[str, ...] = ("PASS",),
+) -> str | None:
+    if (
+        ethical_filter_enabled
+        and candidate.ethical_status not in allowed_ethical_statuses
+    ):
+        return f"ethical status {candidate.ethical_status.lower()}"
     if not candidate.has_price:
         return "missing price"
     if candidate.stale_price:
@@ -85,11 +114,24 @@ def _raw_weights(selected: list[Candidate], method: str) -> dict[str, float]:
     if method == "equal":
         values = {candidate.ticker: 1.0 for candidate in selected}
     elif method == "score":
-        values = {candidate.ticker: max(float(candidate.score or 0), 0.0) for candidate in selected}
+        values = {
+            candidate.ticker: max(float(candidate.score or 0), 0.0)
+            for candidate in selected
+        }
     else:
-        values = {candidate.ticker: (1 / candidate.volatility
-                  if candidate.volatility is not None and math.isfinite(candidate.volatility)
-                  and candidate.volatility > 0 else 0.0) for candidate in selected}
+        values = {
+            candidate.ticker: (
+                1 / candidate.volatility
+                if candidate.volatility is not None
+                and math.isfinite(candidate.volatility)
+                and candidate.volatility > 0
+                else 0.0
+            )
+            for candidate in selected
+        }
     total = sum(values.values())
-    return ({ticker: value / total for ticker, value in values.items()} if total > 0
-            else {candidate.ticker: 0.0 for candidate in selected})
+    return (
+        {ticker: value / total for ticker, value in values.items()}
+        if total > 0
+        else {candidate.ticker: 0.0 for candidate in selected}
+    )

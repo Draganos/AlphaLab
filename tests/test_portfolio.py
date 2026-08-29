@@ -36,3 +36,19 @@ def test_inverse_volatility_uses_only_supplied_historical_values():
         method="inverse_volatility", min_score=0, minimum_coverage=0, min_positions=1,
         max_positions=2, max_position=1, max_sector=None)
     assert result.weights["LOW"] == 2 / 3
+
+
+def test_ethical_filter_fails_closed_for_unevaluated_candidate():
+    result = construct_portfolio(
+        [Candidate("UNKNOWN", 90, 1)],
+        method="equal",
+        min_score=0,
+        minimum_coverage=0,
+        min_positions=1,
+        max_positions=1,
+        max_position=1,
+        max_sector=None,
+        ethical_filter_enabled=True,
+    )
+    assert result.weights == {}
+    assert result.excluded == {"UNKNOWN": "ethical status unknown"}

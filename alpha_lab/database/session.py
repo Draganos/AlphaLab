@@ -22,14 +22,49 @@ def create_schema(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     # Phase 1.5 additive migration for databases created by Phase 1. No data is rewritten.
     additions = {
-        "prices": {"currency": "VARCHAR(8)", "provider": "VARCHAR(64) DEFAULT 'unknown' NOT NULL",
-                   "source": "VARCHAR(512)", "ingested_at": "DATETIME"},
-        "fundamentals": {"currency": "VARCHAR(8)", "provider": "VARCHAR(64) DEFAULT 'unknown' NOT NULL",
-                         "source": "VARCHAR(512)", "ingested_at": "DATETIME"},
-        "estimates": {"currency": "VARCHAR(8)", "provider": "VARCHAR(64) DEFAULT 'unknown' NOT NULL",
-                      "source": "VARCHAR(512)", "ingested_at": "DATETIME"},
-        "factor_scores": {"score_version": "VARCHAR(32) DEFAULT 'legacy' NOT NULL",
-                          "config_hash": "VARCHAR(64) DEFAULT 'legacy' NOT NULL", "generated_at": "DATETIME"},
+        "securities": {
+            "industry": "VARCHAR(128)",
+            "market_cap": "FLOAT",
+            "business_description": "TEXT",
+            "metadata_provider": "VARCHAR(64)",
+            "metadata_source": "VARCHAR(512)",
+            "metadata_updated_at": "DATETIME",
+        },
+        "prices": {
+            "currency": "VARCHAR(8)",
+            "provider": "VARCHAR(64) DEFAULT 'unknown' NOT NULL",
+            "source": "VARCHAR(512)",
+            "ingested_at": "DATETIME",
+        },
+        "fundamentals": {
+            "currency": "VARCHAR(8)",
+            "provider": "VARCHAR(64) DEFAULT 'unknown' NOT NULL",
+            "source": "VARCHAR(512)",
+            "ingested_at": "DATETIME",
+            "gross_profit": "FLOAT",
+            "total_assets": "FLOAT",
+            "current_assets": "FLOAT",
+            "current_liabilities": "FLOAT",
+            "interest_expense": "FLOAT",
+            "dividends_paid": "FLOAT",
+            "share_repurchases": "FLOAT",
+        },
+        "estimates": {
+            "currency": "VARCHAR(8)",
+            "provider": "VARCHAR(64) DEFAULT 'unknown' NOT NULL",
+            "source": "VARCHAR(512)",
+            "ingested_at": "DATETIME",
+            "estimate_dispersion": "FLOAT",
+            "observation_hash": "VARCHAR(64)",
+        },
+        "factor_scores": {
+            "score_version": "VARCHAR(32) DEFAULT 'legacy' NOT NULL",
+            "config_hash": "VARCHAR(64) DEFAULT 'legacy' NOT NULL",
+            "generated_at": "DATETIME",
+        },
+        "ethical_evaluations": {
+            "evidence_fingerprint": "VARCHAR(64)",
+        },
     }
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:
@@ -38,8 +73,22 @@ def create_schema(engine: Engine) -> None:
                 existing = {column["name"] for column in inspector.get_columns(table)}
                 for name, definition in columns.items():
                     if name not in existing:
-                        connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'))
-            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_factor_scores_config_hash ON factor_scores (config_hash)"))
+                        connection.execute(
+                            text(
+                                f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'
+                            )
+                        )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_factor_scores_config_hash ON factor_scores (config_hash)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_estimates_observation_hash "
+                    "ON estimates (observation_hash) WHERE observation_hash IS NOT NULL"
+                )
+            )
 
 
 def _migrate_legacy_fundamentals(engine: Engine) -> None:
@@ -47,35 +96,57 @@ def _migrate_legacy_fundamentals(engine: Engine) -> None:
     inspector = inspect(engine)
     if "fundamentals" not in inspector.get_table_names():
         return
-    unique_sets = {tuple(item["column_names"]) for item in inspector.get_unique_constraints("fundamentals")}
+    unique_sets = {
+        tuple(item["column_names"])
+        for item in inspector.get_unique_constraints("fundamentals")
+    }
     columns = {item["name"] for item in inspector.get_columns("fundamentals")}
     if ("ticker", "period") not in unique_sets and "observation_hash" in columns:
         return
     with engine.begin() as connection:
         for index in inspect(connection).get_indexes("fundamentals"):
             connection.execute(text(f'DROP INDEX IF EXISTS "{index["name"]}"'))
-        connection.execute(text("ALTER TABLE fundamentals RENAME TO fundamentals_phase1_legacy"))
+        connection.execute(
+            text("ALTER TABLE fundamentals RENAME TO fundamentals_phase1_legacy")
+        )
         Fundamental.__table__.create(connection)
-        legacy_columns = {item["name"] for item in inspect(connection).get_columns("fundamentals_phase1_legacy")}
-        copy_columns = [column.name for column in Fundamental.__table__.columns
-                        if column.name in legacy_columns
-                        and column.name not in {"observation_hash", "provider", "ingested_at"}]
+        legacy_columns = {
+            item["name"]
+            for item in inspect(connection).get_columns("fundamentals_phase1_legacy")
+        }
+        copy_columns = [
+            column.name
+            for column in Fundamental.__table__.columns
+            if column.name in legacy_columns
+            and column.name not in {"observation_hash", "provider", "ingested_at"}
+        ]
         insert_columns = [*copy_columns, "provider", "ingested_at", "observation_hash"]
         names = ", ".join(f'"{name}"' for name in insert_columns)
         copied_values = [f'"{name}"' for name in copy_columns]
-        provider_value = "COALESCE(\"provider\", 'unknown')" if "provider" in legacy_columns else "'unknown'"
-        ingested_at_value = ("COALESCE(\"ingested_at\", CURRENT_TIMESTAMP)"
-                             if "ingested_at" in legacy_columns else "CURRENT_TIMESTAMP")
-        select_names = ", ".join([
-            *copied_values,
-            provider_value,
-            ingested_at_value,
-            "printf('legacy-%d', id)",
-        ])
-        connection.execute(text(
-            f"INSERT INTO fundamentals ({names}) "
-            f"SELECT {select_names} FROM fundamentals_phase1_legacy"
-        ))
+        provider_value = (
+            "COALESCE(\"provider\", 'unknown')"
+            if "provider" in legacy_columns
+            else "'unknown'"
+        )
+        ingested_at_value = (
+            'COALESCE("ingested_at", CURRENT_TIMESTAMP)'
+            if "ingested_at" in legacy_columns
+            else "CURRENT_TIMESTAMP"
+        )
+        select_names = ", ".join(
+            [
+                *copied_values,
+                provider_value,
+                ingested_at_value,
+                "printf('legacy-%d', id)",
+            ]
+        )
+        connection.execute(
+            text(
+                f"INSERT INTO fundamentals ({names}) "
+                f"SELECT {select_names} FROM fundamentals_phase1_legacy"
+            )
+        )
         connection.execute(text("DROP TABLE fundamentals_phase1_legacy"))
 
 

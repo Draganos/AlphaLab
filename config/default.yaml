@@ -18,6 +18,16 @@ weights:
   balance_sheet: 0.10
   ai: 0.05
   dividend: 0.05
+rating_weights:
+  earnings_growth: 0.15
+  analyst_revisions: 0.15
+  business_quality: 0.15
+  valuation: 0.15
+  momentum: 0.15
+  financial_strength: 0.10
+  ai_research: 0.10
+  shareholder_return: 0.05
+ethics_policy_path: config/ethics.yaml
 coverage:
   insufficient_below: 0.40
   full_confidence_at: 0.70
@@ -31,6 +41,7 @@ paper_trading:
   experimental_sleeve_max_after_validation: 0.10
 data_quality:
   stale_price_days: 5
+  live_minimum_average_daily_volume: 100000
 backtest:
   initial_capital: 100000
   base_currency: USD
