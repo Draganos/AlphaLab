@@ -3,6 +3,9 @@
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any
+import json
+import os
+from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -117,6 +120,78 @@ class DeterministicAIResearchProvider(AIResearchProvider):
         )
 
 
+class OpenAIResearchProvider(AIResearchProvider):
+    """Optional live analyst using only caller-supplied attributable documents."""
+
+    def __init__(self, api_key: str, model: str = "gpt-4.1-mini"):
+        self.api_key, self.model = api_key, model
+
+    def analyze(self, ticker: str, documents: list[dict[str, Any]]) -> AIResearchResult:
+        allowed_ids = {
+            int(document["id"])
+            for document in documents
+            if document.get("id") is not None
+        }
+        sources = [
+            {"id": document["id"], "text": str(document.get("text", ""))}
+            for document in documents
+            if document.get("id") is not None
+        ]
+        prompt = (
+            "Analyze only these attributable documents. Return JSON matching this schema exactly. "
+            "Scores are -2 to +2. risk_score is higher for greater risk. Never provide a price target. "
+            "Every evidence document_id must be one supplied.\nSchema: "
+            + json.dumps(AIResearchResult.model_json_schema())
+            + "\nTicker: "
+            + ticker
+            + "\nDocuments: "
+            + json.dumps(sources)
+        )
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+            }
+        ).encode()
+        request = Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=60) as response:  # noqa: S310 - fixed HTTPS endpoint
+            body = json.loads(response.read())
+        result = AIResearchResult.model_validate_json(
+            body["choices"][0]["message"]["content"]
+        )
+        if any(
+            reference.document_id not in allowed_ids for reference in result.evidence
+        ):
+            raise ValueError("AI returned evidence outside supplied documents")
+        return result.model_copy(
+            update={
+                "provider": "openai",
+                "model": self.model,
+                "prompt_version": "phase3-live-v1",
+            }
+        )
+
+
+def configured_ai_research_provider() -> AIResearchProvider | None:
+    if os.getenv(
+        "ALPHALAB_AI_PROVIDER", "disabled"
+    ).casefold() == "openai" and os.getenv("OPENAI_API_KEY"):
+        return OpenAIResearchProvider(
+            os.environ["OPENAI_API_KEY"], os.getenv("ALPHALAB_AI_MODEL", "gpt-4.1-mini")
+        )
+    return None
+
+
 def analyze_documents(
     provider: AIResearchProvider | None, ticker: str, documents: list[dict[str, Any]]
 ) -> AIResearchResult | None:
@@ -125,5 +200,5 @@ def analyze_documents(
         return None
     try:
         return provider.analyze(ticker, documents)
-    except (ValueError, TypeError, KeyError):
+    except Exception:
         return None

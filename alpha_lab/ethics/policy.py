@@ -43,6 +43,8 @@ class BusinessEvidence(BaseModel):
     evidence: list[dict[str, str]] = Field(default_factory=list)
     source: str | None = None
     financial_warnings: list[str] = Field(default_factory=list)
+    sector: str | None = None
+    industry: str | None = None
 
 
 class EthicalDecision(BaseModel):
@@ -59,6 +61,7 @@ class EthicalDecision(BaseModel):
     manual_override: bool = False
     manual_override_reason: str | None = None
     financial_warnings: list[str] = Field(default_factory=list)
+    evidence_fingerprint: str
 
 
 def load_ethics_policy(path: str | Path = "config/ethics.yaml") -> EthicsPolicy:
@@ -74,7 +77,14 @@ def evaluate_business(
     """Apply business-activity rules; debt warnings never trigger hard exclusion."""
     ticker = evidence.ticker.upper()
     tags = {_canonical(tag) for tag in evidence.business_tags}
-    tags.update(_infer_business_tags(evidence.primary_business))
+    tags.update(
+        _infer_business_tags(" ".join(evidence.business_tags).replace("_", " "))
+    )
+    tags.update(
+        _infer_business_tags(
+            evidence.primary_business, evidence.sector, evidence.industry
+        )
+    )
     hard = sorted(
         rule
         for rule, enabled in policy.hard_exclusions.items()
@@ -106,7 +116,7 @@ def evaluate_business(
         rule for rule, enabled in policy.allowed_categories.items() if enabled
     }:
         status = EthicalStatus.PASS
-    elif evidence.primary_business and tags:
+    elif "general_operating_business" in tags:
         status = EthicalStatus.PASS
     else:
         status = (
@@ -129,6 +139,7 @@ def evaluate_business(
         manual_override=manual_override,
         manual_override_reason=override_reason,
         financial_warnings=evidence.financial_warnings,
+        evidence_fingerprint=evidence_fingerprint(evidence),
     )
 
 
@@ -136,28 +147,59 @@ def _canonical(value: str) -> str:
     return value.strip().lower().replace("-", "_").replace(" ", "_")
 
 
-def _infer_business_tags(primary_business: str | None) -> set[str]:
+def evidence_fingerprint(evidence: BusinessEvidence) -> str:
+    """Hash only attributable classification inputs, not evaluation time."""
+    payload = json.dumps(
+        evidence.model_dump(), sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _infer_business_tags(
+    primary_business: str | None, sector: str | None = None, industry: str | None = None
+) -> set[str]:
     """Conservatively classify explicit business descriptions, never ticker names."""
-    if not primary_business:
+    text = " ".join(
+        value or "" for value in (primary_business, sector, industry)
+    ).casefold()
+    if not text.strip():
         return set()
-    text = primary_business.casefold()
     rules = {
         "conventional_banking": (
             "conventional bank",
             "commercial bank",
             "investment bank",
+            "bank holding company",
+            "banking services",
+            "accepts deposits",
+            "deposit-taking",
+            "deposit taking",
+            "commercial lending",
+            "deposits",
+            "banking products",
         ),
         "interest_based_lending": (
             "interest-based lending",
             "interest based lending",
             "mortgage lender",
             "payday lender",
+            "consumer finance",
+            "consumer lending",
+            "mortgage finance",
+            "credit lending",
+            "specialty finance",
+            "loan origination",
+            "provides loans",
+            "loans",
         ),
         "weapons": (
             "weapons manufacturing",
             "firearms manufacturing",
             "missile systems",
             "ammunition",
+            "arms manufacturer",
+            "weapon systems",
+            "missile system",
         ),
         "gambling": ("casino operator", "gambling operator", "sports betting"),
         "alcohol_production": ("alcohol producer", "brewery", "distillery"),
@@ -167,9 +209,39 @@ def _infer_business_tags(primary_business: str | None) -> set[str]:
         "payment_processing": ("payment processing", "payment processor"),
         "payment_networks": ("payment network",),
         "airlines": ("passenger aviation", "airline operator"),
+        "mixed_financial_services": ("financial services", "financial conglomerate"),
+        "conventional_insurance": (
+            "insurance carrier",
+            "life insurance",
+            "property insurance",
+        ),
+        "defence_non_weapon_supplier": (
+            "aerospace & defense",
+            "defence contractor",
+            "defense contractor",
+        ),
     }
-    return {
+    tags = {
         tag
         for tag, phrases in rules.items()
         if any(phrase in text for phrase in phrases)
     }
+    if industry and "bank" in industry.casefold():
+        tags.add("conventional_banking")
+    payment = bool(tags & {"payment_processing", "payment_networks"})
+    hard = bool(tags & {"conventional_banking", "interest_based_lending"})
+    if payment and not hard:
+        tags.discard("mixed_financial_services")
+    financial = "financial" in text or "bank" in text or "finance" in text
+    if financial and not payment and not hard:
+        tags.add("mixed_financial_services")
+    clearly_described = bool(
+        primary_business and len(primary_business.strip()) >= 24 and industry
+    )
+    if (
+        clearly_described
+        and not financial
+        and not (tags & {"defence_non_weapon_supplier"})
+    ):
+        tags.add("general_operating_business")
+    return tags

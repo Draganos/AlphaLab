@@ -3,6 +3,8 @@ from alpha_lab.ai.research import (
     AIResearchResult,
     DeterministicAIResearchProvider,
     analyze_documents,
+    OpenAIResearchProvider,
+    configured_ai_research_provider,
 )
 
 __all__ = [
@@ -10,4 +12,6 @@ __all__ = [
     "AIResearchResult",
     "DeterministicAIResearchProvider",
     "analyze_documents",
+    "OpenAIResearchProvider",
+    "configured_ai_research_provider",
 ]

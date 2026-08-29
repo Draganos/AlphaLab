@@ -13,7 +13,13 @@ from sqlalchemy.orm import Session  # noqa: E402
 from alpha_lab.ai import DeterministicAIResearchProvider, analyze_documents  # noqa: E402
 from alpha_lab.config import load_settings  # noqa: E402
 from alpha_lab.database import create_schema, make_engine  # noqa: E402
-from alpha_lab.database.models import CompanyDocument, Fundamental, Price, Security  # noqa: E402
+from alpha_lab.database.models import (  # noqa: E402
+    CompanyDocument,
+    Estimate,
+    Fundamental,
+    Price,
+    Security,
+)
 from alpha_lab.ethics import BusinessEvidence, evaluate_business, load_ethics_policy  # noqa: E402
 from alpha_lab.phase3 import Phase3Repository  # noqa: E402
 from alpha_lab.screener import MarketScreenerService  # noqa: E402
@@ -63,7 +69,7 @@ def main() -> None:
         engine = make_engine(f"sqlite:///{Path(directory) / 'phase3.db'}")
         try:
             create_schema(engine)
-            start = date(2024, 1, 1)
+            start = date.today() - timedelta(days=89)
             with Session(engine) as session:
                 for ticker, (
                     name,
@@ -108,7 +114,7 @@ def main() -> None:
                         Fundamental(
                             ticker=ticker,
                             period=date(2023, 12, 31),
-                            publication_date=date(2024, 2, 1),
+                            publication_date=date.today() - timedelta(days=30),
                             revenue=1_000,
                             gross_profit=500,
                             ebitda=300,
@@ -127,6 +133,46 @@ def main() -> None:
                             observation_hash=f"{ticker}-fundamental",
                         )
                     )
+                    session.add(
+                        Fundamental(
+                            ticker=ticker,
+                            period=date.today() - timedelta(days=730),
+                            publication_date=date.today() - timedelta(days=400),
+                            revenue=850,
+                            gross_profit=400,
+                            ebitda=240,
+                            ebit=200,
+                            net_income=150,
+                            eps=1.5,
+                            free_cash_flow=130,
+                            total_debt=120,
+                            cash=40,
+                            total_equity=500,
+                            total_assets=1_050,
+                            shares_outstanding=10,
+                            currency="USD",
+                            provider="fixture",
+                            source="phase3-smoke",
+                            observation_hash=f"{ticker}-fundamental-prior",
+                        )
+                    )
+                    for observation_date, estimate in (
+                        (date.today() - timedelta(days=30), 2.0),
+                        (date.today(), 2.2),
+                    ):
+                        session.add(
+                            Estimate(
+                                ticker=ticker,
+                                observation_date=observation_date,
+                                fiscal_period=date.today() + timedelta(days=365),
+                                consensus_eps=estimate,
+                                consensus_revenue=1_100 + estimate * 10,
+                                analyst_count=10,
+                                provider="fixture",
+                                source="phase3-smoke",
+                                observation_hash=f"{ticker}-{observation_date}",
+                            )
+                        )
                     session.add(
                         CompanyDocument(
                             ticker=ticker,
@@ -167,9 +213,9 @@ def main() -> None:
                 )
                 assert analysis is not None
                 repository.save_ai(ticker, analysis)
-            records = MarketScreenerService(engine, load_settings()).build_live_records(
-                date(2024, 3, 30)
-            )
+            records = MarketScreenerService(
+                engine, load_settings()
+            ).build_live_records()
             statuses = {item.ticker: item.ethical_status for item in records}
             assert statuses["BANK"] == statuses["ARMS"] == "EXCLUDED"
             assert statuses["AIR"] == statuses["PAY"] == "PASS"

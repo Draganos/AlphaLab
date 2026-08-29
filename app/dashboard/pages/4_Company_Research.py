@@ -45,11 +45,88 @@ try:
         }
     )
     st.subheader("Transparent category scorecards")
+    metric_groups = {
+        "earnings_growth": [
+            "eps_growth",
+            "revenue_growth",
+            "eps_yoy_growth",
+            "revenue_yoy_growth",
+        ],
+        "analyst_revisions": [
+            "current_consensus_eps",
+            "current_consensus_revenue",
+            "analyst_count",
+            "eps_revision_7d",
+            "eps_revision_30d",
+            "eps_revision_90d",
+            "revenue_revision_30d",
+        ],
+        "business_quality": [
+            "gross_margin",
+            "ebitda_margin",
+            "operating_margin",
+            "net_margin",
+            "fcf_margin",
+            "roe",
+            "roa",
+            "fcf_conversion",
+        ],
+        "valuation": [
+            "pe",
+            "forward_pe",
+            "price_sales",
+            "ev_ebitda",
+            "ev_sales",
+            "price_fcf",
+            "fcf_yield",
+            "earnings_yield",
+        ],
+        "momentum": [
+            "return_1m",
+            "return_3m",
+            "return_6m",
+            "return_12m",
+            "momentum_12_1",
+            "distance_ma50",
+            "distance_ma200",
+            "volatility",
+        ],
+        "financial_strength": [
+            "cash",
+            "total_debt",
+            "net_debt",
+            "debt_ebitda",
+            "debt_equity",
+            "current_ratio",
+            "interest_coverage",
+            "cash_flow_to_debt",
+        ],
+        "ai_research": [],
+        "shareholder_return": [
+            "dividend_yield",
+            "buyback_yield",
+            "total_shareholder_yield",
+        ],
+    }
     for category, score in item.category_scores.items():
         with st.expander(
             f"{category.replace('_', ' ').title()} — {'Unavailable' if score is None else f'{score:.1f}/100'}"
         ):
-            st.json(item.raw_metrics)
+            rows = [
+                {
+                    "Metric": metric,
+                    "Value": item.raw_metrics.get(metric),
+                    "Percentile / normalized": item.percentile_metrics.get(metric),
+                    "Source": item.provenance.get("fundamental", {}).get("source")
+                    or item.provenance.get("price", {}).get("source"),
+                }
+                for metric in metric_groups[category]
+                if item.raw_metrics.get(metric) is not None
+            ]
+            if rows:
+                st.dataframe(rows, width="stretch", hide_index=True)
+            else:
+                st.info("No attributable metrics are available for this category.")
     with Session(engine) as session:
         ethics = session.scalar(
             select(EthicalEvaluation)

@@ -91,3 +91,67 @@ def test_explicit_primary_business_cannot_silently_pass_without_tags():
     )
     assert bank.ethical_status == EthicalStatus.EXCLUDED
     assert weapons.ethical_status == EthicalStatus.EXCLUDED
+
+
+def test_generic_bank_and_lending_descriptions_are_never_silent_passes():
+    policy = load_ethics_policy()
+    descriptions = [
+        "A bank holding company offering deposits and loans",
+        "Provides banking services and commercial lending",
+        "Consumer finance and mortgage finance company",
+        "Specialty finance business providing credit lending",
+        "Investment banking and loan origination services",
+    ]
+    for index, description in enumerate(descriptions):
+        result = evaluate_business(
+            BusinessEvidence(
+                ticker=f"B{index}",
+                primary_business=description,
+                sector="Financials",
+                industry="Banks",
+            ),
+            policy,
+        )
+        assert result.ethical_status == EthicalStatus.EXCLUDED
+
+
+def test_ambiguous_financials_review_but_payment_infrastructure_passes():
+    policy = load_ethics_policy()
+    ambiguous = evaluate_business(
+        BusinessEvidence(
+            ticker="MIX",
+            primary_business="Diversified financial services",
+            sector="Financials",
+            industry="Financial Services",
+        ),
+        policy,
+    )
+    payment = evaluate_business(
+        BusinessEvidence(
+            ticker="PAY",
+            primary_business="Global payment network infrastructure",
+            sector="Financials",
+            industry="Payment Processing",
+        ),
+        policy,
+    )
+    assert ambiguous.ethical_status == EthicalStatus.REVIEW
+    assert payment.ethical_status == EthicalStatus.PASS
+
+
+def test_bank_tags_and_generic_bank_industry_are_excluded():
+    policy = load_ethics_policy()
+    tagged = evaluate_business(
+        BusinessEvidence(ticker="TAG", business_tags=["bank_holding_company"]), policy
+    )
+    generic = evaluate_business(
+        BusinessEvidence(
+            ticker="IND",
+            primary_business="Provides a broad range of services to customers",
+            sector="Financials",
+            industry="Regional Banks",
+        ),
+        policy,
+    )
+    assert tagged.ethical_status == EthicalStatus.EXCLUDED
+    assert generic.ethical_status == EthicalStatus.EXCLUDED

@@ -1,5 +1,5 @@
 from datetime import date
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from alpha_lab.database import create_schema, make_engine
@@ -48,3 +48,44 @@ def test_phase3_schema_additive_idempotent_and_estimate_snapshots(tmp_path):
         assert repository.list_screeners() == []
     finally:
         db_engine.dispose()
+
+
+def test_ethics_fingerprint_migration_is_additive_and_idempotent(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'phase3-current.db'}")
+    try:
+        create_schema(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text("DROP INDEX IF EXISTS ix_ethical_evaluations_evidence_fingerprint")
+            )
+            connection.execute(
+                text("ALTER TABLE ethical_evaluations DROP COLUMN evidence_fingerprint")
+            )
+            connection.execute(
+                text("INSERT INTO securities (ticker) VALUES ('LEGACY')")
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO ethical_evaluations "
+                    "(ticker, ethical_status, business_tags, exclusion_reasons, review_reasons, evidence, "
+                    "evaluated_at, policy_version, manual_override, financial_warnings) VALUES "
+                    "('LEGACY', 'REVIEW', '[]', '[]', '[]', '[]', CURRENT_TIMESTAMP, 'old-policy', 0, '[]')"
+                )
+            )
+        create_schema(engine)
+        create_schema(engine)
+        assert "evidence_fingerprint" in {
+            column["name"]
+            for column in inspect(engine).get_columns("ethical_evaluations")
+        }
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT COUNT(*) FROM ethical_evaluations WHERE ticker='LEGACY'"
+                    )
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()

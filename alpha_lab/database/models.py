@@ -218,6 +218,7 @@ class EthicalEvaluation(Base):
     manual_override: Mapped[bool] = mapped_column(Boolean, default=False)
     manual_override_reason: Mapped[str | None] = mapped_column(Text)
     financial_warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    evidence_fingerprint: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 class BusinessTheme(Base):

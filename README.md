@@ -232,3 +232,35 @@ streamlit run app/dashboard/main.py --server.headless true
 With the bundled provider, live prices and a subset of current company metadata/fundamentals may populate when yfinance and network access are available. Deterministic fixtures populate all smoke-test evidence but are never represented as real market data. Historical categories can populate only from stored prices and fundamentals with real publication dates; estimate revisions require AlphaLab's timestamped snapshots, and AI/document signals are not backfilled into history. Free sources do not consistently provide gross margin, ROIC, buybacks, dividend history, estimate dispersion, or attributable news for every company, so expected live coverage varies and is not promised at 100%. Historical coverage is normally lower. `UNKNOWN` remains `UNKNOWN`.
 
 A configured present-day universe can introduce **SURVIVORSHIP BIAS RISK** in historical research. CSV metadata supports hundreds or thousands of records, but AlphaLab does not claim historically correct index membership unless the supplied data actually establishes it. No paid credentials are required for tests, the application still starts without an AI key, and no Phase 3 feature performs brokerage execution, leverage, shorting, options, ML return prediction, or parameter mining.
+
+### Phase 3 review-correction workflows
+
+The live screener now performs deterministic ethical classification automatically from stored company descriptions, sectors, industries, and metadata provenance. An evaluation is reused only while both its evidence fingerprint and the deterministic `config/ethics.yaml` policy version remain unchanged. Unknown and mixed Financials businesses are `REVIEW`; explicit conventional banking, deposit/lending, consumer/mortgage/specialty-finance, and weapons activity is `EXCLUDED`. Payment networks/processors and attributable passenger-airline businesses remain allowed. Neither an AI result nor a high investment score can override a hard exclusion.
+
+Load a broad credential-free active US symbol universe, then enrich and load whatever current evidence the free provider genuinely returns:
+
+```bash
+python scripts/load_universe.py --market US --limit 500
+python scripts/load_live_research.py --limit 500 --years 2
+```
+
+`load_universe.py` reads the NASDAQ Trader symbol directories, filters their active non-test, non-ETF NYSE/NASDAQ listings, stores source provenance, and optionally enriches company, industry, market-cap, and business-description metadata through yfinance. Use `--skip-enrichment` for a symbols-only run. Provider errors remain visible and do not create invented metadata.
+
+The live investable percentile reference applies the configured stale-price, history, and liquidity checks before ranking; `data_quality.live_minimum_average_daily_volume` defaults to 100,000 shares. Securities that fail remain visible for audit but cannot distort valid live percentiles.
+
+For companies with adequate price history and two usable current fundamental periods, the free live workflow can generally populate the Growth, Quality, Valuation, Momentum, and Financial Strength categories—70% of the configured rating weight. Actual coverage varies by issuer and provider response and can be lower. Analyst Revisions require multiple genuine timestamped snapshots; AI Research requires attributable stored documents plus optional configuration; Shareholder Return requires genuine dividend/buyback evidence. None are manufactured to cross the 70% threshold. Fundamentals with unknown publication dates may support the **present-day live** screener but never historical scoring.
+
+Natural-language pull search uses a provider pipeline: user text → deterministic or optional AI interpretation → strict `ScreenCriteria` validation → deterministic database filtering. It supports overall score, coverage, sector, industry, theme, market cap, all eight category scores, debt/EBITDA, and Sharia status. Unsupported conditions are displayed rather than ignored, and the interpreter schema has no field capable of returning a stock list.
+
+Optional providers are disabled by default:
+
+```env
+ALPHALAB_QUERY_PROVIDER=deterministic
+ALPHALAB_AI_PROVIDER=disabled
+# To opt in explicitly:
+# ALPHALAB_QUERY_PROVIDER=openai
+# ALPHALAB_AI_PROVIDER=openai
+# OPENAI_API_KEY=...
+```
+
+The live AI provider consumes only stored `CompanyDocument` records, validates the existing strict evidence-bearing schema, rejects evidence IDs not supplied to it, and fails closed to missing AI. It never performs ethical classification or portfolio selection.

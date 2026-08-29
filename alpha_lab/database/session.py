@@ -62,6 +62,9 @@ def create_schema(engine: Engine) -> None:
             "config_hash": "VARCHAR(64) DEFAULT 'legacy' NOT NULL",
             "generated_at": "DATETIME",
         },
+        "ethical_evaluations": {
+            "evidence_fingerprint": "VARCHAR(64)",
+        },
     }
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:

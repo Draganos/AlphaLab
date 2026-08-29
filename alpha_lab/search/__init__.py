@@ -1,8 +1,21 @@
 from alpha_lab.search.screening import (
-    ScreenRecord,
+    DeterministicQueryInterpreter,
+    OpenAIQueryInterpreter,
+    QueryInterpretationProvider,
     ScreenCriteria,
+    ScreenRecord,
     apply_screen,
+    configured_query_interpreter,
     interpret_query,
 )
 
-__all__ = ["ScreenCriteria", "ScreenRecord", "apply_screen", "interpret_query"]
+__all__ = [
+    "DeterministicQueryInterpreter",
+    "OpenAIQueryInterpreter",
+    "QueryInterpretationProvider",
+    "ScreenCriteria",
+    "ScreenRecord",
+    "apply_screen",
+    "configured_query_interpreter",
+    "interpret_query",
+]

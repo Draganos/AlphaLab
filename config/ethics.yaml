@@ -18,6 +18,7 @@ allowed_categories:
   airlines: true
   payment_processing: true
   payment_networks: true
+  general_operating_business: true
 financial_screen:
   enforce_as_hard_filter: false
   display_debt_metrics: true

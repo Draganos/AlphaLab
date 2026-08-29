@@ -1,4 +1,4 @@
-"""Phase 3 market discovery page."""
+"""Phase 3 market discovery page with manual and validated natural-language filters."""
 
 import pandas as pd
 import streamlit as st
@@ -20,25 +20,135 @@ st.warning(
 settings = load_settings()
 engine = make_engine(settings.database_url)
 try:
-    records = MarketScreenerService(engine, settings).build_live_records()
+    repository = Phase3Repository(engine)
+    saved = repository.list_screeners()
+    with st.expander("Saved screeners", expanded=False):
+        names = [item.name for item in saved]
+        selected_saved = st.selectbox("Saved definition", [""] + names)
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Load") and selected_saved:
+            payload = next(
+                item.criteria for item in saved if item.name == selected_saved
+            )
+            for key in list(st.session_state):
+                del st.session_state[key]
+            st.session_state["loaded_screen"] = payload
+            st.rerun()
+        rename = c2.text_input("Rename to")
+        if c2.button("Rename") and selected_saved and rename:
+            repository.rename_screener(selected_saved, rename)
+            st.rerun()
+        if c3.button("Delete") and selected_saved:
+            repository.delete_screener(selected_saved)
+            st.rerun()
+    loaded = ScreenCriteria.model_validate(st.session_state.pop("loaded_screen", {}))
     query = st.text_input(
         "Natural-language pull search",
-        placeholder="Find Sharia-preferred semiconductor companies with strong growth and score above 75",
+        placeholder="Find Sharia-preferred semiconductor companies with strong growth, low debt and score above 75",
     )
-    criteria = interpret_query(query) if query else ScreenCriteria()
-    statuses = st.multiselect(
-        "Sharia screening status",
+    criteria = interpret_query(query) if query else loaded
+    records = MarketScreenerService(engine, settings).build_live_records()
+    sectors = sorted({item.sector for item in records if item.sector})
+    industries = sorted({item.industry for item in records if item.industry})
+    exchanges = sorted({item.exchange for item in records if item.exchange})
+    themes = sorted({theme for item in records for theme in item.themes})
+    st.subheader("Structured filters")
+    row1 = st.columns(4)
+    criteria.text_search = (
+        row1[0].text_input("Company / ticker", value=criteria.text_search or "") or None
+    )
+    criteria.sectors = row1[1].multiselect(
+        "Sector", sectors, default=[v for v in criteria.sectors if v in sectors]
+    )
+    criteria.industries = row1[2].multiselect(
+        "Industry",
+        industries,
+        default=[v for v in criteria.industries if v in industries],
+    )
+    criteria.exchanges = row1[3].multiselect(
+        "Exchange", exchanges, default=[v for v in criteria.exchanges if v in exchanges]
+    )
+    row2 = st.columns(4)
+    criteria.themes = row2[0].multiselect(
+        "Theme", themes, default=[v for v in criteria.themes if v in themes]
+    )
+    criteria.ethical_status = row2[1].multiselect(
+        "Sharia status",
         ["PASS", "REVIEW", "EXCLUDED", "UNKNOWN"],
-        default=criteria.ethical_status,
+        default=criteria.ethical_status or ["PASS"],
     )
-    criteria.ethical_status = statuses
+    criteria.minimum_overall_score = (
+        row2[2].number_input(
+            "Minimum overall rating",
+            0.0,
+            100.0,
+            float(criteria.minimum_overall_score or 0),
+        )
+        or None
+    )
+    criteria.minimum_coverage = row2[3].number_input(
+        "Minimum coverage",
+        0.0,
+        1.0,
+        float(
+            criteria.minimum_coverage
+            if criteria.minimum_coverage is not None
+            else settings.strategy.minimum_data_coverage
+        ),
+        0.05,
+    )
+    score_fields = [
+        ("Growth", "minimum_growth_score"),
+        ("Revisions", "minimum_revisions_score"),
+        ("Quality", "minimum_quality_score"),
+        ("Valuation", "minimum_valuation_score"),
+        ("Momentum", "minimum_momentum_score"),
+        ("Financial strength", "minimum_financial_strength_score"),
+        ("AI rating", "minimum_ai_research_score"),
+        ("Shareholder return", "minimum_shareholder_return_score"),
+    ]
+    columns = st.columns(4)
+    for index, (label, field) in enumerate(score_fields):
+        value = columns[index % 4].number_input(
+            f"Minimum {label}",
+            0.0,
+            100.0,
+            float(getattr(criteria, field) or 0),
+            key=field,
+        )
+        setattr(criteria, field, value or None)
+    row4 = st.columns(3)
+    criteria.minimum_market_cap = (
+        row4[0].number_input(
+            "Minimum market cap",
+            0.0,
+            value=float(criteria.minimum_market_cap or 0),
+            step=1e8,
+        )
+        or None
+    )
+    criteria.maximum_market_cap = (
+        row4[1].number_input(
+            "Maximum market cap (0 = none)",
+            0.0,
+            value=float(criteria.maximum_market_cap or 0),
+            step=1e8,
+        )
+        or None
+    )
+    criteria.maximum_debt_to_ebitda = (
+        row4[2].number_input(
+            "Maximum debt / EBITDA (0 = none)",
+            0.0,
+            value=float(criteria.maximum_debt_to_ebitda or 0),
+            step=0.25,
+        )
+        or None
+    )
     if query:
-        st.markdown("**Interpreted structured filters**")
         st.json(criteria.model_dump())
-        if criteria.unsupported:
-            st.error(
-                "Unsupported / insufficient data: " + ", ".join(criteria.unsupported)
-            )
+    if criteria.unsupported:
+        st.error("Unsupported / insufficient data: " + ", ".join(criteria.unsupported))
     screen_records = [
         ScreenRecord(
             ticker=item.ticker,
@@ -51,6 +161,13 @@ try:
             ethical_status=item.ethical_status,
             overall_score=item.overall_score,
             growth_score=item.category_scores.get("earnings_growth"),
+            revisions_score=item.category_scores.get("analyst_revisions"),
+            quality_score=item.category_scores.get("business_quality"),
+            valuation_score=item.category_scores.get("valuation"),
+            momentum_score=item.category_scores.get("momentum"),
+            financial_strength_score=item.category_scores.get("financial_strength"),
+            ai_research_score=item.category_scores.get("ai_research"),
+            shareholder_return_score=item.category_scores.get("shareholder_return"),
             debt_to_ebitda=item.raw_metrics.get("debt_ebitda"),
             market_cap=item.market_cap,
             coverage=item.overall_live_coverage,
@@ -59,39 +176,34 @@ try:
     ]
     selected = apply_screen(screen_records, criteria)
     indexed = {item.ticker: item for item in records}
-    rows = []
-    for item in selected:
-        detail = indexed[item.ticker]
-        rows.append(
-            {
-                "Ticker": item.ticker,
-                "Company": item.company_name,
-                "Price": detail.price,
-                "Market Cap": item.market_cap,
-                "Sector": item.sector,
-                "Industry": item.industry,
-                "Overall Rating": item.overall_score,
-                "Growth": detail.category_scores.get("earnings_growth"),
-                "Revisions": detail.category_scores.get("analyst_revisions"),
-                "Quality": detail.category_scores.get("business_quality"),
-                "Valuation": detail.category_scores.get("valuation"),
-                "Momentum": detail.category_scores.get("momentum"),
-                "Financial Strength": detail.category_scores.get("financial_strength"),
-                "AI Rating": detail.category_scores.get("ai_research"),
-                "Shareholder Return": detail.category_scores.get("shareholder_return"),
-                "Coverage": detail.overall_live_coverage,
-                "Confidence": detail.confidence,
-                "Sharia Status": detail.ethical_status,
-            }
-        )
+    rows = [
+        {
+            "Ticker": item.ticker,
+            "Company": item.company_name,
+            "Price": indexed[item.ticker].price,
+            "Market Cap": item.market_cap,
+            "Sector": item.sector,
+            "Industry": item.industry,
+            "Overall Rating": item.overall_score,
+            "Growth": item.growth_score,
+            "Revisions": item.revisions_score,
+            "Quality": item.quality_score,
+            "Valuation": item.valuation_score,
+            "Momentum": item.momentum_score,
+            "Financial Strength": item.financial_strength_score,
+            "AI Rating": item.ai_research_score,
+            "Shareholder Return": item.shareholder_return_score,
+            "Coverage": item.coverage,
+            "Data Quality": indexed[item.ticker].data_quality_status,
+            "Sharia Status": item.ethical_status,
+        }
+        for item in selected
+    ]
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    with st.expander("Saved screeners"):
-        repository = Phase3Repository(engine)
-        name = st.text_input("Name")
-        if st.button("Save current structured screen") and name:
+    with st.expander("Save current screen"):
+        name = st.text_input("Screen name")
+        if st.button("Save") and name:
             repository.save_screener(name, criteria.model_dump())
             st.success(f"Saved {name}")
-        for saved in repository.list_screeners():
-            st.code(f"{saved.name}: {saved.criteria}")
 finally:
     engine.dispose()

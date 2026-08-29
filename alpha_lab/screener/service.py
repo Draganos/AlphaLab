@@ -1,14 +1,17 @@
-"""Live market discovery assembled from stored, attributable evidence."""
+"""Present-day market discovery assembled from stored, attributable evidence."""
 
 from datetime import date, datetime
 import hashlib
 import json
+
 import pandas as pd
 from pydantic import BaseModel, Field
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, or_, select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import Settings
+from alpha_lab.ai import configured_ai_research_provider
+from alpha_lab.ai.service import AIResearchService
 from alpha_lab.database.models import (
     AIResearchAnalysis,
     BusinessTheme,
@@ -18,6 +21,7 @@ from alpha_lab.database.models import (
     Price,
     Security,
 )
+from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
 from alpha_lab.factors import percentile_scores
 from alpha_lab.ratings import (
     calculate_coverage,
@@ -26,6 +30,8 @@ from alpha_lab.ratings import (
     calculate_valuation_factors,
 )
 from alpha_lab.strategy import HistoricalScoringService, coverage_interpretation
+from alpha_lab.phase3 import Phase3Repository
+from alpha_lab.themes import derive_themes
 
 
 class LiveResearchRecord(BaseModel):
@@ -40,10 +46,12 @@ class LiveResearchRecord(BaseModel):
     asset_type: str | None
     themes: list[str] = Field(default_factory=list)
     ethical_status: str
+    data_quality_status: str
     overall_score: float | None
     overall_rank: int | None = None
     category_scores: dict[str, float | None]
     raw_metrics: dict[str, float | int | None]
+    percentile_metrics: dict[str, float | None]
     overall_live_coverage: float
     quantitative_coverage: float
     ai_coverage: float
@@ -51,17 +59,38 @@ class LiveResearchRecord(BaseModel):
     confidence: str
     provenance: dict[str, dict]
     last_refreshed: datetime | None
-    rating_version: str = "phase3-live-v1"
+    rating_version: str = "phase3-live-v2"
     configuration_hash: str
     evaluation_date: date
 
 
 class MarketScreenerService:
+    """Build current live records only; historical dates belong to HistoricalScoringService."""
+
     def __init__(self, engine: Engine, settings: Settings):
         self.engine, self.settings = engine, settings
 
-    def build_live_records(self, as_of: date | None = None) -> list[LiveResearchRecord]:
-        evaluation = as_of or date.today()
+    def build_live_records(self) -> list[LiveResearchRecord]:
+        evaluation = date.today()
+        EthicalClassificationService(
+            self.engine, load_ethics_policy(self.settings.ethics_policy_path)
+        ).ensure_all()
+        AIResearchService(self.engine, configured_ai_research_provider()).ensure_all()
+        with Session(self.engine) as metadata_session:
+            metadata = list(
+                metadata_session.scalars(select(Security).order_by(Security.ticker))
+            )
+        repository = Phase3Repository(self.engine)
+        for security in metadata:
+            repository.save_themes(
+                security.ticker,
+                derive_themes(
+                    security.business_description,
+                    security.metadata_source
+                    or security.metadata_provider
+                    or "stored-security-metadata",
+                ),
+            )
         base = {
             item.ticker: item
             for item in HistoricalScoringService(
@@ -71,53 +100,71 @@ class MarketScreenerService:
         rows: dict[str, dict] = {}
         with Session(self.engine) as session:
             for security in session.scalars(select(Security).order_by(Security.ticker)):
-                price = session.scalar(
-                    select(Price)
-                    .where(Price.ticker == security.ticker)
-                    .order_by(Price.date.desc(), Price.id.desc())
+                prices = list(
+                    session.scalars(
+                        select(Price)
+                        .where(
+                            Price.ticker == security.ticker, Price.date <= evaluation
+                        )
+                        .order_by(Price.date)
+                    )
                 )
-                fundamental = session.scalar(
-                    select(Fundamental)
-                    .where(Fundamental.ticker == security.ticker)
-                    .order_by(Fundamental.period.desc(), Fundamental.ingested_at.desc())
-                )
-                fundamental_history = list(
+                price = prices[-1] if prices else None
+                fundamentals = list(
                     session.scalars(
                         select(Fundamental)
-                        .where(Fundamental.ticker == security.ticker)
+                        .where(
+                            Fundamental.ticker == security.ticker,
+                            or_(
+                                Fundamental.publication_date.is_(None),
+                                Fundamental.publication_date <= evaluation,
+                            ),
+                        )
                         .order_by(
-                            Fundamental.period.desc(), Fundamental.ingested_at.desc()
+                            Fundamental.period.desc(),
+                            Fundamental.ingested_at.desc(),
+                            Fundamental.id.desc(),
                         )
                     )
                 )
-                estimate_rows = list(
+                fundamental = fundamentals[0] if fundamentals else None
+                prior = next(
+                    (
+                        item
+                        for item in fundamentals
+                        if fundamental and item.period < fundamental.period
+                    ),
+                    None,
+                )
+                estimates = list(
                     session.scalars(
                         select(Estimate)
-                        .where(Estimate.ticker == security.ticker)
+                        .where(
+                            Estimate.ticker == security.ticker,
+                            Estimate.observation_date <= evaluation,
+                        )
                         .order_by(Estimate.observation_date)
                     )
                 )
                 latest_period = max(
-                    (item.fiscal_period for item in estimate_rows), default=None
+                    (item.fiscal_period for item in estimates), default=None
                 )
-                estimate_rows = [
-                    item
-                    for item in estimate_rows
-                    if item.fiscal_period == latest_period
+                estimates = [
+                    item for item in estimates if item.fiscal_period == latest_period
                 ]
                 estimate_frame = pd.DataFrame(
                     [
                         {
-                            column: getattr(item, column)
-                            for column in [
+                            name: getattr(item, name)
+                            for name in (
                                 "observation_date",
                                 "consensus_eps",
                                 "consensus_revenue",
                                 "analyst_count",
                                 "estimate_dispersion",
-                            ]
+                            )
                         }
-                        for item in estimate_rows
+                        for item in estimates
                     ]
                 )
                 revisions = calculate_revision_factors(estimate_frame, evaluation)
@@ -141,17 +188,15 @@ class MarketScreenerService:
                 )
                 quality = calculate_quality_factors(
                     _fundamental_values(fundamental, security.market_cap),
-                    _fundamental_values(
-                        fundamental_history[1]
-                        if len(fundamental_history) > 1
-                        else None,
-                        security.market_cap,
-                    ),
+                    _fundamental_values(prior, security.market_cap),
                 )
                 ethics = session.scalar(
                     select(EthicalEvaluation)
                     .where(EthicalEvaluation.ticker == security.ticker)
-                    .order_by(EthicalEvaluation.evaluated_at.desc())
+                    .order_by(
+                        EthicalEvaluation.evaluated_at.desc(),
+                        EthicalEvaluation.id.desc(),
+                    )
                 )
                 ai = session.scalar(
                     select(AIResearchAnalysis)
@@ -165,6 +210,9 @@ class MarketScreenerService:
                         .distinct()
                     )
                 )
+                quality_reason = _live_data_quality_reason(
+                    prices, evaluation, self.settings
+                )
                 rows[security.ticker] = {
                     "security": security,
                     "price_row": price,
@@ -173,10 +221,13 @@ class MarketScreenerService:
                     "valuation": valuation,
                     "quality": quality,
                     "revisions": revisions,
-                    "ethical_status": ethics.ethical_status if ethics else "UNKNOWN",
+                    "ethical_status": ethics.ethical_status if ethics else "REVIEW",
                     "ai": ai,
                     "themes": themes,
+                    "quality_reason": quality_reason,
                 }
+        if not rows:
+            return []
         raw = pd.DataFrame.from_dict(
             {
                 ticker: {**data["valuation"], **data["revisions"], **data["quality"]}
@@ -184,10 +235,12 @@ class MarketScreenerService:
             },
             orient="index",
         )
-        eligible = [
-            ticker for ticker, data in rows.items() if data["ethical_status"] == "PASS"
+        reference = [
+            ticker
+            for ticker, data in rows.items()
+            if data["ethical_status"] == "PASS" and data["quality_reason"] == "valid"
         ]
-        percentiles = _live_percentiles(raw, eligible)
+        percentiles = _live_percentiles(raw, reference)
         results = [
             self._record(
                 ticker, data, base.get(ticker), percentiles.loc[ticker], evaluation
@@ -198,7 +251,9 @@ class MarketScreenerService:
             (
                 item
                 for item in results
-                if item.ethical_status == "PASS" and item.overall_score is not None
+                if item.ethical_status == "PASS"
+                and item.data_quality_status == "valid"
+                and item.overall_score is not None
             ),
             key=lambda item: (-item.overall_score, item.ticker),
         )
@@ -216,53 +271,52 @@ class MarketScreenerService:
     def _record(
         self, ticker: str, data: dict, base, percentile: pd.Series, evaluation: date
     ) -> LiveResearchRecord:
-        revision_score = _mean(
-            percentile,
-            [
-                "eps_revision_7d",
-                "eps_revision_30d",
-                "eps_revision_90d",
-                "revenue_revision_30d",
-            ],
-        )
-        valuation_score = _mean(
-            percentile, ["pe", "forward_pe", "price_sales", "ev_ebitda", "price_fcf"]
-        )
-        quality_score = _mean(
-            percentile,
-            [
-                "gross_margin",
-                "ebitda_margin",
-                "operating_margin",
-                "net_margin",
-                "roe",
-                "roa",
-                "fcf_conversion",
-            ],
-        )
-        strength_score = _mean(
-            percentile,
-            [
-                "net_debt",
-                "debt_ebitda",
-                "debt_equity",
-                "current_ratio",
-                "interest_coverage",
-                "cash_flow_to_debt",
-            ],
-        )
-        shareholder_score = _mean(
-            percentile, ["dividend_yield", "buyback_yield", "total_shareholder_yield"]
-        )
         categories = {
-            "earnings_growth": base.category_scores.get("earnings") if base else None,
-            "analyst_revisions": revision_score,
-            "business_quality": quality_score,
-            "valuation": valuation_score,
-            "momentum": base.category_scores.get("momentum") if base else None,
-            "financial_strength": strength_score,
+            "earnings_growth": _mean(percentile, ["eps_growth", "revenue_growth"]),
+            "analyst_revisions": _mean(
+                percentile,
+                [
+                    "eps_revision_7d",
+                    "eps_revision_30d",
+                    "eps_revision_90d",
+                    "revenue_revision_30d",
+                ],
+            ),
+            "business_quality": _mean(
+                percentile,
+                [
+                    "gross_margin",
+                    "ebitda_margin",
+                    "operating_margin",
+                    "net_margin",
+                    "roe",
+                    "roa",
+                    "fcf_conversion",
+                ],
+            ),
+            "valuation": _mean(
+                percentile,
+                ["pe", "forward_pe", "price_sales", "ev_ebitda", "price_fcf"],
+            ),
+            "momentum": base.category_scores.get("momentum")
+            if base and data["quality_reason"] == "valid"
+            else None,
+            "financial_strength": _mean(
+                percentile,
+                [
+                    "net_debt",
+                    "debt_ebitda",
+                    "debt_equity",
+                    "current_ratio",
+                    "interest_coverage",
+                    "cash_flow_to_debt",
+                ],
+            ),
             "ai_research": data["ai"].ai_rating if data["ai"] else None,
-            "shareholder_return": shareholder_score,
+            "shareholder_return": _mean(
+                percentile,
+                ["dividend_yield", "buyback_yield", "total_shareholder_yield"],
+            ),
         }
         coverage = calculate_coverage(
             categories,
@@ -314,6 +368,7 @@ class MarketScreenerService:
             asset_type=security.asset_type,
             themes=data["themes"],
             ethical_status=data["ethical_status"],
+            data_quality_status=data["quality_reason"],
             overall_score=round(score, 2) if score is not None else None,
             category_scores=categories,
             raw_metrics={
@@ -321,6 +376,9 @@ class MarketScreenerService:
                 **data["revisions"],
                 **data["quality"],
                 **(base.raw_factors if base else {}),
+            },
+            percentile_metrics={
+                key: _optional(value) for key, value in percentile.items()
             },
             overall_live_coverage=coverage.overall_live,
             quantitative_coverage=coverage.quantitative,
@@ -332,12 +390,34 @@ class MarketScreenerService:
             provenance={
                 "price": _provenance(price),
                 "fundamental": _provenance(fundamental),
-                "evaluation": {"as_of": evaluation.isoformat()},
+                "evaluation": {
+                    "as_of": evaluation.isoformat(),
+                    "mode": "present-day-live",
+                },
             },
             last_refreshed=refreshed,
             configuration_hash=_rating_hash(self.settings.rating_weights),
             evaluation_date=evaluation,
         )
+
+
+def _live_data_quality_reason(
+    prices: list[Price], evaluation: date, settings: Settings
+) -> str:
+    if not prices:
+        return "missing price"
+    if (evaluation - prices[-1].date).days > settings.data_quality["stale_price_days"]:
+        return "stale price"
+    if len(prices) < 22:
+        return "insufficient history"
+    volumes = [item.volume for item in prices[-20:] if item.volume is not None]
+    minimum = max(
+        settings.strategy.minimum_average_daily_volume,
+        settings.data_quality.get("live_minimum_average_daily_volume", 100_000),
+    )
+    if minimum > 0 and (not volumes or sum(volumes) / len(volumes) < minimum):
+        return "liquidity rule"
+    return "valid"
 
 
 def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
@@ -355,13 +435,16 @@ def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
         "debt_ebitda",
         "debt_equity",
     }
-    valid = percentile_scores(raw.loc[eligible], lower)
-    return valid.reindex(raw.index)
+    return percentile_scores(raw.loc[eligible], lower).reindex(raw.index)
 
 
 def _mean(row: pd.Series, names: list[str]) -> float | None:
     values = [float(row[name]) for name in names if name in row and pd.notna(row[name])]
     return sum(values) / len(values) if values else None
+
+
+def _optional(value) -> float | None:
+    return None if value is None or pd.isna(value) else float(value)
 
 
 def _provenance(record) -> dict:
@@ -405,5 +488,6 @@ def _fundamental_values(record, market_cap: float | None) -> dict:
 
 
 def _rating_hash(weights: dict[str, float]) -> str:
-    payload = json.dumps(weights, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(weights, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()

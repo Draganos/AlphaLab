@@ -47,6 +47,7 @@ class Phase3Repository:
                 manual_override=decision.manual_override,
                 manual_override_reason=decision.manual_override_reason,
                 financial_warnings=decision.financial_warnings,
+                evidence_fingerprint=decision.evidence_fingerprint,
             )
             session.add(record)
             session.commit()
