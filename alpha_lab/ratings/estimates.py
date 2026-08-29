@@ -49,8 +49,11 @@ def _revision(
 ) -> float | None:
     if column not in frame or pd.isna(current.get(column)):
         return None
+    current_date = pd.Timestamp(current["observation_date"])
     prior = frame.loc[
-        frame["observation_date"] <= pd.Timestamp(cutoff), column
+        (frame["observation_date"] <= pd.Timestamp(cutoff))
+        & (frame["observation_date"] < current_date),
+        column,
     ].dropna()
     if prior.empty or prior.iloc[-1] == 0:
         return None

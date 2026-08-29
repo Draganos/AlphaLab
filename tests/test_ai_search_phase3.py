@@ -58,6 +58,13 @@ def test_natural_language_becomes_filters_not_tickers():
     assert interpret_query("similar to Nvidia with insider buying").unsupported
 
 
+def test_unimplemented_raw_metric_comparison_is_explicitly_unsupported():
+    criteria = DeterministicQueryInterpreter().interpret(
+        "Find stocks with P/E below 10"
+    )
+    assert criteria.unsupported == ["P/E below 10"]
+
+
 @pytest.mark.parametrize(
     ("query", "expected"),
     [

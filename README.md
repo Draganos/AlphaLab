@@ -250,6 +250,8 @@ The live investable percentile reference applies the configured stale-price, his
 
 For companies with adequate price history and two usable current fundamental periods, the free live workflow can generally populate the Growth, Quality, Valuation, Momentum, and Financial Strength categories—70% of the configured rating weight. Actual coverage varies by issuer and provider response and can be lower. Analyst Revisions require multiple genuine timestamped snapshots; AI Research requires attributable stored documents plus optional configuration; Shareholder Return requires genuine dividend/buyback evidence. None are manufactured to cross the 70% threshold. Fundamentals with unknown publication dates may support the **present-day live** screener but never historical scoring.
 
+Live coverage is metric-complete rather than category-present: each category reports available expected metrics divided by its documented metric set, and overall live coverage is the weighted sum of those per-category fractions. A category score can therefore exist from partial evidence while showing, for example, 43% category coverage; one available metric never makes a category 100% covered.
+
 Natural-language pull search uses a provider pipeline: user text → deterministic or optional AI interpretation → strict `ScreenCriteria` validation → deterministic database filtering. It supports overall score, coverage, sector, industry, theme, market cap, all eight category scores, debt/EBITDA, and Sharia status. Unsupported conditions are displayed rather than ignored, and the interpreter schema has no field capable of returning a stock list.
 
 Optional providers are disabled by default:

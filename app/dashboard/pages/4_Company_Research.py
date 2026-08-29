@@ -113,6 +113,9 @@ try:
         with st.expander(
             f"{category.replace('_', ' ').title()} — {'Unavailable' if score is None else f'{score:.1f}/100'}"
         ):
+            st.caption(
+                f"Evidence coverage: {item.category_coverage.get(category, 0.0):.0%}"
+            )
             rows = [
                 {
                     "Metric": metric,

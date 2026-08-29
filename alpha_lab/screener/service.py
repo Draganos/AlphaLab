@@ -44,6 +44,51 @@ CATEGORY_PROVENANCE = {
     "shareholder_return": "fundamental",
 }
 
+CATEGORY_EVIDENCE_METRICS = {
+    "earnings_growth": ("eps_growth", "revenue_growth"),
+    "analyst_revisions": (
+        "eps_revision_7d",
+        "eps_revision_30d",
+        "eps_revision_90d",
+        "revenue_revision_7d",
+        "revenue_revision_30d",
+        "revenue_revision_90d",
+    ),
+    "business_quality": (
+        "gross_margin",
+        "ebitda_margin",
+        "operating_margin",
+        "net_margin",
+        "roe",
+        "roa",
+        "fcf_conversion",
+    ),
+    "valuation": ("pe", "forward_pe", "price_sales", "ev_ebitda", "price_fcf"),
+    "momentum": (
+        "return_1m",
+        "return_3m",
+        "return_6m",
+        "return_12m",
+        "momentum_12_1",
+        "distance_ma50",
+        "distance_ma200",
+    ),
+    "financial_strength": (
+        "net_debt",
+        "debt_ebitda",
+        "debt_equity",
+        "current_ratio",
+        "interest_coverage",
+        "cash_flow_to_debt",
+    ),
+    "ai_research": (),
+    "shareholder_return": (
+        "dividend_yield",
+        "buyback_yield",
+        "total_shareholder_yield",
+    ),
+}
+
 
 class LiveResearchRecord(BaseModel):
     ticker: str
@@ -61,6 +106,7 @@ class LiveResearchRecord(BaseModel):
     overall_score: float | None
     overall_rank: int | None = None
     category_scores: dict[str, float | None]
+    category_coverage: dict[str, float]
     raw_metrics: dict[str, float | int | None]
     percentile_metrics: dict[str, float | None]
     overall_live_coverage: float
@@ -215,6 +261,7 @@ class MarketScreenerService:
                     .where(AIResearchAnalysis.ticker == security.ticker)
                     .order_by(AIResearchAnalysis.analysis_date.desc())
                 )
+                ai_attributable = bool(ai and ai.source_document_ids and ai.evidence)
                 themes = list(
                     session.scalars(
                         select(BusinessTheme.theme)
@@ -236,6 +283,7 @@ class MarketScreenerService:
                     "estimate_row": latest_estimate,
                     "ethical_status": ethics.ethical_status if ethics else "REVIEW",
                     "ai": ai,
+                    "ai_attributable": ai_attributable,
                     "themes": themes,
                     "quality_reason": quality_reason,
                 }
@@ -244,10 +292,12 @@ class MarketScreenerService:
         raw = pd.DataFrame.from_dict(
             {
                 ticker: {
-                    **data["valuation"],
-                    **data["revisions"],
-                    **data["quality"],
-                    **(base[ticker].raw_factors if ticker in base else {}),
+                    **_merge_live_raw(
+                        base[ticker].raw_factors if ticker in base else {},
+                        data["valuation"],
+                        data["revisions"],
+                        data["quality"],
+                    ),
                 }
                 for ticker, data in rows.items()
             },
@@ -261,7 +311,12 @@ class MarketScreenerService:
         percentiles = _live_percentiles(raw, reference)
         results = [
             self._record(
-                ticker, data, base.get(ticker), percentiles.loc[ticker], evaluation
+                ticker,
+                data,
+                base.get(ticker),
+                raw.loc[ticker],
+                percentiles.loc[ticker],
+                evaluation,
             )
             for ticker, data in rows.items()
         ]
@@ -287,68 +342,42 @@ class MarketScreenerService:
         )
 
     def _record(
-        self, ticker: str, data: dict, base, percentile: pd.Series, evaluation: date
+        self,
+        ticker: str,
+        data: dict,
+        base,
+        raw_values: pd.Series,
+        percentile: pd.Series,
+        evaluation: date,
     ) -> LiveResearchRecord:
         categories = {
-            "earnings_growth": _mean(percentile, ["eps_growth", "revenue_growth"]),
+            "earnings_growth": _mean(
+                percentile, CATEGORY_EVIDENCE_METRICS["earnings_growth"]
+            ),
             "analyst_revisions": _mean(
-                percentile,
-                [
-                    "eps_revision_7d",
-                    "eps_revision_30d",
-                    "eps_revision_90d",
-                    "revenue_revision_30d",
-                ],
+                percentile, CATEGORY_EVIDENCE_METRICS["analyst_revisions"]
             ),
             "business_quality": _mean(
-                percentile,
-                [
-                    "gross_margin",
-                    "ebitda_margin",
-                    "operating_margin",
-                    "net_margin",
-                    "roe",
-                    "roa",
-                    "fcf_conversion",
-                ],
+                percentile, CATEGORY_EVIDENCE_METRICS["business_quality"]
             ),
-            "valuation": _mean(
-                percentile,
-                ["pe", "forward_pe", "price_sales", "ev_ebitda", "price_fcf"],
-            ),
-            "momentum": _mean(
-                percentile,
-                [
-                    "return_1m",
-                    "return_3m",
-                    "return_6m",
-                    "return_12m",
-                    "momentum_12_1",
-                    "distance_ma50",
-                    "distance_ma200",
-                ],
-            ),
+            "valuation": _mean(percentile, CATEGORY_EVIDENCE_METRICS["valuation"]),
+            "momentum": _mean(percentile, CATEGORY_EVIDENCE_METRICS["momentum"]),
             "financial_strength": _mean(
-                percentile,
-                [
-                    "net_debt",
-                    "debt_ebitda",
-                    "debt_equity",
-                    "current_ratio",
-                    "interest_coverage",
-                    "cash_flow_to_debt",
-                ],
+                percentile, CATEGORY_EVIDENCE_METRICS["financial_strength"]
             ),
-            "ai_research": data["ai"].ai_rating if data["ai"] else None,
+            "ai_research": data["ai"].ai_rating if data["ai_attributable"] else None,
             "shareholder_return": _mean(
                 percentile,
-                ["dividend_yield", "buyback_yield", "total_shareholder_yield"],
+                CATEGORY_EVIDENCE_METRICS["shareholder_return"],
             ),
         }
+        category_coverage = _category_evidence_coverage(
+            raw_values, ai_available=data["ai_attributable"]
+        )
         coverage = calculate_coverage(
-            categories,
+            category_coverage,
             self.settings.rating_weights,
-            ai_available=data["ai"] is not None,
+            ai_available=data["ai_attributable"],
             historical_available_weight=base.coverage if base else 0,
         )
         available_weight = sum(
@@ -398,12 +427,8 @@ class MarketScreenerService:
             data_quality_status=data["quality_reason"],
             overall_score=round(score, 2) if score is not None else None,
             category_scores=categories,
-            raw_metrics={
-                **data["valuation"],
-                **data["revisions"],
-                **data["quality"],
-                **(base.raw_factors if base else {}),
-            },
+            category_coverage=category_coverage,
+            raw_metrics={key: _optional(value) for key, value in raw_values.items()},
             percentile_metrics={
                 key: _optional(value) for key, value in percentile.items()
             },
@@ -424,7 +449,7 @@ class MarketScreenerService:
                     "document_ids": data["ai"].source_document_ids,
                     "analysis_date": data["ai"].analysis_date.isoformat(),
                 }
-                if data["ai"]
+                if data["ai_attributable"]
                 else {},
                 "evaluation": {
                     "as_of": evaluation.isoformat(),
@@ -487,9 +512,36 @@ def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
     return result.reindex(raw.index)
 
 
-def _mean(row: pd.Series, names: list[str]) -> float | None:
+def _mean(row: pd.Series, names: tuple[str, ...]) -> float | None:
     values = [float(row[name]) for name in names if name in row and pd.notna(row[name])]
     return sum(values) / len(values) if values else None
+
+
+def _category_evidence_coverage(
+    raw_values: pd.Series, *, ai_available: bool
+) -> dict[str, float]:
+    coverage: dict[str, float] = {}
+    for category, metrics in CATEGORY_EVIDENCE_METRICS.items():
+        if category == "ai_research":
+            coverage[category] = 1.0 if ai_available else 0.0
+            continue
+        available = sum(
+            1
+            for metric in metrics
+            if metric in raw_values and pd.notna(raw_values[metric])
+        )
+        coverage[category] = available / len(metrics) if metrics else 0.0
+    return coverage
+
+
+def _merge_live_raw(
+    base_raw: dict,
+    valuation: dict,
+    revisions: dict,
+    quality: dict,
+) -> dict:
+    """Use historical factors as a supplement; current live evidence always wins."""
+    return {**base_raw, **valuation, **revisions, **quality}
 
 
 def _optional(value) -> float | None:

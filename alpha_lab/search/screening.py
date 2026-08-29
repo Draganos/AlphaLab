@@ -117,6 +117,7 @@ class DeterministicQueryInterpreter(QueryInterpretationProvider):
         criteria.unsupported = [
             label for phrase, label in unsupported_terms.items() if phrase in lowered
         ]
+        criteria.unsupported.extend(_unsupported_comparisons(query))
         return criteria
 
 
@@ -272,6 +273,23 @@ def _market_cap(text: str, criteria: ScreenCriteria) -> None:
     if match:
         multiplier = {"b": 1e9, "m": 1e6, "k": 1e3}.get(match.group(2), 1)
         criteria.minimum_market_cap = float(match.group(1)) * multiplier
+
+
+def _unsupported_comparisons(query: str) -> list[str]:
+    """Disclose raw-metric comparisons that ScreenCriteria cannot execute yet."""
+    metric = (
+        r"P\s*/\s*E|forward\s+P\s*/\s*E|EV\s*/\s*EBITDA|price\s*/\s*sales|"
+        r"price\s*/\s*FCF|FCF\s+yield|earnings\s+yield|dividend\s+yield|"
+        r"ROE|ROA|ROIC|revenue\s+growth|EPS\s+growth|net\s+margin|gross\s+margin"
+    )
+    comparison = (
+        r"(?:below|under|above|over|at\s+least|at\s+most|less\s+than|greater\s+than)"
+    )
+    pattern = re.compile(
+        rf"\b(?:{metric})\s+{comparison}\s+[-+]?\$?\d+(?:\.\d+)?%?",
+        re.IGNORECASE,
+    )
+    return [match.group(0).strip() for match in pattern.finditer(query)]
 
 
 _THEMES = {

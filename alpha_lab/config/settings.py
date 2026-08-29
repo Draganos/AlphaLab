@@ -104,13 +104,17 @@ class Settings(BaseModel):
             "ai_research",
             "shareholder_return",
         }
-        if (
-            set(self.rating_weights) != expected_live
-            or abs(sum(self.rating_weights.values()) - 1.0) > 1e-8
-        ):
+        if set(self.rating_weights) != expected_live:
             raise ValueError(
-                "Phase 3 rating_weights must contain all categories and total 1.0"
+                f"Phase 3 rating_weights must contain exactly: {sorted(expected_live)}"
             )
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in self.rating_weights.values()
+        ):
+            raise ValueError("Phase 3 rating_weights must be finite and non-negative")
+        if abs(sum(self.rating_weights.values()) - 1.0) > 1e-8:
+            raise ValueError("Phase 3 rating_weights must total 1.0")
         return self
 
 

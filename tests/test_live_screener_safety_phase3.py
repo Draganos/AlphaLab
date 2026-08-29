@@ -6,7 +6,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import Estimate, Fundamental, Price, Security
 from alpha_lab.screener import MarketScreenerService
-from alpha_lab.screener.service import CATEGORY_PROVENANCE
+from alpha_lab.screener.service import CATEGORY_PROVENANCE, _merge_live_raw
 
 
 def test_category_provenance_mapping_is_semantically_correct():
@@ -15,6 +15,24 @@ def test_category_provenance_mapping_is_semantically_correct():
     assert CATEGORY_PROVENANCE["valuation"] == "fundamental"
     assert CATEGORY_PROVENANCE["business_quality"] == "fundamental"
     assert CATEGORY_PROVENANCE["ai_research"] == "ai"
+
+
+def test_live_raw_values_override_unavailable_historical_overlap():
+    merged = _merge_live_raw(
+        {
+            "ebitda_margin": float("nan"),
+            "net_margin": float("nan"),
+            "roe": float("nan"),
+            "return_1m": 0.1,
+        },
+        {},
+        {},
+        {"ebitda_margin": 0.3, "net_margin": 0.2, "roe": 0.25},
+    )
+    assert merged["ebitda_margin"] == 0.3
+    assert merged["net_margin"] == 0.2
+    assert merged["roe"] == 0.25
+    assert merged["return_1m"] == 0.1
 
 
 def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
@@ -66,7 +84,7 @@ def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
                 Fundamental(
                     ticker="VALID",
                     period=today - timedelta(days=365),
-                    publication_date=today - timedelta(days=30),
+                    publication_date=None,
                     revenue=100,
                     ebitda=20,
                     net_income=10,
@@ -132,6 +150,11 @@ def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
         }
         assert records["VALID"].raw_metrics["current_consensus_eps"] == 2
         assert records["VALID"].raw_metrics["market_cap"] == 1290
+        assert records["VALID"].raw_metrics["ebitda_margin"] == 0.2
+        assert records["VALID"].raw_metrics["net_margin"] == 0.1
+        assert records["VALID"].raw_metrics["roe"] == 0.2
+        assert records["VALID"].category_coverage["business_quality"] < 1
+        assert records["VALID"].overall_live_coverage < 0.7
         assert records["VALID"].data_quality_status == "valid"
         assert records["VALID"].provenance["price"]["source"] == "fixture-prices"
         assert (

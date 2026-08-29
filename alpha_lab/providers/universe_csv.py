@@ -21,7 +21,9 @@ class CSVSecurityUniverseProvider(SecurityUniverseProvider):
             frame = frame[frame["country"].fillna(country) == country]
         if exchanges and "exchange" in frame:
             frame = frame[frame["exchange"].isin(exchanges)]
-        return frame.where(pd.notna(frame), None).to_dict("records")
+        # Object dtype is required: float columns otherwise coerce ``None`` back to NaN.
+        clean = frame.astype(object).where(pd.notna(frame), None)
+        return clean.to_dict("records")
 
     def refresh_metadata(self, tickers: list[str]) -> list[dict[str, Any]]:
         wanted = {ticker.upper() for ticker in tickers}
