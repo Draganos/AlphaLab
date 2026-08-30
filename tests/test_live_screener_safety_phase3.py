@@ -1,0 +1,319 @@
+from datetime import date, timedelta
+
+from sqlalchemy.orm import Session
+
+from alpha_lab.config import load_settings
+from alpha_lab.database import create_schema, make_engine
+from alpha_lab.database.models import Estimate, Fundamental, Price, Security
+from alpha_lab.screener import MarketScreenerService
+from alpha_lab.screener.service import (
+    CATEGORY_PROVENANCE,
+    _live_data_quality_reason,
+    _live_percentiles,
+    _merge_live_raw,
+    _select_estimate_series,
+)
+
+
+def test_category_provenance_mapping_is_semantically_correct():
+    assert CATEGORY_PROVENANCE["momentum"] == "price"
+    assert CATEGORY_PROVENANCE["analyst_revisions"] == "estimate"
+    assert CATEGORY_PROVENANCE["valuation"] == "fundamental"
+    assert CATEGORY_PROVENANCE["business_quality"] == "fundamental"
+    assert CATEGORY_PROVENANCE["ai_research"] == "ai"
+
+
+def test_invalid_price_rows_do_not_satisfy_live_history():
+    today = date.today()
+    prices = [
+        Price(
+            ticker="BAD",
+            date=today - timedelta(days=21 - offset),
+            close=(100 if offset == 21 else float("nan")),
+            adjusted_close=None,
+            volume=1_000_000,
+        )
+        for offset in range(22)
+    ]
+    assert _live_data_quality_reason(prices, today, load_settings()) == "insufficient history"
+
+
+def test_estimates_use_one_provider_and_nearest_unexpired_period():
+    today = date.today()
+    rows = [
+        Estimate(
+            id=identifier,
+            ticker="X",
+            observation_date=observation,
+            fiscal_period=period,
+            consensus_eps=value,
+            provider=provider,
+        )
+        for identifier, observation, period, value, provider in [
+            (1, today - timedelta(days=60), today - timedelta(days=1), 1, "old"),
+            (2, today - timedelta(days=30), today + timedelta(days=100), 2, "A"),
+            (3, today, today + timedelta(days=100), 3, "A"),
+            (4, today - timedelta(days=1), today + timedelta(days=100), 99, "B"),
+            (5, today, today + timedelta(days=365), 50, "A"),
+        ]
+    ]
+    selected = _select_estimate_series(rows, today)
+    assert {row.provider for row in selected} == {"A"}
+    assert [row.consensus_eps for row in selected] == [2, 3]
+    assert all(row.fiscal_period >= today for row in selected)
+
+
+def test_expired_forecast_period_produces_no_live_estimate_series():
+    today = date.today()
+    expired = Estimate(
+        id=1,
+        ticker="X",
+        observation_date=today - timedelta(days=30),
+        fiscal_period=today - timedelta(days=1),
+        consensus_eps=2,
+        provider="fixture",
+    )
+    assert _select_estimate_series([expired], today) == []
+
+
+def test_non_pass_exact_tie_receives_reference_average_tie_percentile():
+    import pandas as pd
+
+    raw = pd.DataFrame({"pe": [10.0, 10.0, 10.0]}, index=["A", "B", "REVIEW"])
+    scored = _live_percentiles(raw, ["A", "B"])
+    assert scored.loc["REVIEW", "pe"] == scored.loc["A", "pe"]
+
+
+def test_live_raw_values_override_unavailable_historical_overlap():
+    merged = _merge_live_raw(
+        {
+            "ebitda_margin": float("nan"),
+            "net_margin": float("nan"),
+            "roe": float("nan"),
+            "return_1m": 0.1,
+        },
+        {},
+        {},
+        {"ebitda_margin": 0.3, "net_margin": 0.2, "roe": 0.25},
+    )
+    assert merged["ebitda_margin"] == 0.3
+    assert merged["net_margin"] == 0.2
+    assert merged["roe"] == 0.25
+    assert merged["return_1m"] == 0.1
+
+
+def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    engine = make_engine(f"sqlite:///{tmp_path / 'live.db'}")
+    today = date.today()
+    try:
+        create_schema(engine)
+        with Session(engine) as session:
+            for ticker in ("VALID", "STALE"):
+                session.add(
+                    Security(
+                        ticker=ticker,
+                        company_name=ticker,
+                        sector="Technology",
+                        industry="Software",
+                        business_description="Enterprise software operating business with recurring subscriptions",
+                        metadata_source="fixture",
+                        market_cap=1_000_000,
+                    )
+                )
+            for offset in range(30):
+                day = today - timedelta(days=29 - offset)
+                session.add(
+                    Price(
+                        ticker="VALID",
+                        date=day,
+                        close=100 + offset,
+                        adjusted_close=100 + offset,
+                        volume=1_000_000,
+                        provider="fixture",
+                        source="fixture-prices",
+                    )
+                )
+                session.add(
+                    Price(
+                        ticker="STALE",
+                        date=day - timedelta(days=30),
+                        close=10 + offset,
+                        adjusted_close=10 + offset,
+                        volume=1_000_000,
+                        provider="fixture",
+                        source="fixture-prices",
+                    )
+                )
+            session.add(
+                Fundamental(
+                    ticker="VALID",
+                    period=today - timedelta(days=365),
+                    publication_date=None,
+                    revenue=100,
+                    ebitda=20,
+                    net_income=10,
+                    eps=1,
+                    free_cash_flow=8,
+                    total_debt=10,
+                    cash=5,
+                    total_equity=50,
+                    shares_outstanding=10,
+                    dividends_paid=-12.9,
+                    provider="fixture",
+                    source="fixture-fundamentals",
+                    observation_hash="known",
+                )
+            )
+            session.add(
+                Fundamental(
+                    ticker="VALID",
+                    period=today,
+                    publication_date=today + timedelta(days=1),
+                    revenue=99999,
+                    ebitda=99999,
+                    net_income=99999,
+                    eps=99999,
+                    free_cash_flow=99999,
+                    total_debt=0,
+                    cash=99999,
+                    total_equity=99999,
+                    shares_outstanding=10,
+                    provider="future",
+                    source="future-fundamentals",
+                    observation_hash="future",
+                )
+            )
+            session.add(
+                Estimate(
+                    ticker="VALID",
+                    observation_date=today,
+                    fiscal_period=today + timedelta(days=365),
+                    consensus_eps=2,
+                    provider="fixture",
+                    source="fixture-estimates",
+                    observation_hash="estimate-known",
+                )
+            )
+            session.add(
+                Estimate(
+                    ticker="VALID",
+                    observation_date=today + timedelta(days=1),
+                    fiscal_period=today + timedelta(days=365),
+                    consensus_eps=999,
+                    provider="future",
+                    source="future-estimates",
+                    observation_hash="estimate-future",
+                )
+            )
+            session.commit()
+        settings = load_settings().model_copy(
+            update={"database_url": f"sqlite:///{tmp_path / 'live.db'}"}
+        )
+        records = {
+            item.ticker: item
+            for item in MarketScreenerService(engine, settings).build_live_records()
+        }
+        assert records["VALID"].raw_metrics["current_consensus_eps"] == 2
+        assert records["VALID"].raw_metrics["market_cap"] == 1290
+        assert records["VALID"].raw_metrics["ebitda_margin"] == 0.2
+        assert records["VALID"].raw_metrics["net_margin"] == 0.1
+        assert records["VALID"].raw_metrics["roe"] == 0.2
+        assert records["VALID"].market_cap == 1290
+        assert records["VALID"].raw_metrics["dividend_yield"] == 0.01
+        assert records["VALID"].category_coverage["business_quality"] < 1
+        assert records["VALID"].overall_live_coverage < 0.7
+        assert records["VALID"].data_quality_status == "valid"
+        assert records["VALID"].provenance["price"]["source"] == "fixture-prices"
+        assert (
+            records["VALID"].provenance["fundamental"]["source"]
+            == "fixture-fundamentals"
+        )
+        assert records["VALID"].provenance["estimate"]["source"] == "fixture-estimates"
+        assert records["VALID"].provenance["metrics"]["return_1m"]["source"] == "fixture-prices"
+        assert records["VALID"].provenance["metrics"]["ebitda_margin"]["source"] == "fixture-fundamentals"
+        assert records["VALID"].provenance["metrics"]["eps_revision_30d"]["source"] == "fixture-estimates"
+        assert records["STALE"].data_quality_status == "stale price"
+        assert records["STALE"].overall_rank is None
+        assert records["STALE"].percentile_metrics["return_1m"] is not None
+    finally:
+        engine.dispose()
+
+
+def test_excluded_company_is_scored_against_pass_reference_but_never_ranked(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    engine = make_engine(f"sqlite:///{tmp_path / 'researchable-excluded.db'}")
+    today = date.today()
+    try:
+        create_schema(engine)
+        with Session(engine) as session:
+            session.add(
+                Security(
+                    ticker="PASS",
+                    sector="Technology",
+                    industry="Software",
+                    business_description="Enterprise software operating business with recurring subscriptions",
+                    metadata_source="fixture",
+                )
+            )
+            session.add(
+                Security(
+                    ticker="BANK",
+                    sector="Financials",
+                    industry="Regional Banks",
+                    business_description="Bank holding company accepting deposits and originating loans",
+                    metadata_source="fixture",
+                )
+            )
+            for ticker, base_price in (("PASS", 20), ("BANK", 10)):
+                for offset in range(30):
+                    session.add(
+                        Price(
+                            ticker=ticker,
+                            date=today - timedelta(days=29 - offset),
+                            close=base_price + offset,
+                            adjusted_close=base_price + offset,
+                            volume=1_000_000,
+                            provider="fixture",
+                            source="fixture-prices",
+                        )
+                    )
+                session.add(
+                    Fundamental(
+                        ticker=ticker,
+                        period=today - timedelta(days=90),
+                        publication_date=today - timedelta(days=30),
+                        revenue=100,
+                        ebitda=20,
+                        net_income=10,
+                        eps=2 if ticker == "PASS" else 1,
+                        free_cash_flow=8,
+                        total_debt=10,
+                        cash=5,
+                        total_equity=50,
+                        shares_outstanding=10,
+                        provider="fixture",
+                        source="fixture-fundamentals",
+                        observation_hash=f"{ticker}-fund",
+                    )
+                )
+            session.commit()
+        settings = load_settings().model_copy(
+            update={
+                "database_url": f"sqlite:///{tmp_path / 'researchable-excluded.db'}"
+            }
+        )
+        records = {
+            item.ticker: item
+            for item in MarketScreenerService(engine, settings).build_live_records()
+        }
+        assert records["BANK"].ethical_status == "EXCLUDED"
+        assert records["BANK"].category_scores["valuation"] is not None
+        assert records["BANK"].overall_rank is None
+        assert records["PASS"].overall_rank == 1
+    finally:
+        engine.dispose()
