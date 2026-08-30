@@ -22,10 +22,12 @@ settings = load_settings()
 engine = make_engine(settings.database_url)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=900)
 def build_screener() -> pd.DataFrame:
     evaluation_date = date.today()
-    scores = HistoricalScoringService(engine, settings).score_universe_as_of(evaluation_date)
+    scores = HistoricalScoringService(engine, settings).score_universe_as_of(
+        evaluation_date, tickers=settings.universe.get("us", [])
+    )
     if not scores:
         return pd.DataFrame()
     rows = []

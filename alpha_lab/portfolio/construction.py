@@ -115,7 +115,9 @@ def _raw_weights(selected: list[Candidate], method: str) -> dict[str, float]:
         values = {candidate.ticker: 1.0 for candidate in selected}
     elif method == "score":
         values = {
-            candidate.ticker: max(float(candidate.score or 0), 0.0)
+            candidate.ticker: max(
+                float(candidate.score) if candidate.score is not None else 0.0, 0.0
+            )
             for candidate in selected
         }
     else:

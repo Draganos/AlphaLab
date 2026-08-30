@@ -212,10 +212,20 @@ def main() -> None:
                     [{"id": document.id, "text": document.text}],
                 )
                 assert analysis is not None
-                repository.save_ai(ticker, analysis)
+                repository.save_ai(
+                    ticker,
+                    analysis,
+                    analyzed_document_ids=[document.id],
+                    input_document_fingerprint=f"phase3-smoke-{document.id}",
+                )
             records = MarketScreenerService(
                 engine, load_settings()
             ).build_live_records()
+            repository.save_current_research(records)
+            persisted = MarketScreenerService(
+                engine, load_settings()
+            ).read_current_research()
+            assert [item.ticker for item in persisted] == sorted(companies)
             statuses = {item.ticker: item.ethical_status for item in records}
             assert statuses["BANK"] == statuses["ARMS"] == "EXCLUDED"
             assert statuses["AIR"] == statuses["PAY"] == "PASS"

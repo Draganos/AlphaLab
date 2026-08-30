@@ -96,6 +96,7 @@ class Fundamental(Base):
     interest_expense: Mapped[float | None] = mapped_column(Float)
     dividends_paid: Mapped[float | None] = mapped_column(Float)
     share_repurchases: Mapped[float | None] = mapped_column(Float)
+    provenance_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class Estimate(Base):
@@ -253,6 +254,8 @@ class AIResearchAnalysis(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
     source_document_ids: Mapped[list[int]] = mapped_column(JSON)
+    analyzed_document_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), index=True)
     component_scores: Mapped[dict[str, float]] = mapped_column(JSON)
     key_positives: Mapped[list[str]] = mapped_column(JSON, default=list)
     key_risks: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -266,3 +269,61 @@ class AIResearchAnalysis(Base):
     analysis_date: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )
+
+
+class SECCompanyFact(Base):
+    """Append-only XBRL fact with SEC knowledge-time and concept provenance."""
+
+    __tablename__ = "sec_company_facts"
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker", "accession", "concept", "unit", "period_start", "period_end"
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
+    cik: Mapped[str] = mapped_column(String(10), index=True)
+    taxonomy: Mapped[str] = mapped_column(String(32))
+    concept: Mapped[str] = mapped_column(String(255), index=True)
+    metric: Mapped[str | None] = mapped_column(String(64), index=True)
+    unit: Mapped[str] = mapped_column(String(32))
+    value: Mapped[float] = mapped_column(Float)
+    period_start: Mapped[date | None] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date, index=True)
+    filed_date: Mapped[date] = mapped_column(Date, index=True)
+    form: Mapped[str] = mapped_column(String(16))
+    fiscal_year: Mapped[int | None] = mapped_column(Integer)
+    fiscal_period: Mapped[str | None] = mapped_column(String(8))
+    accession: Mapped[str] = mapped_column(String(32), index=True)
+    frame: Mapped[str | None] = mapped_column(String(32))
+    source_url: Mapped[str] = mapped_column(String(1024))
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class CurrentResearchBuild(Base):
+    """Audit header for an explicitly triggered current-only research rebuild."""
+
+    __tablename__ = "current_research_builds"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    evaluation_date: Mapped[date] = mapped_column(Date, index=True)
+    built_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
+    score_version: Mapped[str] = mapped_column(String(64))
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    security_count: Mapped[int] = mapped_column(Integer)
+
+
+class CurrentResearchSnapshot(Base):
+    """Persisted live/current state; historical services never query this table."""
+
+    __tablename__ = "current_research_snapshots"
+    __table_args__ = (UniqueConstraint("build_id", "ticker"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    build_id: Mapped[int] = mapped_column(
+        ForeignKey("current_research_builds.id"), index=True
+    )
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)

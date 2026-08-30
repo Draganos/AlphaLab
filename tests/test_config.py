@@ -10,6 +10,11 @@ def test_default_configuration_is_valid():
     assert sum(load_settings().weights.values()) == pytest.approx(1)
 
 
+def test_default_systematic_minimum_coverage_remains_seventy_percent():
+    """Lowering the evidence gate requires an explicit documented model change."""
+    assert load_settings().strategy.minimum_data_coverage == pytest.approx(0.70)
+
+
 @pytest.mark.parametrize(
     "value",
     [float("nan"), float("inf"), float("-inf"), -0.01],

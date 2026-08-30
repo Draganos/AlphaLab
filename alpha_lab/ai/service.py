@@ -40,8 +40,10 @@ class AIResearchService:
             input_fingerprint = _document_fingerprint(rows)
             if (
                 ticker in latest
-                and latest[ticker].raw_output.get("input_document_fingerprint")
-                == input_fingerprint
+                and (
+                    latest[ticker].input_fingerprint
+                    or latest[ticker].raw_output.get("input_document_fingerprint")
+                ) == input_fingerprint
             ):
                 continue
             result = analyze_documents(
@@ -60,7 +62,10 @@ class AIResearchService:
             )
             if result is not None:
                 Phase3Repository(self.engine).save_ai(
-                    ticker, result, input_document_fingerprint=input_fingerprint
+                    ticker,
+                    result,
+                    analyzed_document_ids=[row.id for row in rows],
+                    input_document_fingerprint=input_fingerprint,
                 )
                 stored += 1
         return stored

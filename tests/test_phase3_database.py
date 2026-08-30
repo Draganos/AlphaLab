@@ -6,7 +6,13 @@ from alpha_lab.database import create_schema, make_engine
 from alpha_lab.ai import AIResearchResult
 from alpha_lab.ai.research import EvidenceReference
 from alpha_lab.ai.service import AIResearchService
-from alpha_lab.database.models import BusinessTheme, CompanyDocument, Estimate, Security
+from alpha_lab.database.models import (
+    AIResearchAnalysis,
+    BusinessTheme,
+    CompanyDocument,
+    Estimate,
+    Security,
+)
 from alpha_lab.ingestion.estimates import snapshot_estimates
 from alpha_lab.phase3 import Phase3Repository
 
@@ -21,7 +27,15 @@ def test_phase3_schema_additive_idempotent_and_estimate_snapshots(tmp_path):
             "business_themes",
             "saved_screeners",
             "ai_research_analyses",
+            "sec_company_facts",
+            "current_research_builds",
+            "current_research_snapshots",
         } <= set(inspect(db_engine).get_table_names())
+        ai_columns = {
+            column["name"]
+            for column in inspect(db_engine).get_columns("ai_research_analyses")
+        }
+        assert {"analyzed_document_ids", "input_fingerprint"} <= ai_columns
         with Session(db_engine) as session:
             session.add(Security(ticker="X"))
             session.commit()
@@ -125,17 +139,14 @@ def test_ai_cache_uses_complete_document_input_not_cited_subset(tmp_path):
         create_schema(engine)
         with Session(engine) as session:
             session.add(Security(ticker="X"))
-            session.add_all(
-                [
-                    CompanyDocument(
-                        ticker="X",
-                        document_date=date.today() - timedelta(days=index),
-                        document_type="filing",
-                        title=f"Document {index}",
-                        text=f"Text {index}",
-                    )
-                    for index in (1, 2)
-                ]
+            session.add(
+                CompanyDocument(
+                    ticker="X",
+                    document_date=date.today() - timedelta(days=1),
+                    document_type="filing",
+                    title="Document 1",
+                    text="Text 1",
+                )
             )
             session.commit()
         provider = CountingProvider()
@@ -144,10 +155,29 @@ def test_ai_cache_uses_complete_document_input_not_cited_subset(tmp_path):
         assert service.ensure_all() == 0
         assert provider.calls == 1
         with Session(engine) as session:
-            session.query(CompanyDocument).filter_by(title="Document 2").one().text = "Changed"
+            analysis = session.scalar(select(AIResearchAnalysis))
+            assert len(analysis.analyzed_document_ids) == 1
+            assert len(analysis.source_document_ids) == 1
+            assert analysis.input_fingerprint
+            session.add(
+                CompanyDocument(
+                    ticker="X",
+                    document_date=date.today(),
+                    document_type="filing",
+                    title="Document 2",
+                    text="Text 2",
+                )
+            )
             session.commit()
         assert service.ensure_all() == 1
         assert provider.calls == 2
+        assert service.ensure_all() == 0
+        assert provider.calls == 2
+        with Session(engine) as session:
+            session.delete(session.query(CompanyDocument).filter_by(title="Document 2").one())
+            session.commit()
+        assert service.ensure_all() == 1
+        assert provider.calls == 3
     finally:
         engine.dispose()
 

@@ -48,9 +48,9 @@ def calculate_quality_factors(
         if buybacks is not None
         else None,
         "total_shareholder_yield": _ratio(
-            abs((dividends or 0) + (buybacks or 0)), market_cap
+            abs(dividends + buybacks), market_cap
         )
-        if market_cap and (dividends is not None or buybacks is not None)
+        if market_cap and dividends is not None and buybacks is not None
         else None,
         "revenue_growth": _growth(revenue, prior.get("revenue")),
         "eps_growth": _growth(current.get("eps"), prior.get("eps")),

@@ -90,6 +90,39 @@ CATEGORY_EVIDENCE_METRICS = {
     ),
 }
 
+CATEGORY_MINIMUM_METRICS = {
+    "earnings_growth": 1,
+    "analyst_revisions": 1,
+    "business_quality": 3,
+    "valuation": 2,
+    "momentum": 3,
+    "financial_strength": 2,
+    "ai_research": 1,
+    "shareholder_return": 1,
+}
+CATEGORY_MANDATORY_METRICS = {
+    "earnings_growth": (), "analyst_revisions": (), "business_quality": (),
+    "valuation": (), "momentum": ("return_3m",), "financial_strength": (),
+    "ai_research": (), "shareholder_return": (),
+}
+CATEGORY_METRIC_WEIGHTS = {
+    category: {metric: 1.0 for metric in metrics}
+    for category, metrics in CATEGORY_EVIDENCE_METRICS.items()
+}
+
+LIVE_FUNDAMENTAL_SOURCE_PRIORITY = {
+    name: ("SECCompanyFactsProvider", "YFinanceProvider")
+    for name in (
+        "revenue", "gross_profit", "ebit", "net_income", "eps", "cash",
+        "total_debt", "total_equity", "total_assets", "current_assets",
+        "current_liabilities", "dividends_paid", "share_repurchases",
+    )
+}
+LIVE_FUNDAMENTAL_SOURCE_PRIORITY.update({
+    name: ("YFinanceProvider", "SECCompanyFactsProvider")
+    for name in ("ebitda", "free_cash_flow", "shares_outstanding", "interest_expense")
+})
+
 
 class LiveResearchRecord(BaseModel):
     ticker: str
@@ -127,6 +160,17 @@ class MarketScreenerService:
 
     def __init__(self, engine: Engine, settings: Settings):
         self.engine, self.settings = engine, settings
+
+    def rebuild_current_research(self) -> list[LiveResearchRecord]:
+        """Explicit write operation: derive, score, and persist current research."""
+        records = self.build_live_records()
+        Phase3Repository(self.engine).save_current_research(records)
+        return records
+
+    def read_current_research(self) -> list[LiveResearchRecord]:
+        """Read-only UI path; never calls a provider, AI, ethics, or theme derivation."""
+        _, payloads = Phase3Repository(self.engine).latest_current_payloads()
+        return [LiveResearchRecord.model_validate(payload) for payload in payloads]
 
     def build_live_records(self) -> list[LiveResearchRecord]:
         evaluation = date.today()
@@ -193,13 +237,8 @@ class MarketScreenerService:
                     )
                 )
                 fundamental = fundamentals[0] if fundamentals else None
-                prior = next(
-                    (
-                        item
-                        for item in fundamentals
-                        if fundamental and item.period < fundamental.period
-                    ),
-                    None,
+                current_fundamentals, prior_fundamentals, field_provenance = (
+                    _select_live_fundamental_values(fundamentals)
                 )
                 estimates = list(
                     session.scalars(
@@ -232,28 +271,25 @@ class MarketScreenerService:
                 current_price = _usable_close(price)
                 valuation = calculate_valuation_factors(
                     price=current_price,
-                    shares=fundamental.shares_outstanding if fundamental else None,
-                    eps=fundamental.eps if fundamental else None,
+                    shares=current_fundamentals.get("shares_outstanding"),
+                    eps=current_fundamentals.get("eps"),
                     forward_eps=revisions["current_consensus_eps"],
-                    revenue=fundamental.revenue if fundamental else None,
-                    ebitda=fundamental.ebitda if fundamental else None,
-                    free_cash_flow=fundamental.free_cash_flow if fundamental else None,
-                    debt=fundamental.total_debt if fundamental else None,
-                    cash=fundamental.cash if fundamental else None,
+                    revenue=current_fundamentals.get("revenue"),
+                    ebitda=current_fundamentals.get("ebitda"),
+                    free_cash_flow=current_fundamentals.get("free_cash_flow"),
+                    debt=current_fundamentals.get("total_debt"),
+                    cash=current_fundamentals.get("cash"),
                 )
+                selected_market_cap = (
+                    valuation["market_cap"]
+                    if valuation["market_cap"] is not None
+                    else security.market_cap
+                )
+                current_fundamentals["market_cap"] = selected_market_cap
+                prior_fundamentals["market_cap"] = selected_market_cap
                 quality = calculate_quality_factors(
-                    _fundamental_values(
-                        fundamental,
-                        valuation["market_cap"]
-                        if valuation["market_cap"] is not None
-                        else security.market_cap,
-                    ),
-                    _fundamental_values(
-                        prior,
-                        valuation["market_cap"]
-                        if valuation["market_cap"] is not None
-                        else security.market_cap,
-                    ),
+                    current_fundamentals,
+                    prior_fundamentals,
                 )
                 ethics = session.scalar(
                     select(EthicalEvaluation)
@@ -268,7 +304,7 @@ class MarketScreenerService:
                     .where(AIResearchAnalysis.ticker == security.ticker)
                     .order_by(AIResearchAnalysis.analysis_date.desc())
                 )
-                ai_attributable = bool(ai and ai.source_document_ids and ai.evidence)
+                ai_attributable = _ai_is_attributable(ai)
                 themes = list(
                     session.scalars(
                         select(BusinessTheme.theme)
@@ -283,6 +319,7 @@ class MarketScreenerService:
                     "security": security,
                     "price_row": price,
                     "fundamental": fundamental,
+                    "fundamental_field_provenance": field_provenance,
                     "price": current_price,
                     "valuation": valuation,
                     "quality": quality,
@@ -358,25 +395,14 @@ class MarketScreenerService:
         evaluation: date,
     ) -> LiveResearchRecord:
         categories = {
-            "earnings_growth": _mean(
-                percentile, CATEGORY_EVIDENCE_METRICS["earnings_growth"]
-            ),
-            "analyst_revisions": _mean(
-                percentile, CATEGORY_EVIDENCE_METRICS["analyst_revisions"]
-            ),
-            "business_quality": _mean(
-                percentile, CATEGORY_EVIDENCE_METRICS["business_quality"]
-            ),
-            "valuation": _mean(percentile, CATEGORY_EVIDENCE_METRICS["valuation"]),
-            "momentum": _mean(percentile, CATEGORY_EVIDENCE_METRICS["momentum"]),
-            "financial_strength": _mean(
-                percentile, CATEGORY_EVIDENCE_METRICS["financial_strength"]
-            ),
+            "earnings_growth": _category_score(percentile, "earnings_growth"),
+            "analyst_revisions": _category_score(percentile, "analyst_revisions"),
+            "business_quality": _category_score(percentile, "business_quality"),
+            "valuation": _category_score(percentile, "valuation"),
+            "momentum": _category_score(percentile, "momentum"),
+            "financial_strength": _category_score(percentile, "financial_strength"),
             "ai_research": data["ai"].ai_rating if data["ai_attributable"] else None,
-            "shareholder_return": _mean(
-                percentile,
-                CATEGORY_EVIDENCE_METRICS["shareholder_return"],
-            ),
+            "shareholder_return": _category_score(percentile, "shareholder_return"),
         }
         category_coverage = _category_evidence_coverage(
             raw_values, ai_available=data["ai_attributable"]
@@ -452,7 +478,10 @@ class MarketScreenerService:
             ),
             provenance={
                 "price": _provenance(price),
-                "fundamental": _provenance(fundamental),
+                "fundamental": {
+                    **_provenance(fundamental),
+                    "fields": data["fundamental_field_provenance"],
+                },
                 "estimate": _provenance(data["estimate_row"]),
                 "ai": {
                     "provider": data["ai"].provider,
@@ -466,6 +495,17 @@ class MarketScreenerService:
                     "as_of": evaluation.isoformat(),
                     "mode": "present-day-live",
                 },
+                "metrics": _metric_provenance(
+                    data["fundamental_field_provenance"],
+                    _provenance(price),
+                    _provenance(data["estimate_row"]),
+                    {
+                        "provider": data["ai"].provider,
+                        "model": data["ai"].model,
+                    }
+                    if data["ai_attributable"]
+                    else {},
+                ),
             },
             last_refreshed=refreshed,
             configuration_hash=_rating_hash(self.settings.rating_weights),
@@ -506,6 +546,18 @@ def _usable_close(price: Price | None) -> float | None:
         if value is not None and math.isfinite(value) and value > 0:
             return float(value)
     return None
+
+
+def _ai_is_attributable(ai: AIResearchAnalysis | None) -> bool:
+    return bool(
+        ai
+        and ai.source_document_ids
+        and ai.evidence
+        and ai.analyzed_document_ids
+        and ai.input_fingerprint
+        and ai.prompt_version
+        and ai.model
+    )
 
 
 def _select_estimate_series(
@@ -577,6 +629,21 @@ def _mean(row: pd.Series, names: tuple[str, ...]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _category_score(row: pd.Series, category: str) -> float | None:
+    names = CATEGORY_EVIDENCE_METRICS[category]
+    mandatory = CATEGORY_MANDATORY_METRICS[category]
+    if any(name not in row or pd.isna(row[name]) for name in mandatory):
+        return None
+    values = {
+        name: float(row[name]) for name in names if name in row and pd.notna(row[name])
+    }
+    if len(values) < CATEGORY_MINIMUM_METRICS[category]:
+        return None
+    weights = CATEGORY_METRIC_WEIGHTS[category]
+    available_weight = sum(weights[name] for name in values)
+    return sum(value * weights[name] for name, value in values.items()) / available_weight
+
+
 def _category_evidence_coverage(
     raw_values: pd.Series, *, ai_available: bool
 ) -> dict[str, float]:
@@ -585,12 +652,14 @@ def _category_evidence_coverage(
         if category == "ai_research":
             coverage[category] = 1.0 if ai_available else 0.0
             continue
+        weights = CATEGORY_METRIC_WEIGHTS[category]
         available = sum(
-            1
+            weights[metric]
             for metric in metrics
             if metric in raw_values and pd.notna(raw_values[metric])
         )
-        coverage[category] = available / len(metrics) if metrics else 0.0
+        expected = sum(weights.values())
+        coverage[category] = available / expected if expected else 0.0
     return coverage
 
 
@@ -649,7 +718,80 @@ def _fundamental_values(record, market_cap: float | None) -> dict:
     return {**{name: getattr(record, name) for name in names}, "market_cap": market_cap}
 
 
+def _select_live_fundamental_values(
+    records: list[Fundamental],
+) -> tuple[dict, dict, dict[str, dict]]:
+    """Select every field by explicit provider priority and keep growth provider-consistent."""
+    current: dict[str, float | None] = {}
+    prior: dict[str, float | None] = {}
+    provenance: dict[str, dict] = {}
+    for field, priority in LIVE_FUNDAMENTAL_SOURCE_PRIORITY.items():
+        usable = [
+            record
+            for record in records
+            if _finite_field(getattr(record, field, None), positive=field == "shares_outstanding")
+        ]
+        providers = {record.provider for record in usable}
+        provider = next((name for name in priority if name in providers), None)
+        if provider is None and providers:
+            provider = sorted(providers)[0]
+        provider_rows = sorted(
+            (record for record in usable if record.provider == provider),
+            key=lambda record: (record.period, record.publication_date or date.min, record.id),
+        )
+        if not provider_rows:
+            current[field] = None
+            prior[field] = None
+            continue
+        selected = provider_rows[-1]
+        earlier = next(
+            (record for record in reversed(provider_rows[:-1]) if record.period < selected.period),
+            None,
+        )
+        current[field] = float(getattr(selected, field))
+        prior[field] = float(getattr(earlier, field)) if earlier is not None else None
+        provenance[field] = {
+            **_provenance(selected),
+            "period": selected.period.isoformat(),
+            "provider_priority": list(priority),
+        }
+    return current, prior, provenance
+
+
+def _finite_field(value, *, positive: bool = False) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and (not positive or number > 0)
+
+
 def _rating_hash(weights: dict[str, float]) -> str:
     return hashlib.sha256(
         json.dumps(weights, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _metric_provenance(
+    fundamental: dict[str, dict], price: dict, estimate: dict, ai: dict
+) -> dict[str, dict]:
+    mapping = {
+        "eps_growth": "eps", "revenue_growth": "revenue",
+        "gross_margin": "gross_profit", "ebitda_margin": "ebitda",
+        "operating_margin": "ebit", "net_margin": "net_income",
+        "fcf_margin": "free_cash_flow", "roe": "net_income", "roa": "net_income",
+        "fcf_conversion": "free_cash_flow", "pe": "eps", "price_sales": "revenue",
+        "ev_ebitda": "ebitda", "price_fcf": "free_cash_flow",
+        "fcf_yield": "free_cash_flow", "earnings_yield": "eps",
+        "net_debt": "total_debt", "debt_ebitda": "total_debt",
+        "debt_equity": "total_debt", "current_ratio": "current_assets",
+        "interest_coverage": "interest_expense", "cash_flow_to_debt": "free_cash_flow",
+        "dividend_yield": "dividends_paid", "buyback_yield": "share_repurchases",
+        "total_shareholder_yield": "dividends_paid",
+    }
+    result = {metric: fundamental.get(field, {}) for metric, field in mapping.items()}
+    result.update({metric: price for metric in CATEGORY_EVIDENCE_METRICS["momentum"]})
+    result.update({metric: estimate for metric in CATEGORY_EVIDENCE_METRICS["analyst_revisions"]})
+    result["forward_pe"] = estimate
+    result["ai_research"] = ai
+    return result

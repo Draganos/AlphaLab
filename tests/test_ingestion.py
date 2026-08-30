@@ -76,3 +76,24 @@ def test_market_provider_cannot_replace_canonical_universe_exchange():
     )
     with Session(engine) as session:
         assert session.get(Security, "ABC").exchange == "NASDAQ"
+
+
+def test_provider_failure_or_missing_refresh_does_not_erase_valid_price():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    service = IngestionService(FakeProvider(), engine)
+    service.ingest("SAFE", date(2024, 1, 1), date(2024, 2, 1))
+
+    class MissingProvider(FakeProvider):
+        def get_price_history(self, ticker, start, end):
+            return pd.DataFrame(
+                {"close": [float("nan")], "adjusted_close": [float("inf")]},
+                index=pd.to_datetime(["2024-01-01"]),
+            )
+
+    IngestionService(MissingProvider(), engine).ingest(
+        "SAFE", date(2024, 1, 1), date(2024, 2, 1)
+    )
+    with Session(engine) as session:
+        price = session.scalar(select(Price).where(Price.ticker == "SAFE"))
+        assert price.close == price.adjusted_close == 10
