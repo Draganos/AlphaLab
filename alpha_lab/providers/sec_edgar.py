@@ -120,7 +120,7 @@ class SECCompanyFactsProvider:
         self.client = client
 
     def company_tickers(self) -> dict[str, str]:
-        payload = self.client.get_json("/files/company_tickers.json")
+        payload = self.client.get_json("https://www.sec.gov/files/company_tickers.json")
         return {
             str(row["ticker"]).upper(): str(row["cik_str"]).zfill(10)
             for row in payload.values()
