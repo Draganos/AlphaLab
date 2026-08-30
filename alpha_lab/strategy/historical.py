@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any
 import hashlib
 import json
+import math
 import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -38,7 +39,7 @@ class HistoricalScore:
     def candidate(self) -> Candidate:
         return Candidate(self.ticker, self.score, self.coverage, self.sector,
                          self.raw_factors.get("volatility"),
-                         has_price=pd.notna(self.raw_factors.get("last_price")),
+                         has_price=_valid_price(self.raw_factors.get("last_price")),
                          stale_price=self.exclusion_reason == "stale price",
                          sufficient_history=self.exclusion_reason != "insufficient history",
                          liquid=self.exclusion_reason != "liquidity rule")
@@ -61,18 +62,24 @@ class HistoricalScoringService:
                     continue
                 prices = session.scalars(select(Price).where(
                     Price.ticker == security.ticker, Price.date <= evaluation_date).order_by(Price.date)).all()
+                usable_prices = [item for item in prices if _price_value(item) is not None]
                 fundamentals = latest_fundamentals_as_of(session, security.ticker, evaluation_date)
-                series = pd.Series({item.date: item.adjusted_close or item.close for item in prices}, dtype=float)
+                series = pd.Series(
+                    {item.date: _price_value(item) for item in usable_prices}, dtype=float
+                )
                 frame = pd.DataFrame([{name: getattr(item, name) for name in
                     ["period", "publication_date", "ingested_at", "revenue", "ebitda", "net_income", "eps",
                      "free_cash_flow", "total_debt", "cash", "total_equity"]} for item in fundamentals])
                 raw[security.ticker] = calculate_factors(series, frame, evaluation_date)
-                recent_volume = [item.volume for item in prices[-20:] if item.volume is not None]
+                recent_volume = [
+                    item.volume for item in usable_prices[-20:]
+                    if item.volume is not None and math.isfinite(item.volume) and item.volume >= 0
+                ]
                 raw[security.ticker]["average_volume_20d"] = (
                     sum(recent_volume) / len(recent_volume) if recent_volume else float("nan"))
-                latest_date = prices[-1].date if prices else None
+                latest_date = usable_prices[-1].date if usable_prices else None
                 metadata[security.ticker] = (security.company_name, security.sector,
-                    self._pre_score_exclusion(len(prices), latest_date, evaluation_date,
+                    self._pre_score_exclusion(len(usable_prices), latest_date, evaluation_date,
                                               raw[security.ticker]["average_volume_20d"]))
         if not raw:
             return []
@@ -141,11 +148,29 @@ def _percentiles_against_valid_universe(raw: pd.DataFrame, valid_tickers: list[s
             reference = raw.loc[valid_tickers, column].dropna()
             if pd.isna(value) or reference.empty:
                 result.at[ticker, column] = float("nan")
+            elif (reference == value).any():
+                tied = result.loc[reference.index[reference == value], column]
+                result.at[ticker, column] = float(tied.mean())
             elif column in lower_is_better:
                 result.at[ticker, column] = float((reference >= value).mean() * 100)
             else:
                 result.at[ticker, column] = float((reference <= value).mean() * 100)
     return result.reindex(raw.index)
+
+
+def _price_value(price: Price) -> float | None:
+    for value in (price.adjusted_close, price.close):
+        if _valid_price(value):
+            return float(value)
+    return None
+
+
+def _valid_price(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number > 0
 
 
 def _historical_hash(composite_hash: str, min_score: float, minimum_coverage: float) -> str:

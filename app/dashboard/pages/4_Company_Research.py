@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from alpha_lab.config import load_settings
 from alpha_lab.database import make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
+from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.screener.service import CATEGORY_PROVENANCE
 
@@ -19,12 +20,21 @@ st.warning(
 settings = load_settings()
 engine = make_engine(settings.database_url)
 try:
-    records = MarketScreenerService(engine, settings).build_live_records()
+    records = MarketScreenerService(engine, settings).read_current_research()
+    current_build, _ = Phase3Repository(engine).latest_current_payloads()
     if not records:
-        st.info("Load attributable company data before using this page.")
+        st.info(
+            "No persisted current research build exists. Run "
+            "`python scripts/rebuild_research.py` after loading attributable data."
+        )
         st.stop()
     ticker = st.selectbox("Company", [item.ticker for item in records])
     item = next(value for value in records if value.ticker == ticker)
+    if current_build is not None:
+        st.caption(
+            f"Research rebuilt {current_build.built_at}; evaluation "
+            f"{current_build.evaluation_date}; version {current_build.score_version}"
+        )
     st.header(f"{item.company or ticker} · {ticker}")
     columns = st.columns(4)
     columns[0].metric(
@@ -121,9 +131,12 @@ try:
                     "Metric": metric,
                     "Value": item.raw_metrics.get(metric),
                     "Percentile / normalized": item.percentile_metrics.get(metric),
-                    "Source": item.provenance.get(
-                        CATEGORY_PROVENANCE[category], {}
-                    ).get("source"),
+                    "Source": item.provenance.get("metrics", {})
+                    .get(metric, item.provenance.get(CATEGORY_PROVENANCE[category], {}))
+                    .get("source")
+                    or item.provenance.get("metrics", {})
+                    .get(metric, {})
+                    .get("provider"),
                 }
                 for metric in metric_groups[category]
                 if item.raw_metrics.get(metric) is not None

@@ -48,6 +48,7 @@ def create_schema(engine: Engine) -> None:
             "interest_expense": "FLOAT",
             "dividends_paid": "FLOAT",
             "share_repurchases": "FLOAT",
+            "provenance_json": "JSON",
         },
         "estimates": {
             "currency": "VARCHAR(8)",
@@ -64,6 +65,10 @@ def create_schema(engine: Engine) -> None:
         },
         "ethical_evaluations": {
             "evidence_fingerprint": "VARCHAR(64)",
+        },
+        "ai_research_analyses": {
+            "analyzed_document_ids": "JSON",
+            "input_fingerprint": "VARCHAR(64)",
         },
     }
     if engine.dialect.name == "sqlite":
@@ -87,6 +92,12 @@ def create_schema(engine: Engine) -> None:
                 text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS ix_estimates_observation_hash "
                     "ON estimates (observation_hash) WHERE observation_hash IS NOT NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_ai_research_input_fingerprint "
+                    "ON ai_research_analyses (input_fingerprint)"
                 )
             )
 

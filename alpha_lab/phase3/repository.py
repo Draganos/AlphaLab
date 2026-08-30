@@ -1,6 +1,8 @@
 """Persistence for Phase 3 evidence, ethical decisions, themes, AI research, and screens."""
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
@@ -11,9 +13,14 @@ from alpha_lab.database.models import (
     BusinessTheme,
     EthicalEvaluation,
     SavedScreener,
+    CurrentResearchBuild,
+    CurrentResearchSnapshot,
 )
 from alpha_lab.ethics import EthicalDecision
 from alpha_lab.themes import ThemeEvidence
+
+if TYPE_CHECKING:
+    from alpha_lab.screener.service import LiveResearchRecord
 
 
 class Phase3Repository:
@@ -103,12 +110,15 @@ class Phase3Repository:
         ticker: str,
         result: AIResearchResult,
         *,
+        analyzed_document_ids: list[int] | None = None,
         input_document_fingerprint: str | None = None,
     ) -> AIResearchAnalysis:
         with Session(self.engine, expire_on_commit=False) as session:
             record = AIResearchAnalysis(
                 ticker=ticker,
                 source_document_ids=[item.document_id for item in result.evidence],
+                analyzed_document_ids=analyzed_document_ids,
+                input_fingerprint=input_document_fingerprint,
                 component_scores={
                     key: value
                     for key, value in result.model_dump().items()
@@ -167,3 +177,74 @@ class Phase3Repository:
         with Session(self.engine) as session:
             session.execute(delete(SavedScreener).where(SavedScreener.name == name))
             session.commit()
+
+    def save_current_research(
+        self, records: Sequence["LiveResearchRecord"]
+    ) -> CurrentResearchBuild | None:
+        """Persist one immutable current-only build atomically."""
+        if not records:
+            return None
+
+        # Import locally because the screener service uses this repository. Validation
+        # deliberately happens before a session is opened so a malformed batch cannot
+        # leave even a flushed build header behind.
+        from alpha_lab.screener.service import LiveResearchRecord
+
+        if any(not isinstance(record, LiveResearchRecord) for record in records):
+            raise TypeError("current research builds require LiveResearchRecord instances")
+
+        normalized_tickers = [record.ticker.strip().upper() for record in records]
+        if any(not ticker for ticker in normalized_tickers):
+            raise ValueError("current research build tickers must be non-empty")
+        if len(set(normalized_tickers)) != len(normalized_tickers):
+            raise ValueError("current research build tickers must be unique")
+
+        first = records[0]
+        if any(record.evaluation_date != first.evaluation_date for record in records[1:]):
+            raise ValueError("current research build has mixed evaluation dates")
+        if any(record.rating_version != first.rating_version for record in records[1:]):
+            raise ValueError("current research build has mixed rating versions")
+        if any(
+            record.configuration_hash != first.configuration_hash
+            for record in records[1:]
+        ):
+            raise ValueError("current research build has mixed configuration hashes")
+
+        with Session(self.engine, expire_on_commit=False) as session:
+            build = CurrentResearchBuild(
+                evaluation_date=first.evaluation_date,
+                score_version=first.rating_version,
+                config_hash=first.configuration_hash,
+                security_count=len(records),
+            )
+            session.add(build)
+            session.flush()
+            session.add_all(
+                CurrentResearchSnapshot(
+                    build_id=build.id,
+                    ticker=record.ticker,
+                    payload=record.model_dump(mode="json"),
+                )
+                for record in records
+            )
+            session.commit()
+            return build
+
+    def latest_current_payloads(self) -> tuple[CurrentResearchBuild | None, list[dict]]:
+        """Read the latest complete build without invoking providers or writing state."""
+        with Session(self.engine, expire_on_commit=False) as session:
+            build = session.scalar(
+                select(CurrentResearchBuild).order_by(
+                    CurrentResearchBuild.built_at.desc(), CurrentResearchBuild.id.desc()
+                )
+            )
+            if build is None:
+                return None, []
+            payloads = list(
+                session.scalars(
+                    select(CurrentResearchSnapshot.payload)
+                    .where(CurrentResearchSnapshot.build_id == build.id)
+                    .order_by(CurrentResearchSnapshot.ticker)
+                )
+            )
+            return build, payloads

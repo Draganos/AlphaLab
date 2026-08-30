@@ -7,7 +7,12 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import make_engine
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.screener import MarketScreenerService
-from alpha_lab.search import ScreenCriteria, ScreenRecord, apply_screen, interpret_query
+from alpha_lab.search import (
+    DeterministicQueryInterpreter,
+    ScreenCriteria,
+    ScreenRecord,
+    apply_screen,
+)
 
 st.set_page_config(page_title="AlphaLab Market Screener", layout="wide")
 st.title("Market Screener")
@@ -46,8 +51,23 @@ try:
         "Natural-language pull search",
         placeholder="Find Sharia-preferred semiconductor companies with strong growth, low debt and score above 75",
     )
-    criteria = interpret_query(query) if query else loaded
-    records = MarketScreenerService(engine, settings).build_live_records()
+    # UI reruns are deliberately offline/read-only. Optional network-backed query
+    # interpretation belongs in an explicit operation, never a widget rerun.
+    criteria = DeterministicQueryInterpreter().interpret(query) if query else loaded
+    records = MarketScreenerService(engine, settings).read_current_research()
+    current_build, _ = repository.latest_current_payloads()
+    if not records:
+        st.info(
+            "No persisted current research build exists. Run "
+            "`python scripts/rebuild_research.py` after loading data."
+        )
+    elif current_build is not None:
+        st.caption(
+            f"Last research rebuild: {current_build.built_at} · "
+            f"Evaluation: {current_build.evaluation_date} · "
+            f"Score version: {current_build.score_version} · "
+            f"Config: {current_build.config_hash[:12]}"
+        )
     sectors = sorted({item.sector for item in records if item.sector})
     industries = sorted({item.industry for item in records if item.industry})
     exchanges = sorted({item.exchange for item in records if item.exchange})

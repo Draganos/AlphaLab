@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 import json
+import math
 import os
 import re
 from typing import Literal
@@ -45,19 +46,19 @@ class ScreenRecord(BaseModel):
     industry: str | None = None
     themes: list[str] = Field(default_factory=list)
     ethical_status: str = "UNKNOWN"
-    overall_score: float | None = None
+    overall_score: float | None = Field(None, ge=0, le=100)
     overall_rank: int | None = None
-    growth_score: float | None = None
-    revisions_score: float | None = None
-    quality_score: float | None = None
-    valuation_score: float | None = None
-    momentum_score: float | None = None
-    financial_strength_score: float | None = None
-    ai_research_score: float | None = None
-    shareholder_return_score: float | None = None
-    debt_to_ebitda: float | None = None
-    market_cap: float | None = None
-    coverage: float = 0.0
+    growth_score: float | None = Field(None, ge=0, le=100)
+    revisions_score: float | None = Field(None, ge=0, le=100)
+    quality_score: float | None = Field(None, ge=0, le=100)
+    valuation_score: float | None = Field(None, ge=0, le=100)
+    momentum_score: float | None = Field(None, ge=0, le=100)
+    financial_strength_score: float | None = Field(None, ge=0, le=100)
+    ai_research_score: float | None = Field(None, ge=0, le=100)
+    shareholder_return_score: float | None = Field(None, ge=0, le=100)
+    debt_to_ebitda: float | None = Field(None, ge=0)
+    market_cap: float | None = Field(None, ge=0)
+    coverage: float = Field(0.0, ge=0, le=1)
 
 
 class QueryInterpretationProvider(ABC):
@@ -195,9 +196,9 @@ def apply_screen(
     descending = criteria.sort.endswith("_desc")
     filtered.sort(
         key=lambda item: (
-            item.overall_score is None,
+            not _usable_score(item.overall_score),
             (-item.overall_score if descending else item.overall_score)
-            if item.overall_score is not None
+            if _usable_score(item.overall_score)
             else 0,
             item.ticker,
         )
@@ -205,6 +206,10 @@ def apply_screen(
     for rank, record in enumerate(filtered, 1):
         record.overall_rank = rank
     return filtered
+
+
+def _usable_score(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and 0 <= value <= 100
 
 
 def _matches(record: ScreenRecord, criteria: ScreenCriteria) -> bool:
@@ -261,21 +266,21 @@ def _matches(record: ScreenRecord, criteria: ScreenCriteria) -> bool:
 
 def _score_threshold(text: str, criteria: ScreenCriteria) -> None:
     score = re.search(
-        r"(?:score|rating)\s+(?:above|over|at least)\s+(\d+(?:\.\d+)?)", text
+        r"(?:score|rating)\s+(?:above|over|at least)\s+([-+]?\d+(?:\.\d+)?)", text
     )
     if score:
         value = float(score.group(1))
-        if value <= 100:
+        if 0 <= value <= 100:
             criteria.minimum_overall_score = value
         else:
             criteria.unsupported.append(score.group(0))
     coverage = re.search(
-        r"coverage\s+(?:above|over|at least)\s+(\d+(?:\.\d+)?)(%)?", text
+        r"coverage\s+(?:above|over|at least)\s+([-+]?\d+(?:\.\d+)?)(%)?", text
     )
     if coverage:
         value = float(coverage.group(1))
         normalized = value / 100 if coverage.group(2) or value > 1 else value
-        if normalized <= 1:
+        if 0 <= normalized <= 1:
             criteria.minimum_coverage = normalized
         else:
             criteria.unsupported.append(coverage.group(0))

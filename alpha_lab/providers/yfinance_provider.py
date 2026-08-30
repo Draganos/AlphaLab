@@ -2,6 +2,7 @@
 
 from datetime import date
 from typing import Any
+import math
 import pandas as pd
 
 from alpha_lab.providers.base import MarketDataProvider
@@ -41,7 +42,7 @@ class YFinanceProvider(MarketDataProvider):
             "currency": info.get("currency"),
             "industry": info.get("industry"),
             "asset_type": info.get("quoteType"),
-            "market_cap": info.get("marketCap"),
+            "market_cap": _number(info.get("marketCap"), positive=True),
             "business_description": info.get("longBusinessSummary"),
             "metadata_provider": self.provider_name,
             "metadata_source": "yfinance quoteSummary",
@@ -63,7 +64,7 @@ class YFinanceProvider(MarketDataProvider):
                     or pd.isna(frame.at[label, period])
                 ):
                     return None
-                return float(frame.at[label, period])
+                return _number(frame.at[label, period])
 
             rows.append(
                 {
@@ -91,3 +92,13 @@ class YFinanceProvider(MarketDataProvider):
                 }
             )
         return pd.DataFrame(rows)
+
+
+def _number(value: Any, *, positive: bool = False) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or (positive and number <= 0):
+        return None
+    return number

@@ -232,6 +232,9 @@ def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
             == "fixture-fundamentals"
         )
         assert records["VALID"].provenance["estimate"]["source"] == "fixture-estimates"
+        assert records["VALID"].provenance["metrics"]["return_1m"]["source"] == "fixture-prices"
+        assert records["VALID"].provenance["metrics"]["ebitda_margin"]["source"] == "fixture-fundamentals"
+        assert records["VALID"].provenance["metrics"]["eps_revision_30d"]["source"] == "fixture-estimates"
         assert records["STALE"].data_quality_status == "stale price"
         assert records["STALE"].overall_rank is None
         assert records["STALE"].percentile_metrics["return_1m"] is not None

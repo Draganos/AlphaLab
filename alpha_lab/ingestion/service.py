@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 import hashlib
 import json
 import logging
+import math
 import pandas as pd
 from sqlalchemy import Engine
 
@@ -55,7 +56,9 @@ class IngestionService:
                     ]
                 }
                 values.update(
-                    currency=currency, provider=provider_name, source=row.get("source")
+                    currency=currency,
+                    provider=provider_name,
+                    source=self._text(row.get("source")),
                 )
                 existing = (
                     session.query(Price)
@@ -64,7 +67,8 @@ class IngestionService:
                 )
                 if existing:
                     for key, value in values.items():
-                        setattr(existing, key, value)
+                        if value is not None:
+                            setattr(existing, key, value)
                 else:
                     session.add(
                         Price(ticker=symbol, date=pd.Timestamp(index).date(), **values)
@@ -112,7 +116,14 @@ class IngestionService:
 
     @staticmethod
     def _number(value):
-        return None if value is None or pd.isna(value) else float(value)
+        if value is None or pd.isna(value):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _text(value):
+        return None if value is None or pd.isna(value) else str(value)
 
     @staticmethod
     def _date(value):
