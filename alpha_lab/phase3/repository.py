@@ -1,6 +1,8 @@
 """Persistence for Phase 3 evidence, ethical decisions, themes, AI research, and screens."""
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
@@ -16,6 +18,9 @@ from alpha_lab.database.models import (
 )
 from alpha_lab.ethics import EthicalDecision
 from alpha_lab.themes import ThemeEvidence
+
+if TYPE_CHECKING:
+    from alpha_lab.screener.service import LiveResearchRecord
 
 
 class Phase3Repository:
@@ -173,11 +178,38 @@ class Phase3Repository:
             session.execute(delete(SavedScreener).where(SavedScreener.name == name))
             session.commit()
 
-    def save_current_research(self, records: list) -> CurrentResearchBuild | None:
+    def save_current_research(
+        self, records: Sequence["LiveResearchRecord"]
+    ) -> CurrentResearchBuild | None:
         """Persist one immutable current-only build atomically."""
         if not records:
             return None
+
+        # Import locally because the screener service uses this repository. Validation
+        # deliberately happens before a session is opened so a malformed batch cannot
+        # leave even a flushed build header behind.
+        from alpha_lab.screener.service import LiveResearchRecord
+
+        if any(not isinstance(record, LiveResearchRecord) for record in records):
+            raise TypeError("current research builds require LiveResearchRecord instances")
+
+        normalized_tickers = [record.ticker.strip().upper() for record in records]
+        if any(not ticker for ticker in normalized_tickers):
+            raise ValueError("current research build tickers must be non-empty")
+        if len(set(normalized_tickers)) != len(normalized_tickers):
+            raise ValueError("current research build tickers must be unique")
+
         first = records[0]
+        if any(record.evaluation_date != first.evaluation_date for record in records[1:]):
+            raise ValueError("current research build has mixed evaluation dates")
+        if any(record.rating_version != first.rating_version for record in records[1:]):
+            raise ValueError("current research build has mixed rating versions")
+        if any(
+            record.configuration_hash != first.configuration_hash
+            for record in records[1:]
+        ):
+            raise ValueError("current research build has mixed configuration hashes")
+
         with Session(self.engine, expire_on_commit=False) as session:
             build = CurrentResearchBuild(
                 evaluation_date=first.evaluation_date,
