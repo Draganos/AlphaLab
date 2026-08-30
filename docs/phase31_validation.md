@@ -33,11 +33,11 @@ Deterministic 25-security run:
 
 | Operation | Time |
 |---|---:|
-| Legacy home historical build, configured 5 tickers | 0.070459 s |
-| Explicit current-research rebuild, 25 tickers | 0.728790 s |
-| Market Screener persisted read, 25 tickers | 0.008087 s |
-| Filter change, 25 records | 0.000833 s |
-| Sort change, 25 records | 0.000737 s |
+| Legacy home historical build, configured 5 tickers | 0.065664 s |
+| Explicit current-research rebuild, 25 tickers | 0.667773 s |
+| Market Screener persisted read, 25 tickers | 0.007141 s |
+| Filter change, 25 records | 0.000811 s |
+| Sort change, 25 records | 0.000718 s |
 
 Filter/sort performed zero network operations and zero database writes. UI page render paths perform no network, AI, ethics persistence, theme generation or research rebuild. User-triggered saved-screener save/rename/delete operations remain intentional writes. The explicit rebuild still has N+1 query work and is the main remaining performance bottleneck; it is no longer on widget reruns.
 

@@ -6,7 +6,12 @@ AlphaLab is a local, transparent quantitative investment-research application. P
 
 ## Phase status
 
-Phase 1.5 provides the ingestion/scoring vertical slice. Phase 2 adds deterministic point-in-time backtesting, simple constrained portfolio construction, passive/manual/systematic comparisons, and expanding walk-forward validation. Estimate-revision scoring, AI analysis, UAE ingestion, brokerage execution, leverage, shorts, options, ML prediction, and parameter mining remain out of scope.
+- **Phase 1.5** provides the reproducible ingestion, database, factor, scoring, and offline-fixture foundation.
+- **Phase 2** provides historical point-in-time backtesting, constrained portfolio construction, passive/manual/systematic comparisons, and expanding walk-forward validation. It does not backfill current Phase 3 evidence into history.
+- **Phase 3** provides broad market discovery, Sharia-preferred research filtering, prospectively timestamped estimate revisions, optional attributable AI document analysis, themes, saved screens, and company research.
+- **Phase 3.1** hardens provider capabilities and field priority, adds the SEC Companyfacts vertical, persists current-only research snapshots, strengthens evidence coverage, and makes Streamlit filtering/sorting read-oriented.
+
+Remaining future work includes validated historical universe membership, UAE ingestion, brokerage execution, leverage, shorts, options, ML prediction, and parameter mining. These are not presented as implemented.
 
 ## Architecture
 
@@ -40,12 +45,15 @@ Missing values stay `NULL`/`NaN`. Composite scoring reports its data coverage an
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.lock
+python -m pip install --no-deps -e .
 cp .env.example .env
 python scripts/init_db.py
 ```
 
-Direct runtime and test dependencies are exact-version pinned in `pyproject.toml` and `requirements.txt`. Teams requiring a fully transitive lock should generate and commit a platform-appropriate lock file in their controlled package environment.
+`pyproject.toml` and `requirements.txt` retain the direct dependency declarations. `requirements.lock` pins the complete validated Python 3.12 runtime and test dependency graph; install it first and then install AlphaLab editable with `--no-deps` as shown above. Regenerate the lock intentionally whenever direct dependencies change. Exact package versions improve reproducibility, but AlphaLab does not claim bit-identical floating-point output across operating systems, CPU architectures, or BLAS implementations; numerical tests use tolerances where appropriate.
+
+The project retains a pip-compatible lock rather than `uv.lock` because its established installation/CI interface is `requirements.txt`/pip and registry metadata was unavailable while preparing this clean integration. The lock is checked against the installed transitive graph in the offline suite; a future intentional packaging migration may replace it with a generated `uv.lock`.
 
 ## Verify installation (offline deterministic workflow)
 
@@ -55,13 +63,14 @@ After dependencies have been installed, this exact workflow requires no market-d
 python scripts/init_db.py
 python scripts/smoke_test.py
 python scripts/smoke_test_phase2.py
+python scripts/smoke_test_phase3.py
 pytest
 streamlit run app/dashboard/main.py --server.headless true
 ```
 
 The smoke test creates a temporary SQLite database, loads data clearly identified as a deterministic synthetic fixture, runs the same ingestion, factor, and composite-scoring path, asserts usable output, and deletes the database. Synthetic observations use the `synthetic-fixture-v1` provider provenance and must never be interpreted as actual securities or market history. Stop the final dashboard command with `Ctrl-C` after its health check succeeds.
 
-All important defaults live in `config/default.yaml`. Set `ALPHALAB_CONFIG` to use another YAML file or `ALPHALAB_DATABASE_URL` to override the database. There are no required secrets in Phase 1; `OPENAI_API_KEY` is merely documented for the optional future AI analyst.
+All important defaults live in `config/default.yaml`. Set `ALPHALAB_CONFIG` to use another YAML file or `ALPHALAB_DATABASE_URL` to override the database. Offline verification requires no secrets. `OPENAI_API_KEY` enables the already implemented optional Phase 3 AI analyst; without it, AI evidence remains unavailable and the application continues normally.
 
 ## Load real US data
 
@@ -110,7 +119,8 @@ Windows PowerShell:
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.lock
+python -m pip install --no-deps -e .
 Copy-Item .env.example .env
 python scripts/init_db.py
 python scripts/smoke_test.py
@@ -169,7 +179,7 @@ The configured UAE universe is EMAAR, ALEC, DUBAIRESI, PARKIN, AIRARABIA, ALDAR,
 - Percentile ranks are relative to the loaded universe. Very small universes make ranks unstable.
 - Fundamentals supplied by yfinance can be sparse, restated, or have unknown publication dates. They are suitable for current screening, not yet for historical simulation.
 - ETFs may not have company-style financial statements. Their related factors correctly remain unavailable.
-- Phase 1 valuation, dividend, estimate-revision, and AI categories remain visibly unavailable until audited sources and their later engines are implemented.
+- The legacy Phase 1 screener does not retroactively gain Phase 3 evidence. The Phase 3 Market Screener implements current valuation, shareholder-return, prospective estimate-revision, and optional attributable AI categories; missing provider evidence remains visibly unavailable.
 - Renormalized scores with low data coverage should not be compared as if they had complete evidence. Always inspect the coverage and breakdown.
 - Market data may be delayed, adjusted, incomplete, or changed by its upstream provider. AlphaLab stores what the provider returned and never fills a missing observation with invented data.
 
