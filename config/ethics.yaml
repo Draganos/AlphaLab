@@ -1,0 +1,28 @@
+mode: sharia_preferred
+policy_version: sharia-preferred-v1
+hard_exclusions:
+  conventional_banking: true
+  interest_based_lending: true
+  weapons: true
+  gambling: true
+  alcohol_production: true
+  tobacco: true
+  adult_entertainment: true
+  pork_primary_business: true
+review_categories:
+  conventional_insurance: true
+  mixed_financial_services: true
+  defence_non_weapon_supplier: true
+  material_non_compliant_revenue: true
+allowed_categories:
+  airlines: true
+  payment_processing: true
+  payment_networks: true
+  general_operating_business: true
+financial_screen:
+  enforce_as_hard_filter: false
+  display_debt_metrics: true
+  display_interest_exposure: true
+unknown_company_policy: review
+manual_allow: []
+manual_exclude: []

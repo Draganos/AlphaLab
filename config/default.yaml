@@ -1,0 +1,58 @@
+database_url: sqlite:///data/alpha_lab.db
+universe:
+  us: [NVDA, MA, AAL, FTEC, GDX]
+  uae: [EMAAR, ALEC, DUBAIRESI, PARKIN, AIRARABIA, ALDAR, ADNOCGAS, EAND, SALIK, DU]
+strategy:
+  rebalance: monthly
+  min_score: 70
+  min_positions: 3
+  max_positions: 10
+  minimum_data_coverage: 0.70
+  minimum_average_daily_volume: 0
+weights:
+  earnings: 0.20
+  revisions: 0.20
+  fundamentals: 0.10
+  valuation: 0.15
+  momentum: 0.15
+  balance_sheet: 0.10
+  ai: 0.05
+  dividend: 0.05
+rating_weights:
+  earnings_growth: 0.15
+  analyst_revisions: 0.15
+  business_quality: 0.15
+  valuation: 0.15
+  momentum: 0.15
+  financial_strength: 0.10
+  ai_research: 0.10
+  shareholder_return: 0.05
+ethics_policy_path: config/ethics.yaml
+coverage:
+  insufficient_below: 0.40
+  full_confidence_at: 0.70
+risk:
+  max_position: 0.20
+  max_sector: 0.30
+  no_leverage: true
+paper_trading:
+  initial_value_aed: 5000
+  experimental_sleeve_initial_limit: 0.05
+  experimental_sleeve_max_after_validation: 0.10
+data_quality:
+  stale_price_days: 5
+  live_minimum_average_daily_volume: 100000
+backtest:
+  initial_capital: 100000
+  base_currency: USD
+  rebalance: monthly
+  weighting: equal
+  fractional_shares: true
+  risk_free_rate: 0.0
+  execution: next_available_open
+  costs:
+    fixed_commission: 0.0
+    percentage_commission: 0.001
+    spread: 0.001
+    slippage: 0.0005
+    minimum_trade_amount: 10.0

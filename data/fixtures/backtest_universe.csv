@@ -1,0 +1,5 @@
+ticker,scenario,minimum_expected_coverage,fundamental_change_publication_date
+SYNTH_A,consistent_uptrend,0.70,
+SYNTH_B,consistent_downtrend,0.70,
+SYNTH_C,insufficient_coverage,0.15,
+SYNTH_D,late_fundamental_improvement,0.70,2024-07-15
