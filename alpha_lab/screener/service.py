@@ -593,6 +593,7 @@ def _select_estimate_series(
 def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
     if not eligible:
         return pd.DataFrame(index=raw.index, columns=raw.columns, dtype=float)
+
     lower = {
         "pe",
         "forward_pe",
@@ -607,20 +608,34 @@ def _live_percentiles(raw: pd.DataFrame, eligible: list[str]) -> pd.DataFrame:
         "volatility",
         "debt_to_ebitda",
     }
-    result = percentile_scores(raw.loc[eligible], lower)
+
+    eligible_raw = raw.loc[eligible]
+    result = percentile_scores(eligible_raw, lower)
+
+    references = {
+        column: eligible_raw[column].dropna()
+        for column in raw.columns
+    }
+
     for ticker in raw.index.difference(eligible):
         for column in raw.columns:
             value = raw.at[ticker, column]
-            reference = raw.loc[eligible, column].dropna()
+            reference = references[column]
+
             if pd.isna(value) or reference.empty:
                 result.at[ticker, column] = float("nan")
             elif (reference == value).any():
                 tied = result.loc[reference.index[reference == value], column]
                 result.at[ticker, column] = float(tied.mean())
             elif column in lower:
-                result.at[ticker, column] = float((reference >= value).mean() * 100)
+                result.at[ticker, column] = float(
+                    (reference >= value).mean() * 100
+                )
             else:
-                result.at[ticker, column] = float((reference <= value).mean() * 100)
+                result.at[ticker, column] = float(
+                    (reference <= value).mean() * 100
+                )
+
     return result.reindex(raw.index)
 
 
