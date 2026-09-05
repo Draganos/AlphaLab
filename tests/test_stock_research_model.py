@@ -525,3 +525,33 @@ def test_stock_research_carries_scoring_configuration_for_reproducibility():
     )
     assert research.rating_version == "phase3-live-v2"
     assert research.configuration_hash == "abc123"
+
+
+# --- Regression coverage for the fourth Codex review round (commit TBD) ----
+
+
+def test_confidence_label_is_derived_from_the_new_score_not_the_legacy_one():
+    """A record can carry a legacy 'Exceptional candidate' style label
+    (score/coverage only) while its evidence is stale/partial-quality, so
+    confidence_label must never simply mirror that legacy string."""
+    record = _record(
+        overall_score=95.0,
+        overall_live_coverage=0.95,
+        confidence="Exceptional candidate",
+        data_quality_status="stale price",
+    )
+    research = build_stock_research(record)
+    assert research.score_interpretation == "Exceptional candidate"
+    assert research.confidence_label != "Exceptional candidate"
+    assert research.confidence < 5.0
+    assert research.confidence_label in {"Low confidence", "Very low confidence"}
+
+
+def test_confidence_label_bands_track_the_numeric_confidence():
+    from alpha_lab.research.build import _confidence_label
+
+    assert _confidence_label(9.0) == "High confidence"
+    assert _confidence_label(7.5) == "High confidence"
+    assert _confidence_label(6.0) == "Moderate confidence"
+    assert _confidence_label(3.0) == "Low confidence"
+    assert _confidence_label(0.0) == "Very low confidence"

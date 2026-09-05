@@ -123,7 +123,17 @@ class StockResearch(BaseModel):
     overall_score: float | None = Field(None, ge=0, le=100)
     overall_coverage: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=10)
+    # Deterministic band derived from `confidence` itself (see
+    # alpha_lab.research.build._confidence_label) — kept distinct from
+    # `score_interpretation` below, which is a *different* legacy label
+    # (alpha_lab.strategy.scoring.coverage_interpretation) driven only by
+    # overall_score/overall_coverage and blind to freshness, source
+    # quality, or a data-quality penalty. A record can score well and be
+    # fully covered yet still carry low `confidence` because its evidence
+    # is stale or partial-quality; conflating the two labels would let a
+    # high score_interpretation mask that.
     confidence_label: str
+    score_interpretation: str
     strengths: list[str]
     weaknesses: list[str]
     risks: list[str]

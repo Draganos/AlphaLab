@@ -69,6 +69,16 @@ _DATA_QUALITY_PENALTY = 0.6
 _FRESH_WINDOW_DAYS = 90
 _STALE_WINDOW_DAYS = 365
 
+# Deterministic bands for confidence_label, on the same 0-10 scale as
+# `confidence` itself — kept separate from score_interpretation, which
+# bands the unrelated legacy overall_score/overall_coverage label.
+_CONFIDENCE_LABEL_BANDS = (
+    (7.5, "High confidence"),
+    (5.0, "Moderate confidence"),
+    (2.5, "Low confidence"),
+)
+_CONFIDENCE_LABEL_FLOOR = "Very low confidence"
+
 
 def build_stock_research(
     record: LiveResearchRecord, *, generated_at: datetime | None = None
@@ -93,7 +103,8 @@ def build_stock_research(
         overall_score=record.overall_score,
         overall_coverage=record.overall_live_coverage,
         confidence=confidence,
-        confidence_label=record.confidence,
+        confidence_label=_confidence_label(confidence),
+        score_interpretation=record.confidence,
         strengths=strengths,
         weaknesses=weaknesses,
         risks=risks,
@@ -208,6 +219,13 @@ def _strengths_weaknesses_risks(
     if data_quality_status != "valid":
         risks.append(f"Price data quality issue detected: {data_quality_status}.")
     return strengths, weaknesses, risks
+
+
+def _confidence_label(confidence: float) -> str:
+    for threshold, label in _CONFIDENCE_LABEL_BANDS:
+        if confidence >= threshold:
+            return label
+    return _CONFIDENCE_LABEL_FLOOR
 
 
 def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult]) -> float:
