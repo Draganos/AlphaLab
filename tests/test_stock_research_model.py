@@ -1,6 +1,8 @@
 """Unit tests for the canonical StockResearch conversion layer."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
 
 from alpha_lab.research import (
     CATEGORY_ORDER,
@@ -142,12 +144,11 @@ def test_data_quality_issue_penalizes_confidence():
     assert any("stale price" in r for r in stale_research.risks)
 
 
-def test_missing_refresh_timestamp_does_not_crash_and_lowers_confidence():
-    fresh = _record(overall_live_coverage=0.5, last_refreshed=datetime(2026, 1, 14, tzinfo=UTC))
-    missing = _record(overall_live_coverage=0.5, last_refreshed=None)
-    fresh_research = build_stock_research(fresh)
-    missing_research = build_stock_research(missing)
-    assert missing_research.confidence < fresh_research.confidence
+def test_missing_metric_evidence_timestamps_does_not_crash_and_yields_zero_freshness():
+    from alpha_lab.research.build import _freshness_factor
+
+    empty_categories = build_stock_research(_record()).categories
+    assert _freshness_factor(_EVALUATION, empty_categories) == 0.0
 
 
 def test_categories_cover_all_eight_canonical_names_in_order():
@@ -165,3 +166,244 @@ def test_generated_at_defaults_to_now_when_not_supplied():
     before = datetime.now(UTC)
     research = build_stock_research(_record())
     assert research.generated_at >= before
+
+
+# --- Regression coverage for the Codex review fixes on PR #13 -------------
+
+
+def _record_with_single_metric(
+    *, metric_name: str, category: str, value: float, period: date,
+    provider: str = "SECCompanyFactsProvider", score: float | None = None,
+    coverage: float = 0.0, **overrides,
+) -> LiveResearchRecord:
+    category_scores = {name: None for name in CATEGORY_ORDER}
+    category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
+    category_scores[category] = score
+    category_coverage[category] = coverage
+    return _record(
+        category_scores=category_scores,
+        category_coverage=category_coverage,
+        raw_metrics={metric_name: value},
+        percentile_metrics={metric_name: 50.0},
+        provenance={
+            "metrics": {
+                metric_name: {"provider": provider, "period": period.isoformat()},
+            }
+        },
+        **overrides,
+    )
+
+
+# 1. Growth formula provenance must match alpha_lab.ratings.quality._growth
+# exactly, including the sign-flip when the prior period is negative.
+
+
+def test_eps_growth_formula_text_matches_calculate_quality_factors_for_all_sign_combinations():
+    from alpha_lab.ratings.quality import calculate_quality_factors
+
+    cases = [
+        (120.0, 100.0, 0.2),  # positive -> positive
+        (-120.0, -100.0, -0.2),  # negative -> negative
+        (50.0, -100.0, 1.5),  # negative -> positive
+        (-50.0, 100.0, -1.5),  # positive -> negative
+    ]
+    for current, prior, expected in cases:
+        result = calculate_quality_factors({"eps": current}, {"eps": prior})
+        assert result["eps_growth"] == pytest.approx(expected), (current, prior)
+        # The documented formula (alpha_lab.research.formulas.FORMULAS["eps_growth"])
+        # is "Current / abs(Prior) - (1 if Prior > 0 else -1)"; verify that
+        # description independently reproduces the same engine output.
+        documented = current / abs(prior) - (1 if prior > 0 else -1)
+        assert documented == pytest.approx(expected)
+
+
+def test_revenue_growth_formula_text_matches_calculate_quality_factors_for_all_sign_combinations():
+    """Unlike eps_growth, revenue_growth's *current* side is filtered by
+    alpha_lab.ratings.quality._positive() before the growth formula ever
+    runs, so a non-positive current revenue is always None (not merely a
+    sign-flip case) — the formula text documents this explicitly."""
+    from alpha_lab.ratings.quality import calculate_quality_factors
+
+    cases = [
+        (1200.0, 1000.0, 0.2),  # positive current -> positive prior
+        (500.0, -1000.0, 1.5),  # positive current -> negative prior
+    ]
+    for current, prior, expected in cases:
+        result = calculate_quality_factors({"revenue": current}, {"revenue": prior})
+        assert result["revenue_growth"] == pytest.approx(expected), (current, prior)
+
+    for current in (-1200.0, 0.0):
+        result = calculate_quality_factors({"revenue": current}, {"revenue": 1000.0})
+        assert result["revenue_growth"] is None, current
+
+
+def test_growth_is_undefined_not_zero_when_prior_is_zero_or_missing():
+    from alpha_lab.ratings.quality import calculate_quality_factors
+
+    assert calculate_quality_factors({"eps": 10.0}, {"eps": 0.0})["eps_growth"] is None
+    assert calculate_quality_factors({"eps": 10.0}, {})["eps_growth"] is None
+    assert calculate_quality_factors({"revenue": 10.0}, {"revenue": 0.0})["revenue_growth"] is None
+
+
+# 2. debt_ebitda / cash_flow_to_debt must not claim net_debt as an input;
+# the engine actually divides by gross total debt.
+
+
+def test_debt_ebitda_and_cash_flow_to_debt_do_not_claim_net_debt_as_an_input():
+    from alpha_lab.research.formulas import KNOWN_INPUT_METRICS
+
+    assert "debt_ebitda" not in KNOWN_INPUT_METRICS
+    assert "cash_flow_to_debt" not in KNOWN_INPUT_METRICS
+    research = build_stock_research(
+        _record_with_single_metric(
+            metric_name="debt_ebitda", category="financial_strength",
+            value=0.5, period=_EVALUATION,
+        )
+    )
+    metric = next(
+        m for m in research.categories["financial_strength"].metrics
+        if m.name == "debt_ebitda"
+    )
+    assert metric.inputs is None
+
+
+def test_debt_ebitda_and_cash_flow_to_debt_actually_use_gross_total_debt_not_net_debt():
+    from alpha_lab.ratings.quality import calculate_quality_factors
+
+    # cash is nonzero, so net_debt (= total_debt - cash) differs from total_debt.
+    fundamentals = {
+        "total_debt": 100.0, "cash": 40.0, "ebitda": 50.0, "free_cash_flow": 20.0,
+    }
+    result = calculate_quality_factors(fundamentals)
+    assert result["net_debt"] == pytest.approx(60.0)
+    assert result["debt_ebitda"] == pytest.approx(100.0 / 50.0)  # total_debt / ebitda
+    assert result["cash_flow_to_debt"] == pytest.approx(20.0 / 100.0)  # fcf / total_debt
+    assert result["debt_ebitda"] != pytest.approx(result["net_debt"] / 50.0)
+
+
+# 3. Confidence freshness must come from evidence periods, never from
+# Security.metadata_updated_at / LiveResearchRecord.last_refreshed.
+
+
+def test_freshness_factor_is_full_for_genuinely_fresh_evidence():
+    from alpha_lab.research.build import _freshness_factor
+
+    categories = build_stock_research(
+        _record_with_single_metric(
+            metric_name="roe", category="business_quality",
+            value=0.2, period=_EVALUATION - timedelta(days=5),
+        )
+    ).categories
+    assert _freshness_factor(_EVALUATION, categories) == 1.0
+
+
+def test_freshness_factor_decays_for_stale_evidence():
+    from alpha_lab.research.build import _freshness_factor
+
+    categories = build_stock_research(
+        _record_with_single_metric(
+            metric_name="roe", category="business_quality",
+            value=0.2, period=_EVALUATION - timedelta(days=400),
+        )
+    ).categories
+    assert _freshness_factor(_EVALUATION, categories) == 0.0
+
+
+def test_recently_refreshed_metadata_cannot_rescue_confidence_for_year_old_financial_evidence():
+    stale_evidence_fresh_metadata = _record_with_single_metric(
+        metric_name="roe", category="business_quality", value=0.2,
+        period=_EVALUATION - timedelta(days=400),
+        overall_live_coverage=0.5,
+        # The metadata/ingestion timestamp is recent, unlike the evidence itself.
+        last_refreshed=datetime.combine(_EVALUATION, datetime.min.time(), tzinfo=UTC),
+    )
+    fresh_evidence_old_metadata = _record_with_single_metric(
+        metric_name="roe", category="business_quality", value=0.2,
+        period=_EVALUATION - timedelta(days=5),
+        overall_live_coverage=0.5,
+        last_refreshed=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    stale_research = build_stock_research(stale_evidence_fresh_metadata)
+    fresh_research = build_stock_research(fresh_evidence_old_metadata)
+    # A recent metadata refresh must not inflate confidence for stale evidence,
+    # and a stale metadata timestamp must not depress confidence for genuinely
+    # fresh evidence: only the evidence period drives the freshness factor.
+    assert stale_research.confidence < fresh_research.confidence
+
+
+# 4. Source-quality must reuse alpha_lab.providers.capabilities' field-level
+# policy, not a second, coarser "trusted provider" list.
+
+
+def test_reliable_provider_field_gets_full_capability_credit():
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("roe", "SECCompanyFactsProvider") == 1.0
+
+
+def test_partial_provider_field_does_not_get_full_capability_credit():
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("roe", "YFinanceProvider") == 0.5
+
+
+def test_price_evidence_credited_without_upgrading_unrelated_fundamentals_same_provider():
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("return_3m", "YFinanceProvider") == 1.0
+    assert _metric_capability_weight("roe", "YFinanceProvider") == 0.5
+
+
+def test_unknown_or_missing_provider_fails_closed_to_zero_capability_credit():
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("roe", "fixture") == 0.0
+    assert _metric_capability_weight("roe", None) == 0.0
+
+
+# 5. Category breadth for confidence must reflect evidence coverage, not
+# merely whether a category cleared its minimum-metric threshold for a score.
+
+
+def test_category_breadth_counts_partial_evidence_even_without_a_score():
+    from alpha_lab.research.build import _confidence
+    from alpha_lab.research.model import CategoryResult, CategoryStatus
+
+    def categories_with(coverage: float, score: float | None) -> dict[str, CategoryResult]:
+        status = CategoryStatus.UNAVAILABLE if score is None else CategoryStatus.PARTIAL
+        template = CategoryResult(
+            name="c", label="C", score=score, coverage=coverage, status=status,
+            metrics=[], evidence=[], unavailable_metrics=[], sources=[],
+        )
+        return {name: template for name in CATEGORY_ORDER}
+
+    base = _record(overall_live_coverage=0.5, data_quality_status="valid")
+    zero_evidence = _confidence(base, categories_with(0.0, None))
+    partial_no_score = _confidence(base, categories_with(0.3, None))
+    partial_with_score = _confidence(base, categories_with(0.67, 75.0))
+    full_evidence = _confidence(base, categories_with(1.0, 90.0))
+    assert zero_evidence < partial_no_score < partial_with_score < full_evidence
+
+
+# 6. INVALID contract: document (rather than silently rely on) the fact that
+# the live rating engine currently coerces invalid inputs to None indistinct
+# from genuinely missing ones, before anything reaches raw_metrics.
+
+
+def test_invalid_inputs_are_coerced_to_none_indistinguishable_from_missing():
+    """Pins the current contract so future INVALID wiring is a deliberate change.
+
+    alpha_lab.ratings.quality/valuation already refuse to turn a non-finite or
+    out-of-domain input into a plausible-looking ratio, but they do so by
+    returning None — the same value used for "never reported". There is no
+    signal in LiveResearchRecord.raw_metrics today that distinguishes the two,
+    so alpha_lab.research.model.MetricStatus.INVALID stays unused/reserved
+    (see the module docstring for the exact integration point).
+    """
+    from alpha_lab.ratings.quality import calculate_quality_factors
+
+    result = calculate_quality_factors(
+        {"revenue": float("nan"), "total_equity": -5.0, "net_income": 10.0}
+    )
+    assert result["gross_margin"] is None
+    assert result["roe"] is None

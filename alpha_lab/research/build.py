@@ -8,9 +8,11 @@ strengths/weaknesses/risks bullets. See module docstring in
 ``alpha_lab.research.model`` for scale/scope decisions.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
+from alpha_lab.providers.capabilities import Capability, capability
 from alpha_lab.research.formulas import (
+    CAPABILITY_FIELDS_BY_METRIC,
     DIRECTLY_SOURCED_METRICS,
     FORMULAS,
     KNOWN_INPUT_METRICS,
@@ -40,13 +42,17 @@ _FULL_COVERAGE = 0.999
 _STRENGTH_THRESHOLD = 70.0
 _WEAKNESS_THRESHOLD = 30.0
 
-# Providers this codebase treats as primary, attributable data sources
-# (see README "Coverage and rating model" / providers/capabilities.py).
-# Used only to weight the confidence source-quality factor below.
-_RELIABLE_PROVIDERS = {
-    "YFinanceProvider",
-    "SECCompanyFactsProvider",
-    "NasdaqTraderUniverseProvider",
+# Capability -> confidence weight. Reuses alpha_lab.providers.capabilities'
+# existing Capability enum rather than a second reliability system: a
+# metric only gets full source-quality credit when the *specific field it
+# was computed from* is documented reliable for that provider, not merely
+# because the provider is reliable for something else (e.g. YFinance's
+# current prices are RELIABLE_CURRENT but its fundamentals are PARTIAL).
+_CAPABILITY_WEIGHTS = {
+    Capability.RELIABLE_CURRENT: 1.0,
+    Capability.RELIABLE_POINT_IN_TIME: 1.0,
+    Capability.PARTIAL: 0.5,
+    Capability.UNSUPPORTED: 0.0,
 }
 
 # Flat penalty applied to confidence when the live data-quality check
@@ -54,7 +60,11 @@ _RELIABLE_PROVIDERS = {
 _DATA_QUALITY_PENALTY = 0.6
 
 # Fundamentals/estimates are legitimately reported quarterly; treat evidence
-# as fully fresh for 90 days and linearly decay to stale by one year.
+# as fully fresh for 90 days and linearly decay to stale by one year. This
+# is measured from each metric's own evidence `period` (fiscal period end,
+# price date, or estimate observation date) — never from ingestion or
+# metadata-refresh timestamps, which say only when AlphaLab last talked to
+# a provider and can be recent even when the underlying evidence is not.
 _FRESH_WINDOW_DAYS = 90
 _STALE_WINDOW_DAYS = 365
 
@@ -205,13 +215,18 @@ def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult
         + 0.2 * freshness_factor
         + 0.1 * source_quality_factor
     )
+
+    category_breadth is the mean of the eight categories' own (already
+    computed) `coverage` fractions — not whether each category cleared its
+    minimum-metric threshold for a score — so a category that has real but
+    insufficient evidence for a score still counts partially rather than as
+    "no evidence".
     """
     overall_coverage = _clip01(record.overall_live_coverage)
     category_breadth = sum(
-        1 for category in categories.values()
-        if category.status != CategoryStatus.UNAVAILABLE
+        category.coverage for category in categories.values()
     ) / len(CATEGORY_ORDER)
-    freshness_factor = _freshness_factor(record)
+    freshness_factor = _freshness_factor(record.evaluation_date, categories)
     source_quality_factor = _source_quality_factor(categories)
     penalty = 1.0 if record.data_quality_status == "valid" else _DATA_QUALITY_PENALTY
     raw = (
@@ -223,10 +238,16 @@ def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult
     return round(10 * penalty * _clip01(raw), 1)
 
 
-def _freshness_factor(record: LiveResearchRecord) -> float:
-    if record.last_refreshed is None:
+def _freshness_factor(evaluation_date: date, categories: dict[str, CategoryResult]) -> float:
+    periods = [
+        metric.period
+        for category in categories.values()
+        for metric in category.metrics
+        if metric.status == MetricStatus.AVAILABLE and metric.period is not None
+    ]
+    if not periods:
         return 0.0
-    age_days = (record.evaluation_date - record.last_refreshed.date()).days
+    age_days = (evaluation_date - min(periods)).days
     if age_days <= _FRESH_WINDOW_DAYS:
         return 1.0
     decay_span = _STALE_WINDOW_DAYS - _FRESH_WINDOW_DAYS
@@ -234,16 +255,22 @@ def _freshness_factor(record: LiveResearchRecord) -> float:
 
 
 def _source_quality_factor(categories: dict[str, CategoryResult]) -> float:
-    available = [
-        metric
+    weights = [
+        _metric_capability_weight(metric.name, metric.source)
         for category in categories.values()
         for metric in category.metrics
         if metric.status == MetricStatus.AVAILABLE
     ]
-    if not available:
+    return sum(weights) / len(weights) if weights else 0.0
+
+
+def _metric_capability_weight(metric_name: str, provider: str | None) -> float:
+    if not provider:
         return 0.0
-    reliable = sum(1 for metric in available if metric.source in _RELIABLE_PROVIDERS)
-    return reliable / len(available)
+    field = CAPABILITY_FIELDS_BY_METRIC.get(metric_name, {}).get(provider)
+    if field is None:
+        return 0.0
+    return _CAPABILITY_WEIGHTS[capability(provider, field)]
 
 
 def _clip01(value: float) -> float:

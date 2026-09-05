@@ -15,9 +15,23 @@ Design notes / deliberate scope limits:
   (banks, REITs, ETFs, ...) has somewhere to plug in later; this module does
   not yet classify any metric as not applicable — see AlphaLab project brief
   section 13. Every metric considered here defaults to AVAILABLE/UNAVAILABLE.
-* ``MetricStatus.INVALID`` is reserved for values that fail validation before
-  they ever reach this layer (see ``alpha_lab.data_quality``); this module
-  does not re-validate raw numbers.
+* ``MetricStatus.INVALID`` is reserved and currently unused. Verified against
+  the live pipeline: ``alpha_lab.data_quality.assess_field``/``assess_freshness``
+  (the module's only INVALID-adjacent machinery, using ``QualityStatus``) is
+  wired only into the legacy ``app/dashboard/main.py`` page, not into
+  ``alpha_lab.screener.service`` / ``alpha_lab.ratings``. There, defensive
+  numeric coercion (``_number``/``_positive``/``_finite`` helpers in
+  ``alpha_lab.ratings.quality`` and ``alpha_lab.ratings.valuation``) already
+  keeps non-finite or wrong-sign inputs out of a computed ratio, but does so
+  by silently returning ``None`` — indistinguishable from a value that was
+  simply never reported. There is today no guarantee, and no signal, that a
+  present-but-invalid input was ever distinguished from a genuinely missing
+  one before reaching ``LiveResearchRecord.raw_metrics``. Wiring
+  ``MetricStatus.INVALID`` up for real would mean changing those coercion
+  helpers to return a reason alongside ``None`` (e.g. "negative denominator"
+  vs "no observation") — a change to the rating engine itself, out of scope
+  here; this module only reserves the state for that future integration
+  point.
 * Category and overall *scores* stay on the existing 0-100 scale used
   throughout ``alpha_lab.ratings``/``alpha_lab.screener`` and the Streamlit
   UI, to avoid introducing a second, easily-desynchronized scale. Confidence
