@@ -100,6 +100,8 @@ def build_stock_research(
         catalysts=[],
         sources=sources,
         data_quality_status=record.data_quality_status,
+        rating_version=record.rating_version,
+        configuration_hash=record.configuration_hash,
         evaluation_date=record.evaluation_date,
         generated_at=generated_at or datetime.now(UTC),
     )

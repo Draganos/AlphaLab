@@ -463,3 +463,65 @@ def test_unavailable_metric_percentile_is_none_not_a_stale_value():
     research = build_stock_research(_record())
     revisions = research.categories["analyst_revisions"]
     assert all(m.percentile is None for m in revisions.metrics)
+
+
+# --- Regression coverage for the third Codex review round (commit TBD) -----
+
+
+def test_fcf_margin_capability_mapping_matches_its_sibling_fcf_conversion():
+    """fcf_margin is not currently in any CATEGORY_EVIDENCE_METRICS list (so
+    it never reaches _metric_capability_weight through build_stock_research
+    today), but the mapping is kept consistent with its sibling fundamentals
+    ratios so it is correct the moment it is ever wired into a category."""
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("fcf_margin", "SECCompanyFactsProvider") == 1.0
+    assert _metric_capability_weight("fcf_margin", "YFinanceProvider") == 0.5
+
+
+def test_revision_formula_text_matches_calculate_revision_factors_for_negative_prior():
+    """alpha_lab.ratings.estimates._revision uses the same sign-flip as
+    alpha_lab.ratings.quality._growth; the documented formula must match."""
+    import pandas as pd
+
+    from alpha_lab.ratings.estimates import calculate_revision_factors
+
+    observations = pd.DataFrame(
+        [
+            {"observation_date": _EVALUATION - timedelta(days=10), "consensus_eps": -1.0},
+            {"observation_date": _EVALUATION, "consensus_eps": -0.5},
+        ]
+    )
+    result = calculate_revision_factors(observations, _EVALUATION)
+    # current=-0.5, prior=-1.0 -> -0.5/abs(-1.0) - (1 if -1.0>0 else -1) = -0.5+1 = 0.5
+    assert result["eps_revision_7d"] == pytest.approx(0.5)
+
+
+def test_forward_pe_exposes_its_actual_consensus_eps_input():
+    record = _record(
+        category_scores={**{name: None for name in CATEGORY_ORDER}, "valuation": None},
+        category_coverage={**{name: 0.0 for name in CATEGORY_ORDER}, "valuation": 0.2},
+        raw_metrics={"forward_pe": 25.0, "current_consensus_eps": 2.2},
+        percentile_metrics={"forward_pe": 50.0},
+        provenance={
+            "metrics": {
+                "forward_pe": {
+                    "provider": "AlphaLabEstimateSnapshots",
+                    "period": _EVALUATION.isoformat(),
+                }
+            }
+        },
+    )
+    research = build_stock_research(record)
+    forward_pe = next(
+        m for m in research.categories["valuation"].metrics if m.name == "forward_pe"
+    )
+    assert forward_pe.inputs == {"current_consensus_eps": 2.2}
+
+
+def test_stock_research_carries_scoring_configuration_for_reproducibility():
+    research = build_stock_research(
+        _record(rating_version="phase3-live-v2", configuration_hash="abc123")
+    )
+    assert research.rating_version == "phase3-live-v2"
+    assert research.configuration_hash == "abc123"

@@ -130,5 +130,11 @@ class StockResearch(BaseModel):
     catalysts: list[str]
     sources: list[str]
     data_quality_status: str
+    # Carried from LiveResearchRecord so a persisted/compared StockResearch
+    # can be traced back to the scoring configuration that produced its
+    # scores — the same evidence under a different rating_weights config
+    # can score differently, and this is the only place that's recorded.
+    rating_version: str
+    configuration_hash: str
     evaluation_date: date
     generated_at: datetime

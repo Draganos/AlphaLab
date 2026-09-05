@@ -53,12 +53,36 @@ FORMULAS: dict[str, str] = {
         "Current EPS / abs(Prior EPS) - (1 if Prior EPS > 0 else -1); "
         "undefined if Prior EPS is zero or missing"
     ),
-    "eps_revision_7d": "Current Consensus EPS / Consensus EPS as of 7 Days Prior - 1",
-    "eps_revision_30d": "Current Consensus EPS / Consensus EPS as of 30 Days Prior - 1",
-    "eps_revision_90d": "Current Consensus EPS / Consensus EPS as of 90 Days Prior - 1",
-    "revenue_revision_7d": "Current Consensus Revenue / Consensus Revenue as of 7 Days Prior - 1",
-    "revenue_revision_30d": "Current Consensus Revenue / Consensus Revenue as of 30 Days Prior - 1",
-    "revenue_revision_90d": "Current Consensus Revenue / Consensus Revenue as of 90 Days Prior - 1",
+    "eps_revision_7d": (
+        "Current Consensus EPS / abs(Consensus EPS as of 7 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "eps_revision_30d": (
+        "Current Consensus EPS / abs(Consensus EPS as of 30 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "eps_revision_90d": (
+        "Current Consensus EPS / abs(Consensus EPS as of 90 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "revenue_revision_7d": (
+        "Current Consensus Revenue / abs(Consensus Revenue as of 7 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "revenue_revision_30d": (
+        "Current Consensus Revenue / abs(Consensus Revenue as of 30 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "revenue_revision_90d": (
+        "Current Consensus Revenue / abs(Consensus Revenue as of 90 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
     "return_1m": "Trailing 1-month price return",
     "return_3m": "Trailing 3-month price return",
     "return_6m": "Trailing 6-month price return",
@@ -88,6 +112,10 @@ KNOWN_INPUT_METRICS: dict[str, tuple[str, ...]] = {
     "dividend_yield": ("market_cap",),
     "buyback_yield": ("market_cap",),
     "total_shareholder_yield": ("market_cap",),
+    # current_consensus_eps is forward_pe's forward_eps operand exactly as
+    # passed to alpha_lab.ratings.valuation.calculate_valuation_factors, and
+    # is already retained in raw_metrics by calculate_revision_factors.
+    "forward_pe": ("current_consensus_eps",),
 }
 
 # Metric name -> {provider_name: capability field}, reusing the field names
@@ -116,9 +144,9 @@ CAPABILITY_FIELDS_BY_METRIC: dict[str, dict[str, str]] = {
         }
         for name in (
             "gross_margin", "ebitda_margin", "operating_margin", "net_margin",
-            "roe", "roa", "fcf_conversion", "eps_growth", "revenue_growth",
-            "net_debt", "debt_ebitda", "debt_equity", "current_ratio",
-            "interest_coverage", "cash_flow_to_debt",
+            "fcf_margin", "roe", "roa", "fcf_conversion", "eps_growth",
+            "revenue_growth", "net_debt", "debt_ebitda", "debt_equity",
+            "current_ratio", "interest_coverage", "cash_flow_to_debt",
             "pe", "price_sales", "ev_ebitda", "price_fcf",
         )
     },
@@ -159,6 +187,24 @@ CAPABILITY_FIELDS_BY_METRIC: dict[str, dict[str, str]] = {
 # actually blend in partial evidence. Cap it at a fixed conservative
 # PARTIAL-equivalent weight instead of looking up a (possibly wrong) full
 # capability; see alpha_lab.research.build._metric_capability_weight.
+#
+# KNOWN, ACCEPTED LIMITATION (not specific to total_shareholder_yield):
+# essentially every calculated metric here — roe, gross_margin, debt_equity,
+# price_sales, and the rest — divides two fields that
+# LIVE_FUNDAMENTAL_SOURCE_PRIORITY selects independently per field, so in
+# principle any of them could blend providers the same way. `_metric_provenance`
+# (alpha_lab.screener.service) only ever records the provenance of one
+# operand per metric (typically the numerator), not every operand, so
+# CAPABILITY_FIELDS_BY_METRIC's lookup is only as precise as that recorded
+# provenance. total_shareholder_yield is capped here because it was
+# specifically flagged and is easy to reason about in isolation; capping
+# every multi-input metric the same way would make the field-level
+# capability system add little value over a flat constant and was judged
+# out of proportion for this PR. The complete fix is to enrich
+# `_metric_provenance` to retain every operand's provenance (not just one)
+# — a change to the existing rating/provenance engine in
+# alpha_lab.screener.service, deliberately left as follow-up work rather
+# than done reactively here.
 CAPPED_CAPABILITY_METRICS: dict[str, float] = {
     "total_shareholder_yield": 0.5,
 }
