@@ -1,0 +1,239 @@
+"""Best-effort, hand-verified provenance metadata for live rating metrics.
+
+These dictionaries describe *how* a metric is derived, matching the actual
+calculations in ``alpha_lab.ratings.quality``, ``alpha_lab.ratings.valuation``,
+``alpha_lab.ratings.estimates``, and ``alpha_lab.factors.engine``. They are
+deliberately kept as plain text/keys rather than re-executed formulas: adding
+a metric here documents it for :mod:`alpha_lab.research.build` without
+duplicating (and risking drift from) the calculation code itself.
+"""
+
+# Metrics that are read directly from a provider rather than computed from
+# other stored fields. Everything else is treated as calculated.
+DIRECTLY_SOURCED_METRICS = {
+    "current_consensus_eps",
+    "current_consensus_revenue",
+    "analyst_count",
+    "estimate_dispersion",
+}
+
+FORMULAS: dict[str, str] = {
+    "pe": "Price / Diluted EPS",
+    "forward_pe": "Price / Forward Consensus EPS",
+    "price_sales": "Market Cap / Revenue",
+    "ev_ebitda": "Enterprise Value / EBITDA",
+    "ev_sales": "Enterprise Value / Revenue",
+    "price_fcf": "Market Cap / Free Cash Flow",
+    "fcf_yield": "Free Cash Flow / Market Cap",
+    "earnings_yield": "EPS / Price",
+    "gross_margin": "Gross Profit / Revenue",
+    "ebitda_margin": "EBITDA / Revenue",
+    "operating_margin": "EBIT / Revenue",
+    "net_margin": "Net Income / Revenue",
+    "fcf_margin": "Free Cash Flow / Revenue",
+    "roe": "Net Income / Total Equity",
+    "roa": "Net Income / Total Assets",
+    "fcf_conversion": "Free Cash Flow / Net Income",
+    "net_debt": "Total Debt - Cash",
+    "debt_ebitda": "Total Debt / EBITDA",
+    "debt_equity": "Total Debt / Total Equity",
+    "current_ratio": "Current Assets / Current Liabilities",
+    "interest_coverage": "EBIT / Interest Expense",
+    "cash_flow_to_debt": "Free Cash Flow / Total Debt",
+    "dividend_yield": "abs(Dividends Paid) / Market Cap",
+    "buyback_yield": "abs(Share Repurchases) / Market Cap",
+    "total_shareholder_yield": "abs(Dividends Paid + Share Repurchases) / Market Cap",
+    "revenue_growth": (
+        "Current Revenue / abs(Prior Revenue) - (1 if Prior Revenue > 0 else -1); "
+        "undefined if Prior Revenue is zero or missing, or if Current Revenue is "
+        "not strictly positive (Current Revenue is rejected before this formula "
+        "runs, unlike Current EPS, which may be negative)"
+    ),
+    "eps_growth": (
+        "Current EPS / abs(Prior EPS) - (1 if Prior EPS > 0 else -1); "
+        "undefined if Prior EPS is zero or missing"
+    ),
+    "eps_revision_7d": (
+        "Current Consensus EPS / abs(Consensus EPS as of 7 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "eps_revision_30d": (
+        "Current Consensus EPS / abs(Consensus EPS as of 30 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "eps_revision_90d": (
+        "Current Consensus EPS / abs(Consensus EPS as of 90 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "revenue_revision_7d": (
+        "Current Consensus Revenue / abs(Consensus Revenue as of 7 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "revenue_revision_30d": (
+        "Current Consensus Revenue / abs(Consensus Revenue as of 30 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "revenue_revision_90d": (
+        "Current Consensus Revenue / abs(Consensus Revenue as of 90 Days Prior) - "
+        "(1 if that prior value > 0 else -1); undefined if no prior "
+        "observation exists or it is zero"
+    ),
+    "return_1m": "Trailing 1-month price return",
+    "return_3m": "Trailing 3-month price return",
+    "return_6m": "Trailing 6-month price return",
+    "return_12m": "Trailing 12-month price return",
+    "momentum_12_1": "Trailing 12-month return excluding the most recent month",
+    "distance_ma50": "(Price - 50-day Moving Average) / 50-day Moving Average",
+    "distance_ma200": "(Price - 200-day Moving Average) / 200-day Moving Average",
+}
+
+# Metric -> other raw metrics (already present in the live raw-metric table)
+# that participate in its calculation. This is intentionally best-effort and
+# deliberately conservative: several inputs (e.g. raw revenue, EPS, total
+# debt) are consumed upstream in alpha_lab.ratings and are not themselves
+# exposed as live raw metrics, so they cannot be listed here without
+# changing those modules. A metric is omitted entirely (inputs=None) rather
+# than populated with a value that was not actually the calculation's
+# operand — e.g. debt_ebitda and cash_flow_to_debt are computed from gross
+# total debt (alpha_lab.ratings.quality.calculate_quality_factors), not the
+# net-of-cash `net_debt` metric, and total debt itself is not exposed as a
+# raw metric, so neither is listed here.
+KNOWN_INPUT_METRICS: dict[str, tuple[str, ...]] = {
+    "price_sales": ("market_cap",),
+    "ev_ebitda": ("market_cap", "enterprise_value"),
+    "ev_sales": ("market_cap", "enterprise_value"),
+    "price_fcf": ("market_cap",),
+    "fcf_yield": ("market_cap",),
+    "dividend_yield": ("market_cap",),
+    "buyback_yield": ("market_cap",),
+    "total_shareholder_yield": ("market_cap",),
+    # current_consensus_eps is forward_pe's forward_eps operand exactly as
+    # passed to alpha_lab.ratings.valuation.calculate_valuation_factors, and
+    # is already retained in raw_metrics by calculate_revision_factors.
+    "forward_pe": ("current_consensus_eps",),
+}
+
+# Metric name -> {provider_name: capability field}, reusing the field names
+# declared in alpha_lab.providers.capabilities.PROVIDER_CAPABILITIES. This
+# does not duplicate that policy — it only maps a live metric to the
+# (coarser-grained) capability domain it was actually computed from, so
+# alpha_lab.research.build can look up the real Capability enum value
+# instead of trusting an entire provider uniformly. A metric/provider pair
+# absent here has no declared capability and is treated as UNSUPPORTED.
+#
+# pe/price_sales/ev_ebitda/price_fcf are mapped to the *fundamentals*
+# capability, not a separate "valuation" one: alpha_lab.screener.service.
+# _metric_provenance records each of these against the provenance of the
+# single fundamental field it divides by (pe->eps, price_sales->revenue,
+# ev_ebitda->ebitda, price_fcf->free_cash_flow), and that field can come
+# from SEC Companyfacts (RELIABLE_POINT_IN_TIME) just as often as YFinance
+# (PARTIAL) under LIVE_FUNDAMENTAL_SOURCE_PRIORITY — crediting only
+# YFinance here would silently zero out SEC-backed valuation evidence.
+# forward_pe's provenance is the estimate row itself (screener/service.py
+# explicitly overrides it), so it shares the estimates mapping instead.
+CAPABILITY_FIELDS_BY_METRIC: dict[str, dict[str, str]] = {
+    **{
+        name: {
+            "YFinanceProvider": "fundamentals.current",
+            "SECCompanyFactsProvider": "fundamentals.reported",
+        }
+        for name in (
+            "gross_margin", "ebitda_margin", "operating_margin", "net_margin",
+            "fcf_margin", "roe", "roa", "fcf_conversion", "eps_growth",
+            "revenue_growth", "net_debt", "debt_ebitda", "debt_equity",
+            "current_ratio", "interest_coverage", "cash_flow_to_debt",
+            "pe", "price_sales", "ev_ebitda", "price_fcf",
+        )
+    },
+    "dividend_yield": {
+        "YFinanceProvider": "shareholder.dividends",
+        "SECCompanyFactsProvider": "shareholder.dividends",
+    },
+    "buyback_yield": {
+        "YFinanceProvider": "shareholder.buybacks",
+        "SECCompanyFactsProvider": "shareholder.buybacks",
+    },
+    **{
+        name: {"YFinanceProvider": "prices.ohlcv"}
+        for name in (
+            "return_1m", "return_3m", "return_6m", "return_12m",
+            "momentum_12_1", "distance_ma50", "distance_ma200",
+        )
+    },
+    **{
+        name: {
+            "YFinanceProvider": "estimates.current",
+            "AlphaLabEstimateSnapshots": "estimates.history",
+        }
+        for name in (
+            "forward_pe", "eps_revision_7d", "eps_revision_30d", "eps_revision_90d",
+            "revenue_revision_7d", "revenue_revision_30d", "revenue_revision_90d",
+        )
+    },
+}
+
+# total_shareholder_yield combines dividends_paid AND share_repurchases,
+# which alpha_lab.screener.service._select_live_fundamental_values selects
+# per-field and can therefore come from *different* providers (e.g.
+# dividends from SEC, buybacks falling back to YFinance). Its recorded
+# provenance (alpha_lab.screener.service._metric_provenance) keeps only the
+# dividends_paid provider, so crediting it via CAPABILITY_FIELDS_BY_METRIC
+# like dividend_yield would claim full reliability for a value that may
+# actually blend in partial evidence. Cap it at a fixed conservative
+# PARTIAL-equivalent weight instead of looking up a (possibly wrong) full
+# capability; see alpha_lab.research.build._metric_capability_weight.
+#
+# KNOWN, ACCEPTED LIMITATION (not specific to total_shareholder_yield):
+# essentially every calculated metric here — roe, gross_margin, debt_equity,
+# price_sales, and the rest — divides two fields that
+# LIVE_FUNDAMENTAL_SOURCE_PRIORITY selects independently per field, so in
+# principle any of them could blend providers the same way. `_metric_provenance`
+# (alpha_lab.screener.service) only ever records the provenance of one
+# operand per metric (typically the numerator), not every operand, so
+# CAPABILITY_FIELDS_BY_METRIC's lookup is only as precise as that recorded
+# provenance. total_shareholder_yield is capped here because it was
+# specifically flagged and is easy to reason about in isolation; capping
+# every multi-input metric the same way would make the field-level
+# capability system add little value over a flat constant and was judged
+# out of proportion for this PR. The complete fix is to enrich
+# `_metric_provenance` to retain every operand's provenance (not just one)
+# — a change to the existing rating/provenance engine in
+# alpha_lab.screener.service, deliberately left as follow-up work rather
+# than done reactively here.
+CAPPED_CAPABILITY_METRICS: dict[str, float] = {
+    "total_shareholder_yield": 0.5,
+}
+
+_RATIO_METRICS = {
+    "gross_margin", "ebitda_margin", "operating_margin", "net_margin", "fcf_margin",
+    "roe", "roa", "fcf_conversion", "dividend_yield", "buyback_yield",
+    "total_shareholder_yield", "revenue_growth", "eps_growth", "fcf_yield",
+    "earnings_yield", "eps_revision_7d", "eps_revision_30d", "eps_revision_90d",
+    "revenue_revision_7d", "revenue_revision_30d", "revenue_revision_90d",
+    "return_1m", "return_3m", "return_6m", "return_12m", "momentum_12_1",
+    "distance_ma50", "distance_ma200", "debt_ebitda", "debt_equity",
+    "cash_flow_to_debt", "current_ratio", "interest_coverage", "estimate_dispersion",
+}
+_MULTIPLE_METRICS = {"pe", "forward_pe", "price_sales", "ev_ebitda", "ev_sales", "price_fcf"}
+_COUNT_METRICS = {"analyst_count", "upward_revisions", "downward_revisions"}
+_CURRENCY_METRICS = {
+    "market_cap", "enterprise_value", "net_debt", "current_consensus_eps",
+    "current_consensus_revenue",
+}
+
+
+def metric_unit(name: str) -> str | None:
+    if name in _RATIO_METRICS:
+        return "ratio"
+    if name in _MULTIPLE_METRICS:
+        return "multiple"
+    if name in _COUNT_METRICS:
+        return "count"
+    if name in _CURRENCY_METRICS:
+        return "currency"
+    return None
