@@ -585,3 +585,57 @@ def test_confidence_label_bands_track_the_numeric_confidence():
     assert _confidence_label(6.0) == "Moderate confidence"
     assert _confidence_label(3.0) == "Low confidence"
     assert _confidence_label(0.0) == "Very low confidence"
+
+
+# --- Regression coverage: UNAVAILABLE means zero evidence, not "no score" --
+
+
+def _category_status_for(coverage: float, score: float | None) -> CategoryStatus:
+    from alpha_lab.research.build import _build_category
+
+    category_scores = {name: None for name in CATEGORY_ORDER}
+    category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
+    category_scores["business_quality"] = score
+    category_coverage["business_quality"] = coverage
+    record = _record(category_scores=category_scores, category_coverage=category_coverage)
+    return _build_category("business_quality", record).status
+
+
+def test_zero_coverage_is_unavailable():
+    assert _category_status_for(0.0, None) == CategoryStatus.UNAVAILABLE
+
+
+def test_partial_coverage_without_a_score_is_partial_not_unavailable():
+    """A category can have real evidence (e.g. 1/7 metrics) yet still be
+    withheld a score because the rating engine requires a minimum metric
+    count. That is different from having no evidence at all and must not
+    be reported as UNAVAILABLE."""
+    assert _category_status_for(0.3, None) == CategoryStatus.PARTIAL
+
+
+def test_partial_coverage_with_a_score_is_partial():
+    assert _category_status_for(0.67, 75.0) == CategoryStatus.PARTIAL
+
+
+def test_full_coverage_with_a_score_is_available():
+    assert _category_status_for(1.0, 90.0) == CategoryStatus.AVAILABLE
+
+
+def test_partial_evidence_risk_text_never_says_excluded_from_assessment():
+    category_scores = {name: None for name in CATEGORY_ORDER}
+    category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
+    category_coverage["business_quality"] = 0.3
+    record = _record(category_scores=category_scores, category_coverage=category_coverage)
+    research = build_stock_research(record)
+    assert research.categories["business_quality"].status == CategoryStatus.PARTIAL
+    assert not any(
+        "Business Quality" in risk and "excluded" in risk for risk in research.risks
+    )
+
+
+def test_zero_evidence_category_still_reports_the_excluded_risk():
+    research = build_stock_research(_record())
+    assert research.categories["analyst_revisions"].status == CategoryStatus.UNAVAILABLE
+    assert any(
+        "Analyst Revisions" in risk and "excluded" in risk for risk in research.risks
+    )

@@ -31,9 +31,13 @@ from alpha_lab.research.model import (
 from alpha_lab.screener.service import CATEGORY_EVIDENCE_METRICS, LiveResearchRecord
 
 # A category is AVAILABLE only once every documented metric for it is
-# present; anything less (but still scored) is PARTIAL. This mirrors the
-# existing metric-level coverage semantics documented in the README
-# ("Coverage and rating model").
+# present. UNAVAILABLE means zero evidence (coverage <= 0) — not merely
+# "no score" — so a category with real but sub-threshold evidence (too few
+# metrics for the rating engine's minimum, e.g. 1/7 present) is PARTIAL,
+# never UNAVAILABLE. Anything with some evidence but less than full
+# coverage, whether or not it cleared the engine's minimum for a score, is
+# PARTIAL. This mirrors the existing metric-level coverage semantics
+# documented in the README ("Coverage and rating model").
 _FULL_COVERAGE = 0.999
 
 # Deterministic strength/weakness thresholds on the existing 0-100 category
@@ -158,9 +162,9 @@ def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
 
     score = record.category_scores.get(name)
     coverage = record.category_coverage.get(name, 0.0)
-    if score is None:
+    if coverage <= 0:
         status = CategoryStatus.UNAVAILABLE
-    elif coverage >= _FULL_COVERAGE:
+    elif score is not None and coverage >= _FULL_COVERAGE:
         status = CategoryStatus.AVAILABLE
     else:
         status = CategoryStatus.PARTIAL

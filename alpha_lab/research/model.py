@@ -78,7 +78,13 @@ class MetricStatus(StrEnum):
 
 class CategoryStatus(StrEnum):
     AVAILABLE = "AVAILABLE"
+    # Some evidence exists (coverage > 0) but either not enough to reach
+    # full coverage, or not enough to clear the rating engine's minimum
+    # metric count for a score — evidence without a score is still PARTIAL,
+    # never UNAVAILABLE.
     PARTIAL = "PARTIAL"
+    # Zero evidence (coverage <= 0). Never used merely because a score is
+    # absent; see PARTIAL for a category with some evidence but no score.
     UNAVAILABLE = "UNAVAILABLE"
 
 
