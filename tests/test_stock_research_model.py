@@ -174,7 +174,7 @@ def test_generated_at_defaults_to_now_when_not_supplied():
 def _record_with_single_metric(
     *, metric_name: str, category: str, value: float, period: date,
     provider: str = "SECCompanyFactsProvider", score: float | None = None,
-    coverage: float = 0.0, **overrides,
+    coverage: float = 0.0, percentile: float = 50.0, **overrides,
 ) -> LiveResearchRecord:
     category_scores = {name: None for name in CATEGORY_ORDER}
     category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
@@ -184,7 +184,7 @@ def _record_with_single_metric(
         category_scores=category_scores,
         category_coverage=category_coverage,
         raw_metrics={metric_name: value},
-        percentile_metrics={metric_name: 50.0},
+        percentile_metrics={metric_name: percentile},
         provenance={
             "metrics": {
                 metric_name: {"provider": provider, "period": period.isoformat()},
@@ -407,3 +407,59 @@ def test_invalid_inputs_are_coerced_to_none_indistinguishable_from_missing():
     )
     assert result["gross_margin"] is None
     assert result["roe"] is None
+
+
+# --- Regression coverage for the second Codex review round (commit 60a0b0d) --
+
+
+def test_sec_sourced_valuation_ratios_get_full_capability_credit_not_zero():
+    """pe/price_sales/ev_ebitda/price_fcf must credit whichever provider
+    actually supplied their underlying fundamental field (per
+    alpha_lab.screener.service._metric_provenance), not just YFinance."""
+    from alpha_lab.research.build import _metric_capability_weight
+
+    for metric in ("pe", "price_sales", "ev_ebitda", "price_fcf"):
+        assert _metric_capability_weight(metric, "SECCompanyFactsProvider") == 1.0
+        assert _metric_capability_weight(metric, "YFinanceProvider") == 0.5
+
+
+def test_forward_pe_shares_the_estimates_capability_mapping():
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("forward_pe", "AlphaLabEstimateSnapshots") == 1.0
+    assert _metric_capability_weight("forward_pe", "YFinanceProvider") == 0.5
+
+
+def test_total_shareholder_yield_is_capped_regardless_of_recorded_provider():
+    """Its provenance only ever records the dividends_paid provider even
+    though share_repurchases may come from a different one, so it must not
+    receive the same full credit dividend_yield/buyback_yield can earn."""
+    from alpha_lab.research.build import _metric_capability_weight
+
+    assert _metric_capability_weight("total_shareholder_yield", "SECCompanyFactsProvider") == 0.5
+    assert _metric_capability_weight("total_shareholder_yield", "YFinanceProvider") == 0.5
+    # Single-input siblings are unaffected and can still earn full credit.
+    assert _metric_capability_weight("dividend_yield", "SECCompanyFactsProvider") == 1.0
+    assert _metric_capability_weight("buyback_yield", "SECCompanyFactsProvider") == 1.0
+
+
+def test_metric_evidence_retains_unrounded_percentile():
+    research = build_stock_research(
+        _record_with_single_metric(
+            metric_name="roe", category="business_quality", value=0.34,
+            period=_EVALUATION, score=None, coverage=0.0,
+            percentile=91.456789,
+        )
+    )
+    roe = next(
+        m for m in research.categories["business_quality"].metrics if m.name == "roe"
+    )
+    assert roe.percentile == pytest.approx(91.456789)
+    # The display bullet may round, but the structured field must not.
+    assert any("91" in bullet for bullet in research.categories["business_quality"].evidence)
+
+
+def test_unavailable_metric_percentile_is_none_not_a_stale_value():
+    research = build_stock_research(_record())
+    revisions = research.categories["analyst_revisions"]
+    assert all(m.percentile is None for m in revisions.metrics)

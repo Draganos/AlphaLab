@@ -85,6 +85,12 @@ class CategoryStatus(StrEnum):
 class MetricEvidence(BaseModel):
     name: str
     value: float | int | None
+    # Unrounded percentile (0-100, relative to the eligible universe) from
+    # alpha_lab.screener.service — the exact input the rating engine used to
+    # compute the category score. `evidence` strings may round this for
+    # display; this field never does, so a category score can be reproduced
+    # from this object alone.
+    percentile: float | None = None
     unit: str | None
     period: date | None = None
     source: str | None = None

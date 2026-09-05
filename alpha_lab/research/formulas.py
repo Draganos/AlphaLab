@@ -97,6 +97,17 @@ KNOWN_INPUT_METRICS: dict[str, tuple[str, ...]] = {
 # alpha_lab.research.build can look up the real Capability enum value
 # instead of trusting an entire provider uniformly. A metric/provider pair
 # absent here has no declared capability and is treated as UNSUPPORTED.
+#
+# pe/price_sales/ev_ebitda/price_fcf are mapped to the *fundamentals*
+# capability, not a separate "valuation" one: alpha_lab.screener.service.
+# _metric_provenance records each of these against the provenance of the
+# single fundamental field it divides by (pe->eps, price_sales->revenue,
+# ev_ebitda->ebitda, price_fcf->free_cash_flow), and that field can come
+# from SEC Companyfacts (RELIABLE_POINT_IN_TIME) just as often as YFinance
+# (PARTIAL) under LIVE_FUNDAMENTAL_SOURCE_PRIORITY — crediting only
+# YFinance here would silently zero out SEC-backed valuation evidence.
+# forward_pe's provenance is the estimate row itself (screener/service.py
+# explicitly overrides it), so it shares the estimates mapping instead.
 CAPABILITY_FIELDS_BY_METRIC: dict[str, dict[str, str]] = {
     **{
         name: {
@@ -108,23 +119,16 @@ CAPABILITY_FIELDS_BY_METRIC: dict[str, dict[str, str]] = {
             "roe", "roa", "fcf_conversion", "eps_growth", "revenue_growth",
             "net_debt", "debt_ebitda", "debt_equity", "current_ratio",
             "interest_coverage", "cash_flow_to_debt",
+            "pe", "price_sales", "ev_ebitda", "price_fcf",
         )
     },
     "dividend_yield": {
         "YFinanceProvider": "shareholder.dividends",
         "SECCompanyFactsProvider": "shareholder.dividends",
     },
-    "total_shareholder_yield": {
-        "YFinanceProvider": "shareholder.dividends",
-        "SECCompanyFactsProvider": "shareholder.dividends",
-    },
     "buyback_yield": {
         "YFinanceProvider": "shareholder.buybacks",
         "SECCompanyFactsProvider": "shareholder.buybacks",
-    },
-    **{
-        name: {"YFinanceProvider": "valuation.current"}
-        for name in ("pe", "forward_pe", "price_sales", "ev_ebitda", "price_fcf")
     },
     **{
         name: {"YFinanceProvider": "prices.ohlcv"}
@@ -139,10 +143,24 @@ CAPABILITY_FIELDS_BY_METRIC: dict[str, dict[str, str]] = {
             "AlphaLabEstimateSnapshots": "estimates.history",
         }
         for name in (
-            "eps_revision_7d", "eps_revision_30d", "eps_revision_90d",
+            "forward_pe", "eps_revision_7d", "eps_revision_30d", "eps_revision_90d",
             "revenue_revision_7d", "revenue_revision_30d", "revenue_revision_90d",
         )
     },
+}
+
+# total_shareholder_yield combines dividends_paid AND share_repurchases,
+# which alpha_lab.screener.service._select_live_fundamental_values selects
+# per-field and can therefore come from *different* providers (e.g.
+# dividends from SEC, buybacks falling back to YFinance). Its recorded
+# provenance (alpha_lab.screener.service._metric_provenance) keeps only the
+# dividends_paid provider, so crediting it via CAPABILITY_FIELDS_BY_METRIC
+# like dividend_yield would claim full reliability for a value that may
+# actually blend in partial evidence. Cap it at a fixed conservative
+# PARTIAL-equivalent weight instead of looking up a (possibly wrong) full
+# capability; see alpha_lab.research.build._metric_capability_weight.
+CAPPED_CAPABILITY_METRICS: dict[str, float] = {
+    "total_shareholder_yield": 0.5,
 }
 
 _RATIO_METRICS = {

@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime
 from alpha_lab.providers.capabilities import Capability, capability
 from alpha_lab.research.formulas import (
     CAPABILITY_FIELDS_BY_METRIC,
+    CAPPED_CAPABILITY_METRICS,
     DIRECTLY_SOURCED_METRICS,
     FORMULAS,
     KNOWN_INPUT_METRICS,
@@ -114,12 +115,14 @@ def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
         value = record.raw_metrics.get(metric_name)
         provenance = metric_provenance.get(metric_name) or {}
         available = value is not None
+        percentile = record.percentile_metrics.get(metric_name) if available else None
         if not available:
             unavailable.append(metric_name)
         metrics.append(
             MetricEvidence(
                 name=metric_name,
                 value=value,
+                percentile=percentile,
                 unit=metric_unit(metric_name),
                 period=provenance.get("period")
                 or provenance.get("publication_date")
@@ -133,7 +136,6 @@ def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
             )
         )
         if available:
-            percentile = record.percentile_metrics.get(metric_name)
             detail = f"{metric_name} = {value:.4g}"
             if percentile is not None:
                 detail += f" (percentile {percentile:.0f})"
@@ -267,6 +269,8 @@ def _source_quality_factor(categories: dict[str, CategoryResult]) -> float:
 def _metric_capability_weight(metric_name: str, provider: str | None) -> float:
     if not provider:
         return 0.0
+    if metric_name in CAPPED_CAPABILITY_METRICS:
+        return CAPPED_CAPABILITY_METRICS[metric_name]
     field = CAPABILITY_FIELDS_BY_METRIC.get(metric_name, {}).get(provider)
     if field is None:
         return 0.0
