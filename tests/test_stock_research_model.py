@@ -309,6 +309,36 @@ def test_freshness_factor_decays_for_stale_evidence():
     assert _freshness_factor(_EVALUATION, categories) == 0.0
 
 
+def test_freshness_factor_uses_the_oldest_available_metric_with_mixed_evidence_ages():
+    """A category with one fresh metric and one stale metric must not let the
+    fresh one alone drive freshness — the oldest available metric's period
+    is the limiting factor, so a genuinely stale input still pulls freshness
+    down even when other evidence in the same record is current."""
+    from alpha_lab.research.build import _freshness_factor
+
+    record = _record(
+        category_scores={**{name: None for name in CATEGORY_ORDER}, "business_quality": None},
+        category_coverage={**{name: 0.0 for name in CATEGORY_ORDER}, "business_quality": 0.29},
+        raw_metrics={"roe": 0.2, "roa": 0.1},
+        percentile_metrics={"roe": 50.0, "roa": 50.0},
+        provenance={
+            "metrics": {
+                "roe": {
+                    "provider": "SECCompanyFactsProvider",
+                    "period": (_EVALUATION - timedelta(days=5)).isoformat(),
+                },
+                "roa": {
+                    "provider": "SECCompanyFactsProvider",
+                    "period": (_EVALUATION - timedelta(days=400)).isoformat(),
+                },
+            }
+        },
+    )
+    categories = build_stock_research(record).categories
+    # roe alone (5 days old) would be fully fresh; roa (400 days old) is not.
+    assert _freshness_factor(_EVALUATION, categories) == 0.0
+
+
 def test_recently_refreshed_metadata_cannot_rescue_confidence_for_year_old_financial_evidence():
     stale_evidence_fresh_metadata = _record_with_single_metric(
         metric_name="roe", category="business_quality", value=0.2,
