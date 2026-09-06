@@ -107,6 +107,23 @@ class MetricEvidence(BaseModel):
     status: MetricStatus
 
 
+class ConfidenceBreakdown(BaseModel):
+    """The exact factors alpha_lab.research.build._confidence already
+    computes to produce `StockResearch.confidence` — exposed structurally so
+    a UI can explain the number without re-deriving it. Weights are fixed
+    constants (not repeated here to avoid a second source of truth): overall
+    coverage 50%, category breadth 20%, freshness 20%, source quality 10%,
+    then a flat penalty when data_quality_status is not "valid". See
+    alpha_lab.research.build._confidence's docstring for the formula.
+    """
+
+    overall_coverage: float = Field(ge=0, le=1)
+    category_breadth: float = Field(ge=0, le=1)
+    freshness: float = Field(ge=0, le=1)
+    source_quality: float = Field(ge=0, le=1)
+    data_quality_penalty_applied: bool
+
+
 class CategoryResult(BaseModel):
     name: str
     label: str
@@ -140,6 +157,7 @@ class StockResearch(BaseModel):
     # high score_interpretation mask that.
     confidence_label: str
     score_interpretation: str
+    confidence_breakdown: ConfidenceBreakdown
     strengths: list[str]
     weaknesses: list[str]
     risks: list[str]

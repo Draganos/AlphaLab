@@ -639,3 +639,49 @@ def test_zero_evidence_category_still_reports_the_excluded_risk():
     assert any(
         "Analyst Revisions" in risk and "excluded" in risk for risk in research.risks
     )
+
+
+# --- Regression coverage: confidence_breakdown exposes _confidence's own ---
+# --- factors without a second calculation -----------------------------------
+
+
+def test_confidence_breakdown_matches_the_underlying_factor_helpers():
+    from alpha_lab.research.build import _freshness_factor, _source_quality_factor
+
+    record = _with_business_quality()
+    research = build_stock_research(record)
+    breakdown = research.confidence_breakdown
+    assert breakdown.overall_coverage == pytest.approx(record.overall_live_coverage)
+    assert breakdown.category_breadth == pytest.approx(
+        sum(c.coverage for c in research.categories.values()) / len(CATEGORY_ORDER)
+    )
+    assert breakdown.freshness == pytest.approx(
+        _freshness_factor(record.evaluation_date, research.categories)
+    )
+    assert breakdown.source_quality == pytest.approx(
+        _source_quality_factor(research.categories)
+    )
+    assert breakdown.data_quality_penalty_applied is False
+
+
+def test_confidence_breakdown_flags_the_data_quality_penalty():
+    research = build_stock_research(_record(data_quality_status="stale price"))
+    assert research.confidence_breakdown.data_quality_penalty_applied is True
+
+
+def test_confidence_breakdown_never_desyncs_from_confidence():
+    """Recomputing confidence from the exposed breakdown's own factors (using
+    the same fixed weights build.py documents) must reproduce
+    StockResearch.confidence exactly — proving the breakdown isn't a second,
+    independently-drifting calculation."""
+    for record in (
+        _record(overall_live_coverage=0.3),
+        _with_business_quality(),
+        _record(overall_live_coverage=0.9, data_quality_status="stale price"),
+    ):
+        research = build_stock_research(record)
+        b = research.confidence_breakdown
+        penalty = 0.6 if b.data_quality_penalty_applied else 1.0
+        raw = 0.5 * b.overall_coverage + 0.2 * b.category_breadth + 0.2 * b.freshness + 0.1 * b.source_quality
+        recomputed = round(10 * penalty * max(0.0, min(1.0, raw)), 1)
+        assert recomputed == pytest.approx(research.confidence)

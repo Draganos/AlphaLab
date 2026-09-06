@@ -24,6 +24,7 @@ from alpha_lab.research.model import (
     CATEGORY_ORDER,
     CategoryResult,
     CategoryStatus,
+    ConfidenceBreakdown,
     MetricEvidence,
     MetricStatus,
     StockResearch,
@@ -97,6 +98,7 @@ def build_stock_research(
         {source for category in categories.values() for source in category.sources}
     )
     confidence = _confidence(record, categories)
+    confidence_breakdown = _confidence_breakdown(record, categories)
     return StockResearch(
         ticker=record.ticker,
         company_name=record.company,
@@ -109,6 +111,7 @@ def build_stock_research(
         confidence=confidence,
         confidence_label=_confidence_label(confidence),
         score_interpretation=record.confidence,
+        confidence_breakdown=confidence_breakdown,
         strengths=strengths,
         weaknesses=weaknesses,
         risks=risks,
@@ -232,15 +235,15 @@ def _confidence_label(confidence: float) -> str:
     return _CONFIDENCE_LABEL_FLOOR
 
 
-def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult]) -> float:
-    """Deterministic 0-10 confidence. See module docstring for the formula.
+def _confidence_factors(
+    record: LiveResearchRecord, categories: dict[str, CategoryResult]
+) -> tuple[float, float, float, float, bool]:
+    """The single computation behind both `_confidence` and
+    `_confidence_breakdown` — kept in one place so the UI-facing breakdown
+    can never drift from the number it's meant to explain.
 
-    confidence = 10 * data_quality_penalty * clip01(
-        0.5 * overall_coverage
-        + 0.2 * category_breadth
-        + 0.2 * freshness_factor
-        + 0.1 * source_quality_factor
-    )
+    Returns (overall_coverage, category_breadth, freshness_factor,
+    source_quality_factor, data_quality_penalty_applied).
 
     category_breadth is the mean of the eight categories' own (already
     computed) `coverage` fractions — not whether each category cleared its
@@ -254,7 +257,24 @@ def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult
     ) / len(CATEGORY_ORDER)
     freshness_factor = _freshness_factor(record.evaluation_date, categories)
     source_quality_factor = _source_quality_factor(categories)
-    penalty = 1.0 if record.data_quality_status == "valid" else _DATA_QUALITY_PENALTY
+    penalty_applied = record.data_quality_status != "valid"
+    return overall_coverage, category_breadth, freshness_factor, source_quality_factor, penalty_applied
+
+
+def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult]) -> float:
+    """Deterministic 0-10 confidence. See module docstring for the formula.
+
+    confidence = 10 * data_quality_penalty * clip01(
+        0.5 * overall_coverage
+        + 0.2 * category_breadth
+        + 0.2 * freshness_factor
+        + 0.1 * source_quality_factor
+    )
+    """
+    overall_coverage, category_breadth, freshness_factor, source_quality_factor, penalty_applied = (
+        _confidence_factors(record, categories)
+    )
+    penalty = _DATA_QUALITY_PENALTY if penalty_applied else 1.0
     raw = (
         0.5 * overall_coverage
         + 0.2 * category_breadth
@@ -262,6 +282,24 @@ def _confidence(record: LiveResearchRecord, categories: dict[str, CategoryResult
         + 0.1 * source_quality_factor
     )
     return round(10 * penalty * _clip01(raw), 1)
+
+
+def _confidence_breakdown(
+    record: LiveResearchRecord, categories: dict[str, CategoryResult]
+) -> ConfidenceBreakdown:
+    """Structural exposure of the exact factors `_confidence` already
+    computed — not a second confidence calculation. See `ConfidenceBreakdown`
+    for the fixed weights each factor carries."""
+    overall_coverage, category_breadth, freshness_factor, source_quality_factor, penalty_applied = (
+        _confidence_factors(record, categories)
+    )
+    return ConfidenceBreakdown(
+        overall_coverage=overall_coverage,
+        category_breadth=category_breadth,
+        freshness=freshness_factor,
+        source_quality=source_quality_factor,
+        data_quality_penalty_applied=penalty_applied,
+    )
 
 
 def _freshness_factor(evaluation_date: date, categories: dict[str, CategoryResult]) -> float:

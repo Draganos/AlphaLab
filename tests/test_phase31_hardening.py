@@ -300,8 +300,17 @@ def test_streamlit_render_paths_read_snapshots_and_home_limits_legacy_universe()
     market = (root / "app/dashboard/pages/3_Market_Screener.py").read_text()
     company = (root / "app/dashboard/pages/4_Company_Research.py").read_text()
     home = (root / "app/dashboard/main.py").read_text()
+    research_service = (root / "alpha_lab/research/service.py").read_text()
     assert ".read_current_research()" in market and ".build_live_records()" not in market
     assert "interpret_query(" not in market
-    assert ".read_current_research()" in company and ".build_live_records()" not in company
+    # Company Research now reads through alpha_lab.research.ResearchService
+    # rather than calling MarketScreenerService directly; the safety
+    # guarantee moves with it — the page must only call the service's own
+    # read-only accessor, and the service itself must only ever call the
+    # cheap persisted-snapshot read, never the expensive whole-universe
+    # rebuild.
+    assert ".list_current_research()" in company and ".build_live_records()" not in company
+    assert ".read_current_research()" in research_service
+    assert ".build_live_records()" not in research_service
     assert 'tickers=settings.universe.get("us", [])' in home
     assert "ttl=900" in home
