@@ -7,6 +7,8 @@ from alpha_lab.database.models import Fundamental, Price, Security
 from alpha_lab.database.queries import latest_fundamentals_as_of
 from alpha_lab.ingestion import IngestionService
 from alpha_lab.providers.base import MarketDataProvider
+from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
+import pytest
 
 
 class FakeProvider(MarketDataProvider):
@@ -97,3 +99,27 @@ def test_provider_failure_or_missing_refresh_does_not_erase_valid_price():
     with Session(engine) as session:
         price = session.scalar(select(Price).where(Price.ticker == "SAFE"))
         assert price.close == price.adjusted_close == 10
+
+
+class FailingProvider(FakeProvider):
+    def get_company_info(self, ticker):
+        raise ProviderError(ProviderErrorKind.RATE_LIMITED, "FailingProvider", "Yahoo Finance rate-limited the request")
+
+
+def test_provider_error_propagates_before_any_database_write_and_leaves_prior_data_intact():
+    """A rate-limited/network-unavailable provider failure must surface as a
+    ProviderError to the caller (never be swallowed) and must never touch
+    the database for that ticker -- existing valid rows from a prior
+    successful ingest must survive untouched."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    IngestionService(FakeProvider(), engine).ingest("NVDA", date(2024, 1, 1), date(2024, 2, 1))
+
+    with pytest.raises(ProviderError) as excinfo:
+        IngestionService(FailingProvider(), engine).ingest("NVDA", date(2024, 1, 1), date(2024, 2, 1))
+    assert excinfo.value.kind == ProviderErrorKind.RATE_LIMITED
+
+    with Session(engine) as session:
+        price = session.scalar(select(Price).where(Price.ticker == "NVDA"))
+        assert price is not None
+        assert price.close == 10
