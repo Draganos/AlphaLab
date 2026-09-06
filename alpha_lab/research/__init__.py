@@ -4,10 +4,12 @@ from alpha_lab.research.model import (
     CATEGORY_ORDER,
     CategoryResult,
     CategoryStatus,
+    ConfidenceBreakdown,
     MetricEvidence,
     MetricStatus,
     StockResearch,
 )
+from alpha_lab.research.service import ResearchService
 from alpha_lab.research.universe import ResearchUniverse, load_universe
 
 __all__ = [
@@ -19,6 +21,8 @@ __all__ = [
     "MetricEvidence",
     "MetricStatus",
     "CategoryStatus",
+    "ConfidenceBreakdown",
     "CATEGORY_LABELS",
     "CATEGORY_ORDER",
+    "ResearchService",
 ]
