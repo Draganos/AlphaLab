@@ -93,6 +93,10 @@ class TechnicalSummary(BaseModel):
     coverage: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
     timeframe: Timeframe
+    # The date this summary was computed, not necessarily the date of the
+    # latest price bar used (stale price history still produces a summary,
+    # honestly labeled by its own indicator-level `as_of` values and by
+    # `coverage`/`source`, never backdated to imply fresher data).
     as_of: date
     source: str
     methodology_version: str = TECHNICAL_METHODOLOGY_VERSION

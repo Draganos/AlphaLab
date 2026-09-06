@@ -320,3 +320,83 @@ def test_get_stock_research_never_writes_a_historical_snapshot(research_service,
     service.get_research_history("AAPL")
     service.get_latest_snapshot("AAPL")
     # No assertion error raised above means no read path called save().
+
+
+# --- historical snapshots must never pick up "current" supplemental state ---
+
+
+def test_historical_snapshot_never_gains_supplemental_data_computed_after_it_was_saved(
+    research_service,
+):
+    """A historical snapshot persisted before Analyst Consensus/Technical
+    Summary/AI Research Rating existed for a ticker must still show them as
+    None after those domains are later refreshed -- current-state tables
+    must never leak into an already-persisted historical snapshot. Only
+    the *current* view (get_stock_research) may reflect newly-refreshed
+    supplemental data."""
+    from datetime import timedelta
+
+    import pandas as pd
+
+    from alpha_lab.database.models import Price
+    from alpha_lab.providers.base import MarketDataProvider
+    from alpha_lab.research.supplemental_service import SupplementalResearchService
+
+    service, engine = research_service
+    _seed_current_research(engine)
+
+    # Persist a historical snapshot while no supplemental data exists yet.
+    pre_refresh_research = service.get_stock_research("AAPL")
+    assert pre_refresh_research.analyst_consensus is None
+    assert pre_refresh_research.technical_summary is None
+    assert pre_refresh_research.ai_research_assessment is None
+    saved = service.persist_snapshot(pre_refresh_research)
+
+    # Now populate "current" supplemental state for the same ticker.
+    with Session(engine) as session:
+        for i in range(300):
+            session.add(Price(
+                ticker="AAPL", date=date(2025, 1, 1) + timedelta(days=i),
+                close=100 + i * 0.5, high=101 + i * 0.5, low=99 + i * 0.5,
+            ))
+        session.commit()
+
+    class _FakeProvider(MarketDataProvider):
+        provider_name = "FakeProvider"
+
+        def get_company_info(self, ticker):
+            return {}
+
+        def get_price_history(self, ticker, start, end):
+            return pd.DataFrame()
+
+        def get_financials(self, ticker):
+            return pd.DataFrame()
+
+        def get_analyst_consensus(self, ticker):
+            return {
+                "ticker": ticker, "as_of": date.today(), "strong_buy": 10, "buy": 5,
+                "hold": 2, "sell": 0, "strong_sell": 0, "target_current": 100.0,
+                "target_low": 90.0, "target_mean": 120.0, "target_median": 118.0,
+                "target_high": 140.0, "source": "FakeProvider",
+            }
+
+    supplemental = SupplementalResearchService(engine)
+    supplemental.refresh_analyst_consensus("AAPL", _FakeProvider())
+    supplemental.refresh_technical_summary("AAPL")
+
+    # The CURRENT view now reflects the freshly-refreshed data...
+    post_refresh_research = service.get_stock_research("AAPL")
+    assert post_refresh_research.analyst_consensus is not None
+    assert post_refresh_research.technical_summary is not None
+
+    # ...but the ALREADY-PERSISTED historical snapshot must not have
+    # retroactively gained it.
+    reloaded_snapshot = service.get_research_snapshot(saved.snapshot_id)
+    assert reloaded_snapshot.analyst_consensus is None
+    assert reloaded_snapshot.technical_summary is None
+    assert reloaded_snapshot.ai_research_assessment is None
+
+    latest = service.get_latest_snapshot("AAPL")
+    assert latest.analyst_consensus is None
+    assert latest.technical_summary is None

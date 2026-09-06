@@ -189,6 +189,44 @@ def test_ai_assessment_round_trips_through_persistence(engine):
     assert read_back.score == written.score
 
 
+def test_ai_assessment_evidence_coverage_is_domain_aware_not_inflated_by_missing_domains(engine):
+    """The exact scenario from the correction request: 100% fundamental
+    coverage with no Analyst Consensus/Technical Summary must not read as
+    100% AI evidence coverage -- missing domains count as 0, not excluded
+    from the average."""
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    research = _stub_research(overall_coverage=1.0)
+
+    assessment = service.refresh_ai_research_assessment("NVDA", research)
+
+    assert assessment.evidence_coverage.fundamental_coverage == 1.0
+    assert assessment.evidence_coverage.analyst_coverage == 0.0
+    assert assessment.evidence_coverage.technical_coverage == 0.0
+    assert assessment.evidence_coverage.overall_ai_evidence_coverage < 1.0
+    assert assessment.evidence_coverage.overall_ai_evidence_coverage == pytest.approx(1 / 3)
+    # Below the minimum-evidence gate given only one of three domains --
+    # the rating must reflect that rather than a confident synthesis.
+    assert assessment.rating.value == "REVIEW"
+    assert assessment.score is None
+
+
+def test_ai_assessment_evidence_coverage_reflects_supplied_analyst_and_technical_domains(engine):
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    analyst = service.refresh_analyst_consensus("NVDA", _FakeAnalystProvider(_raw_consensus()))
+    technical = service.refresh_technical_summary("NVDA")
+    research = _stub_research(overall_coverage=1.0)
+
+    assessment = service.refresh_ai_research_assessment(
+        "NVDA", research, analyst_consensus=analyst, technical_summary=technical
+    )
+
+    assert assessment.evidence_coverage.analyst_coverage == analyst.coverage
+    assert assessment.evidence_coverage.technical_coverage == technical.coverage
+    assert assessment.evidence_coverage.fundamental_coverage == 1.0
+
+
 def test_ai_assessment_never_touches_the_fundamental_score(engine):
     """Refreshing AI Research Rating must not mutate the StockResearch it
     was given -- the fundamental score is computed and stored entirely

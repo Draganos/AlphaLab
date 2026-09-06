@@ -131,6 +131,11 @@ class YFinanceProvider(MarketDataProvider):
         other rows the endpoint returns are trailing months of the same
         trend, which is Analyst *Revisions* territory (out of scope here;
         see the module docstring in analyst_consensus.py).
+
+        `as_of` is today's date (when AlphaLab made this call) -- Yahoo's
+        recommendationTrend/financialData modules do not expose a
+        provider-side observation timestamp, so this is never presented as
+        one.
         """
         ticker_obj = self._ticker(ticker)
         recommendations = call_with_classification(

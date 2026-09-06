@@ -36,8 +36,17 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
-AI_RATING_METHODOLOGY_VERSION = "ai-research-rating-v1"
+AI_RATING_METHODOLOGY_VERSION = "ai-research-rating-v2"
 AI_RATING_PROMPT_VERSION = "ai-research-rating-prompt-v1"
+
+# Minimum evidence required before the OVERALL rating may be anything but
+# REVIEW -- both conditions must hold. A single available positive/negative
+# dimension is not a synthesis; it is one data point wearing a synthesis's
+# clothes. `confidence` is computed independently and may still be low and
+# nonzero even when the rating itself is forced to REVIEW (evidence "leans"
+# somewhere without being enough to act on).
+AI_MINIMUM_ASSESSABLE_DIMENSIONS = 3  # of 6 -- at least half must be non-REVIEW
+AI_MINIMUM_EVIDENCE_COVERAGE = 0.34  # of overall_ai_evidence_coverage (roughly 1/3 domains)
 
 DIMENSION_NAMES = (
     "business_outlook",
@@ -77,11 +86,18 @@ class AIEvidenceItem(BaseModel):
     `evidence_id` is stable and namespaced by source (`fundamental:...`,
     `metric:...`, `analyst:...`, `technical:...`) so a provider's citation
     is traceable back to exactly where the fact came from.
+
+    `value` carries the same fact as `description`, but machine-readable
+    (a 0-100 score, an upside fraction, or a rating word like "BUY") --
+    used by DeterministicAIRatingProvider so it never has to string-parse
+    its own generated text. An LLM provider is free to ignore it and read
+    `description` instead; it is not required to be present.
     """
 
     evidence_id: str
     description: str
     source: str
+    value: float | str | None = None
 
 
 class AIDimensionAssessment(BaseModel):
@@ -116,12 +132,51 @@ class AIRawDimensions(BaseModel):
         return {name: getattr(self, name) for name in DIMENSION_NAMES}
 
 
+class AIEvidenceCoverage(BaseModel):
+    """Domain-aware evidence coverage feeding one AI Research Rating.
+
+    Deliberately NOT a mean of whichever domains happen to be present --
+    `analyst_coverage`/`technical_coverage` are 0.0 (not excluded from the
+    denominator) when that domain was never supplied, so a ticker with
+    100% fundamental coverage and no Analyst Consensus/Technical Summary
+    reads as roughly a third covered overall, never as 100%. This never
+    affects the fundamental score's own coverage figures, which are
+    computed and stored entirely separately.
+    """
+
+    fundamental_coverage: float = Field(ge=0, le=1)
+    analyst_coverage: float = Field(ge=0, le=1)
+    technical_coverage: float = Field(ge=0, le=1)
+    overall_ai_evidence_coverage: float = Field(ge=0, le=1)
+
+
+def build_evidence_coverage(
+    *,
+    fundamental_coverage: float,
+    analyst_consensus: "object | None" = None,
+    technical_summary: "object | None" = None,
+) -> AIEvidenceCoverage:
+    """The only place `overall_ai_evidence_coverage` is computed -- always
+    an average over exactly three domains, never over however many happen
+    to be present."""
+    analyst_coverage = analyst_consensus.coverage if analyst_consensus is not None else 0.0
+    technical_coverage = technical_summary.coverage if technical_summary is not None else 0.0
+    overall = (fundamental_coverage + analyst_coverage + technical_coverage) / 3
+    return AIEvidenceCoverage(
+        fundamental_coverage=fundamental_coverage,
+        analyst_coverage=analyst_coverage,
+        technical_coverage=technical_coverage,
+        overall_ai_evidence_coverage=overall,
+    )
+
+
 class AIResearchAssessment(BaseModel):
     ticker: str
     score: float | None = Field(None, ge=0, le=100)
     rating: AIDimensionValue
     confidence: float = Field(ge=0, le=1)
     dimensions: dict[str, AIDimensionAssessment]
+    evidence_coverage: AIEvidenceCoverage
     positives: list[str]
     risks: list[str]
     catalysts: list[str]
@@ -163,6 +218,7 @@ def build_evidence_payload(
                 evidence_id=f"fundamental:{name}",
                 description=detail,
                 source="AlphaLab Fundamental Research",
+                value=category.score,
             )
         )
         for metric in category.metrics:
@@ -174,9 +230,10 @@ def build_evidence_payload(
                     description=f"{metric.name} = {metric.value:.4g}"
                     + (f" ({metric.unit})" if metric.unit else ""),
                     source=metric.source or "AlphaLab Fundamental Research",
+                    value=metric.value,
                 )
             )
-    if analyst_consensus is not None and getattr(analyst_consensus, "rating", None) is not None:
+    if analyst_consensus is not None:
         items.append(
             AIEvidenceItem(
                 evidence_id="analyst:rating",
@@ -187,6 +244,7 @@ def build_evidence_payload(
                     else ""
                 ),
                 source="Analyst Consensus",
+                value=analyst_consensus.rating.value,
             )
         )
         if analyst_consensus.upside_to_mean is not None:
@@ -195,6 +253,7 @@ def build_evidence_payload(
                     evidence_id="analyst:upside_to_mean",
                     description=f"Upside to mean analyst target = {analyst_consensus.upside_to_mean:+.1%}",
                     source="Analyst Consensus",
+                    value=analyst_consensus.upside_to_mean,
                 )
             )
     if technical_summary is not None:
@@ -203,6 +262,7 @@ def build_evidence_payload(
                 evidence_id="technical:overall_rating",
                 description=f"Technical overall rating = {technical_summary.overall_rating.value}",
                 source="Technical Summary",
+                value=technical_summary.overall_rating.value,
             )
         )
         items.append(
@@ -307,27 +367,62 @@ def compute_confidence(
     return round(max(0.0, min(1.0, raw)), 3)
 
 
+def _meets_minimum_evidence(
+    dimensions: dict[str, AIDimensionAssessment], evidence_coverage: AIEvidenceCoverage
+) -> bool:
+    """The gate behind AI_MINIMUM_ASSESSABLE_DIMENSIONS/AI_MINIMUM_EVIDENCE_COVERAGE.
+
+    Both conditions must hold: enough of the six dimensions were actually
+    assessable, AND enough of the three evidence domains actually
+    contributed. Either alone is gameable (six dimensions all thinly
+    derived from one domain; or wide coverage but only one usable
+    dimension) -- the combination is what "a meaningful synthesis" means
+    here, per AI_RATING_METHODOLOGY_VERSION.
+    """
+    assessable = sum(1 for d in dimensions.values() if d.value != AIDimensionValue.REVIEW)
+    return (
+        assessable >= AI_MINIMUM_ASSESSABLE_DIMENSIONS
+        and evidence_coverage.overall_ai_evidence_coverage >= AI_MINIMUM_EVIDENCE_COVERAGE
+    )
+
+
 def build_ai_research_assessment(
     *,
     ticker: str,
     raw: AIRawDimensions,
     evidence: list[AIEvidenceItem],
-    evidence_coverage: float,
+    evidence_coverage: AIEvidenceCoverage,
     research_schema_version: str,
     as_of: date,
     generated_at: datetime | None = None,
 ) -> AIResearchAssessment:
     """Validate provider evidence citations, then deterministically compute
     score/rating/confidence. Raises EvidenceViolation if the provider cited
-    evidence it was never given -- never silently corrected."""
+    evidence it was never given -- never silently corrected.
+
+    The overall rating is forced to REVIEW (and score to None) whenever
+    evidence falls short of AI_MINIMUM_ASSESSABLE_DIMENSIONS /
+    AI_MINIMUM_EVIDENCE_COVERAGE, even if the few available dimensions
+    would otherwise average out to a confident-looking score -- see
+    `_meets_minimum_evidence`. `confidence` is computed independently and
+    is allowed to stay low-but-nonzero in that case: REVIEW + low
+    confidence is the honest combination for sparse evidence, never a
+    guessed Positive/Negative rating.
+    """
     allowed_ids = {item.evidence_id for item in evidence}
     validate_evidence_ids(raw, allowed_ids)
     dimensions = raw.dimensions()
-    score = compute_score(dimensions)
-    rating = _map_score_to_rating(score)
     confidence = compute_confidence(
-        dimensions, evidence_count=len(evidence), evidence_coverage=evidence_coverage
+        dimensions,
+        evidence_count=len(evidence),
+        evidence_coverage=evidence_coverage.overall_ai_evidence_coverage,
     )
+    if _meets_minimum_evidence(dimensions, evidence_coverage):
+        score = compute_score(dimensions)
+        rating = _map_score_to_rating(score)
+    else:
+        score = None
+        rating = AIDimensionValue.REVIEW
     supporting = sorted({eid for d in dimensions.values() for eid in d.supporting_evidence_ids})
     return AIResearchAssessment(
         ticker=ticker.upper(),
@@ -335,6 +430,7 @@ def build_ai_research_assessment(
         rating=rating,
         confidence=confidence,
         dimensions=dimensions,
+        evidence_coverage=evidence_coverage,
         positives=raw.positives,
         risks=raw.risks,
         catalysts=raw.catalysts,
@@ -360,9 +456,72 @@ class AIRatingProvider(ABC):
     def assess(self, ticker: str, evidence: list[AIEvidenceItem]) -> AIRawDimensions: ...
 
 
+_RATING_WORD_TO_DIMENSION_VALUE: dict[str, AIDimensionValue] = {
+    "STRONG_BUY": AIDimensionValue.VERY_POSITIVE,
+    "BUY": AIDimensionValue.POSITIVE,
+    "NEUTRAL": AIDimensionValue.NEUTRAL,
+    "SELL": AIDimensionValue.NEGATIVE,
+    "STRONG_SELL": AIDimensionValue.VERY_NEGATIVE,
+    "REVIEW": AIDimensionValue.REVIEW,
+}
+
+# Analyst price-target upside, as a fraction (0.20 == +20%). Deliberately
+# the same band shape as AnalystConsensus's own -2..+2 thresholds, just
+# expressed on upside's native scale -- versioned alongside
+# AI_RATING_METHODOLOGY_VERSION, not shared code, since the two domains'
+# thresholds are allowed to diverge independently in the future.
+_UPSIDE_THRESHOLDS_V1: tuple[tuple[float, AIDimensionValue], ...] = (
+    (0.20, AIDimensionValue.VERY_POSITIVE),
+    (0.05, AIDimensionValue.POSITIVE),
+    (-0.05, AIDimensionValue.NEUTRAL),
+    (-0.20, AIDimensionValue.NEGATIVE),
+)
+_UPSIDE_FLOOR = AIDimensionValue.VERY_NEGATIVE
+
+# A blended dimension's average numeric signal maps back to a value using
+# the same -2..+2 band shape as AnalystConsensus._RATING_THRESHOLDS_V1 --
+# deliberately aligned so "moderately positive" means the same magnitude
+# across AlphaLab's rating domains, though each still carries its own
+# version and could diverge later without affecting the other.
+_BLENDED_SIGNAL_THRESHOLDS_V1: tuple[tuple[float, AIDimensionValue], ...] = (
+    (1.5, AIDimensionValue.VERY_POSITIVE),
+    (0.5, AIDimensionValue.POSITIVE),
+    (-0.5, AIDimensionValue.NEUTRAL),
+    (-1.5, AIDimensionValue.NEGATIVE),
+)
+_BLENDED_SIGNAL_FLOOR = AIDimensionValue.VERY_NEGATIVE
+
+
+def _band(value: float, thresholds: tuple[tuple[float, AIDimensionValue], ...], floor: AIDimensionValue) -> AIDimensionValue:
+    for threshold, banded in thresholds:
+        if value >= threshold:
+            return banded
+    return floor
+
+
+def _dimension_value_for_evidence(evidence_id: str, value: float | str) -> AIDimensionValue | None:
+    """Convert one evidence item's raw `value` to a dimension judgment.
+
+    Returns None (not REVIEW) when the value itself doesn't represent a
+    usable signal (e.g. an analyst/technical rating that is itself
+    REVIEW) -- the caller treats that exactly like the source being
+    absent, since averaging a "no signal" into a blend would be wrong.
+    """
+    if evidence_id.startswith("fundamental:"):
+        return _map_score_to_rating(value if isinstance(value, (int, float)) else None)
+    if evidence_id == "analyst:upside_to_mean" and isinstance(value, (int, float)):
+        return _band(value, _UPSIDE_THRESHOLDS_V1, _UPSIDE_FLOOR)
+    if evidence_id in ("analyst:rating", "technical:overall_rating") and isinstance(value, str):
+        banded = _RATING_WORD_TO_DIMENSION_VALUE.get(value)
+        return None if banded == AIDimensionValue.REVIEW else banded
+    return None
+
+
 class DeterministicAIRatingProvider(AIRatingProvider):
-    """Rule-based, offline, no network: maps already-computed AlphaLab
-    category scores straight to a dimension judgment via fixed thresholds.
+    """Rule-based, offline, no network. Each dimension is derived only from
+    the evidence domains actually supplied for it -- see `_DIMENSION_SOURCES`
+    -- and never claims to have used Analyst Consensus or Technical Summary
+    evidence that was not present in the supplied payload.
 
     This is the default provider (see `configured_ai_rating_provider`) --
     unlike alpha_lab.ai.research's document-commentary AI (which is only
@@ -371,74 +530,94 @@ class DeterministicAIRatingProvider(AIRatingProvider):
     trusts is always safe to show, never fabricates anything beyond what
     the evidence already says, and keeps this feature testable and usable
     with zero external dependency.
+
+    Methodology: business/growth/competitive-position/risk stay strictly
+    fundamental -- Technical Summary in particular is deliberately never
+    blended into a business-quality-style dimension (a moving-average
+    signal is not a fact about the business). Analyst Consensus feeds
+    `business_outlook` (professional opinion is evidence about outlook) and
+    `valuation_context` (price-target upside is a valuation signal).
+    Technical Summary feeds only `catalyst_strength`, alongside the
+    fundamental momentum category, as market/technical context. When two
+    sources are blended and their signs disagree, a note is added to
+    `contradictions` rather than silently averaging them away.
     """
 
-    _POSITIVE = 70.0
-    _NEGATIVE = 30.0
-
-    # dimension -> the fundamental category it is deterministically derived
-    # from, and whether a *higher* category score means a more positive
-    # dimension (valuation is inverted: a high valuation score means
-    # "attractively priced", which is the positive direction for this
-    # provider's simple mapping).
-    _SOURCE_CATEGORY = {
-        "business_outlook": ("business_quality", False),
-        "growth_prospects": ("earnings_growth", False),
-        "competitive_position": ("business_quality", False),
-        "valuation_context": ("valuation", False),
-        "risk_profile": ("financial_strength", False),
-        "catalyst_strength": ("momentum", False),
+    # dimension -> the evidence_ids it may be derived from, in the order
+    # they are cited (not a priority order -- all present ones are blended
+    # with equal weight).
+    _DIMENSION_SOURCES: dict[str, tuple[str, ...]] = {
+        "business_outlook": ("fundamental:business_quality", "analyst:rating"),
+        "growth_prospects": ("fundamental:earnings_growth",),
+        "competitive_position": ("fundamental:business_quality",),
+        "valuation_context": ("fundamental:valuation", "analyst:upside_to_mean"),
+        "risk_profile": ("fundamental:financial_strength",),
+        "catalyst_strength": ("fundamental:momentum", "technical:overall_rating"),
     }
 
     def assess(self, ticker: str, evidence: list[AIEvidenceItem]) -> AIRawDimensions:
         by_id = {item.evidence_id: item for item in evidence}
         assessments: dict[str, AIDimensionAssessment] = {}
-        for dimension, (category, _invert) in self._SOURCE_CATEGORY.items():
-            evidence_id = f"fundamental:{category}"
-            item = by_id.get(evidence_id)
-            assessments[dimension] = self._assess_dimension(item)
+        contradictions: list[str] = []
+        evidence_gaps: list[str] = []
+        for dimension, source_ids in self._DIMENSION_SOURCES.items():
+            assessment, contradiction = self._assess_dimension(dimension, source_ids, by_id)
+            assessments[dimension] = assessment
+            if contradiction:
+                contradictions.append(contradiction)
+            if assessment.value == AIDimensionValue.REVIEW:
+                evidence_gaps.append(
+                    f"No usable evidence for '{dimension}' among {', '.join(source_ids)}."
+                )
         return AIRawDimensions(
             **assessments,
             positives=[],
             risks=[],
             catalysts=[],
-            contradictions=[],
-            evidence_gaps=[
-                f"No fundamental evidence available for '{category}'."
-                for dimension, (category, _) in self._SOURCE_CATEGORY.items()
-                if f"fundamental:{category}" not in by_id
-            ],
+            contradictions=contradictions,
+            evidence_gaps=evidence_gaps,
             provider="deterministic-rule-based",
-            model="category-threshold-v1",
+            model="category-threshold-v2",
             prompt_version=AI_RATING_PROMPT_VERSION,
         )
 
-    def _assess_dimension(self, item: AIEvidenceItem | None) -> AIDimensionAssessment:
-        if item is None or "score = unavailable" in item.description:
-            return AIDimensionAssessment(value=AIDimensionValue.REVIEW, confidence=0.0)
-        score = _extract_score(item.description)
-        if score is None:
-            return AIDimensionAssessment(value=AIDimensionValue.REVIEW, confidence=0.0)
-        if score >= self._POSITIVE:
-            value = AIDimensionValue.POSITIVE
-        elif score <= self._NEGATIVE:
-            value = AIDimensionValue.NEGATIVE
-        else:
-            value = AIDimensionValue.NEUTRAL
-        return AIDimensionAssessment(
-            value=value,
-            confidence=0.6,
-            reasoning=item.description,
-            supporting_evidence_ids=[item.evidence_id],
+    def _assess_dimension(
+        self, dimension: str, source_ids: tuple[str, ...], by_id: dict[str, AIEvidenceItem]
+    ) -> tuple[AIDimensionAssessment, str | None]:
+        used_ids: list[str] = []
+        signals: list[float] = []
+        reasoning_parts: list[str] = []
+        for evidence_id in source_ids:
+            item = by_id.get(evidence_id)
+            if item is None or item.value is None:
+                continue
+            banded = _dimension_value_for_evidence(evidence_id, item.value)
+            if banded is None:
+                continue
+            signals.append(_DIMENSION_NUMERIC[banded])
+            used_ids.append(evidence_id)
+            reasoning_parts.append(item.description)
+
+        if not signals:
+            return AIDimensionAssessment(value=AIDimensionValue.REVIEW, confidence=0.0), None
+
+        contradiction = None
+        if len(signals) > 1 and max(signals) > 0 and min(signals) < 0:
+            contradiction = (
+                f"{dimension}: evidence disagrees ({'; '.join(reasoning_parts)})."
+            )
+        average = sum(signals) / len(signals)
+        value = _band(average, _BLENDED_SIGNAL_THRESHOLDS_V1, _BLENDED_SIGNAL_FLOOR)
+        confidence = 0.6 if len(signals) == 1 else 0.75
+        return (
+            AIDimensionAssessment(
+                value=value,
+                confidence=confidence,
+                reasoning="; ".join(reasoning_parts),
+                supporting_evidence_ids=used_ids,
+            ),
+            contradiction,
         )
-
-
-def _extract_score(description: str) -> float | None:
-    try:
-        fragment = description.split("=", 1)[1].split("(", 1)[0].strip()
-        return float(fragment.split("/")[0])
-    except (IndexError, ValueError):
-        return None
 
 
 class OpenAIRatingProvider(AIRatingProvider):

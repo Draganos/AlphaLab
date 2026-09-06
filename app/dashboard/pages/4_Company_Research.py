@@ -92,6 +92,12 @@ def _render_ai_research_panel(column, assessment) -> None:
     column.caption(f"Evidence referenced: {len(assessment.supporting_evidence)}")
     if assessment.evidence_gaps:
         column.caption(f"Evidence gaps: {len(assessment.evidence_gaps)}")
+    coverage = assessment.evidence_coverage
+    column.caption(
+        "AI evidence coverage — Fundamental "
+        f"{coverage.fundamental_coverage:.0%} · Analyst {coverage.analyst_coverage:.0%} · "
+        f"Technical {coverage.technical_coverage:.0%} · Overall {coverage.overall_ai_evidence_coverage:.0%}"
+    )
 
 
 def _render_supplemental_panels(research) -> None:

@@ -34,6 +34,7 @@ from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.research.ai_rating import (
     AIResearchAssessment,
     build_ai_research_assessment,
+    build_evidence_coverage,
     build_evidence_payload,
     configured_ai_rating_provider,
 )
@@ -141,12 +142,14 @@ class SupplementalResearchService:
             analyst_consensus=analyst_consensus,
             technical_summary=technical_summary,
         )
-        coverages = [research.overall_coverage]
-        if analyst_consensus is not None:
-            coverages.append(analyst_consensus.coverage)
-        if technical_summary is not None:
-            coverages.append(technical_summary.coverage)
-        evidence_coverage = sum(coverages) / len(coverages)
+        # Domain-aware: a missing Analyst Consensus or Technical Summary
+        # counts as 0 coverage for that domain, never as "not applicable"
+        # and excluded from the average -- see AIEvidenceCoverage.
+        evidence_coverage = build_evidence_coverage(
+            fundamental_coverage=research.overall_coverage,
+            analyst_consensus=analyst_consensus,
+            technical_summary=technical_summary,
+        )
 
         provider = configured_ai_rating_provider()
         raw = provider.assess(symbol, evidence)

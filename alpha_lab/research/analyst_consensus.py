@@ -81,6 +81,10 @@ class AnalystConsensus(BaseModel):
     target_median: float | None = Field(None, gt=0)
     target_high: float | None = Field(None, gt=0)
     upside_to_mean: float | None = None
+    # The date AlphaLab fetched this observation -- never a Yahoo-reported
+    # "as of" date, since the recommendationTrend/financialData endpoints
+    # this is built from do not expose one. Never presented as if Yahoo
+    # itself timestamped the observation.
     as_of: date | None = None
     source: str
     source_version: str = ANALYST_CONSENSUS_METHODOLOGY_VERSION
