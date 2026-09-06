@@ -94,8 +94,8 @@ AlphaLab is pinned to `yfinance==1.7.0` (tested with `curl_cffi==0.16.3` as its 
 
 `YFinanceProvider` classifies every external failure into one of four kinds (`alpha_lab.providers.errors.ProviderErrorKind`) instead of surfacing raw yfinance/curl_cffi/requests exceptions:
 
-- **`RATE_LIMITED`** — Yahoo returned a 429 or yfinance's own `YFRateLimitError`. A small bounded number of retries with exponential backoff is attempted before this surfaces; it is not retried indefinitely, since hammering an already-throttling endpoint only makes things worse. **Action:** wait and retry later, or reduce how many tickers are requested per run.
-- **`NETWORK_UNAVAILABLE`** — a connection-level failure (DNS resolution, timeout, connection reset) reaching Yahoo. **Action:** check network/DNS connectivity, then retry.
+- **`RATE_LIMITED`** — Yahoo returned a 429 or yfinance's own `YFRateLimitError`. yfinance already retries once internally (swapping cookie strategy) before ever raising this to us, so AlphaLab adds only one further retry with backoff on top — piling on more would just add to the throttling. **Action:** wait and retry later, or reduce how many tickers are requested per run.
+- **`NETWORK_UNAVAILABLE`** — a connection-level failure (DNS resolution, timeout, connection reset) reaching Yahoo. yfinance does not retry these internally by default, so AlphaLab retries up to twice with exponential backoff before surfacing this. **Action:** check network/DNS connectivity, then retry.
 - **`NO_DATA`** — yfinance reports the ticker itself has nothing (e.g. possibly delisted, no timezone). Not retried; retrying would not change the outcome.
 - **`UNKNOWN_PROVIDER_ERROR`** — anything else, reported rather than guessed at.
 

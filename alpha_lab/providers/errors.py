@@ -48,6 +48,20 @@ class ProviderErrorKind(StrEnum):
 # UNKNOWN_PROVIDER_ERROR (unclassified) would not be fixed by retrying.
 RETRYABLE_KINDS = frozenset({ProviderErrorKind.RATE_LIMITED, ProviderErrorKind.NETWORK_UNAVAILABLE})
 
+# yfinance 1.7.0 defaults YfConfig.network.retries to 0 (no internal retry
+# loop at all), so a NETWORK_UNAVAILABLE failure reaches us having been
+# attempted exactly once -- a short bounded retry here duplicates nothing.
+# A RATE_LIMITED failure is different: yfinance already retries once
+# internally (it swaps cookie strategy and re-requests before raising
+# YFRateLimitError -- see yfinance/data.py's _make_request) before we ever
+# see it, and retrying against an endpoint that just told us to back off
+# only adds to the throttling. So rate limiting gets fewer retries than a
+# plain network hiccup, not the same bound.
+_DEFAULT_RETRY_LIMITS: dict[ProviderErrorKind, int] = {
+    ProviderErrorKind.RATE_LIMITED: 1,
+    ProviderErrorKind.NETWORK_UNAVAILABLE: 2,
+}
+
 
 class ProviderError(Exception):
     """Raised when an external provider call fails.
@@ -150,7 +164,7 @@ def call_with_classification(
     fn: Callable[[], T],
     *,
     provider: str,
-    max_retries: int = 2,
+    max_retries: int | None = None,
     backoff_seconds: float = 1.0,
 ) -> T:
     """Run ``fn``, classifying any failure into a ``ProviderError``.
@@ -161,6 +175,13 @@ def call_with_classification(
     one 429 into a flood of requests that makes the throttling worse. A
     ``NO_DATA`` or ``UNKNOWN_PROVIDER_ERROR`` classification is never
     retried: retrying would not change the outcome.
+
+    ``max_retries=None`` (the default) uses ``_DEFAULT_RETRY_LIMITS``, which
+    gives ``RATE_LIMITED`` fewer retries than ``NETWORK_UNAVAILABLE`` --
+    yfinance already retries once internally before ever surfacing a rate
+    limit to us, so piling on the same retry budget as a plain network
+    hiccup would just add to the throttling. Pass an explicit value to
+    override this for both kinds uniformly.
     """
     attempt = 0
     while True:
@@ -168,7 +189,8 @@ def call_with_classification(
             return fn()
         except Exception as exc:  # noqa: BLE001 - deliberately broad; classified below
             error = classify_yfinance_error(exc, provider=provider)
-            if error.kind not in RETRYABLE_KINDS or attempt >= max_retries:
+            limit = _DEFAULT_RETRY_LIMITS.get(error.kind, 0) if max_retries is None else max_retries
+            if error.kind not in RETRYABLE_KINDS or attempt >= limit:
                 raise error from exc
             time.sleep(backoff_seconds * (2**attempt))
             attempt += 1

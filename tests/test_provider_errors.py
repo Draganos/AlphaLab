@@ -8,6 +8,8 @@ import json
 
 import pytest
 import requests.exceptions
+import curl_cffi.requests.exceptions as curl_exceptions
+from curl_cffi import requests as curl_requests
 import yfinance.exceptions as yf_exceptions
 
 from alpha_lab.providers.errors import (
@@ -62,6 +64,46 @@ def test_unrelated_json_decode_error_is_not_misclassified_as_rate_limited():
 def test_network_and_dns_failures_are_classified_as_network_unavailable_not_rate_limited(exc):
     error = classify_yfinance_error(exc, provider="YFinanceProvider")
     assert error.kind == ProviderErrorKind.NETWORK_UNAVAILABLE
+
+
+# --- curl_cffi: yfinance 1.7.0's actual production HTTP backend ----------
+#
+# yfinance prefers curl_cffi over plain requests (see yfinance/_http.py);
+# the tests above cover the requests-shaped exceptions as a compatibility
+# fallback, but the classifier must also handle what the backend actually
+# used in production raises.
+
+
+def test_curl_cffi_http_429_is_classified_as_rate_limited():
+    response = curl_requests.Response()
+    response.status_code = 429
+    exc = curl_exceptions.HTTPError("429 Too Many Requests", response=response)
+    error = classify_yfinance_error(exc, provider="YFinanceProvider")
+    assert error.kind == ProviderErrorKind.RATE_LIMITED
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        curl_exceptions.DNSError("Could not resolve host: query1.finance.yahoo.com"),
+        curl_exceptions.ConnectionError("Failed to connect to query2.finance.yahoo.com"),
+        curl_exceptions.Timeout("Connection timed out"),
+    ],
+)
+def test_curl_cffi_connection_and_dns_failures_are_classified_as_network_unavailable(exc):
+    error = classify_yfinance_error(exc, provider="YFinanceProvider")
+    assert error.kind == ProviderErrorKind.NETWORK_UNAVAILABLE
+    assert error.kind != ProviderErrorKind.RATE_LIMITED
+
+
+def test_curl_cffi_json_decode_error_on_empty_body_is_the_same_rate_limit_fallback():
+    """curl_cffi's JSONDecodeError also subclasses json.JSONDecodeError (and
+    OSError) -- must still hit the narrow rate-limit fallback, not the
+    network-unavailable branch it would fall into if checked as OSError
+    first."""
+    exc = curl_exceptions.JSONDecodeError("Expecting value", "", 0)
+    error = classify_yfinance_error(exc, provider="YFinanceProvider")
+    assert error.kind == ProviderErrorKind.RATE_LIMITED
 
 
 def test_ticker_missing_error_is_classified_as_no_data():
@@ -134,3 +176,30 @@ def test_call_with_classification_never_retries_no_data_or_unknown_errors():
 
     assert excinfo.value.kind == ProviderErrorKind.NO_DATA
     assert len(calls) == 1
+
+
+def test_default_retry_budget_gives_rate_limited_fewer_attempts_than_network_unavailable():
+    """yfinance already retries once internally before ever surfacing a rate
+    limit to us (cookie-strategy swap-and-retry in _make_request), so the
+    default budget must not pile the same retry count on top of that as it
+    does for a plain network hiccup, which yfinance does not retry at all
+    by default (YfConfig.network.retries == 0)."""
+    rate_limited_calls = []
+
+    def rate_limited():
+        rate_limited_calls.append(1)
+        raise yf_exceptions.YFRateLimitError()
+
+    with pytest.raises(ProviderError):
+        call_with_classification(rate_limited, provider="YFinanceProvider", backoff_seconds=0)
+    assert len(rate_limited_calls) == 2  # 1 initial + 1 retry
+
+    network_calls = []
+
+    def network_failure():
+        network_calls.append(1)
+        raise requests.exceptions.ConnectionError("Failed to resolve host")
+
+    with pytest.raises(ProviderError):
+        call_with_classification(network_failure, provider="YFinanceProvider", backoff_seconds=0)
+    assert len(network_calls) == 3  # 1 initial + 2 retries
