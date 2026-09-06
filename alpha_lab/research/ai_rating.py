@@ -196,6 +196,16 @@ class AIResearchAssessment(BaseModel):
 # --- evidence boundary -----------------------------------------------------
 
 
+# Excluded from the AI Research Rating's evidence payload entirely -- not
+# given zero weight, not present at all. `ai_research` is
+# alpha_lab.screener.service's existing document-commentary AI category
+# (fed into the fundamental score); feeding an already-AI-derived category
+# back into this AI's own evidence would make the new rating partly a
+# synthesis of itself. Analyst Revisions, momentum, and every other
+# fundamental category are unaffected -- none of them are AI-derived.
+_EXCLUDED_CATEGORIES = frozenset({"ai_research"})
+
+
 def build_evidence_payload(
     *,
     categories: dict[str, "object"],
@@ -205,9 +215,16 @@ def build_evidence_payload(
     """Extract the bounded, explicit evidence set a provider is allowed to
     see. `categories` is `StockResearch.categories`; kept loosely typed
     here (duck-typed) to avoid a circular import with `alpha_lab.research.model`.
+
+    Deliberately excludes `_EXCLUDED_CATEGORIES` (the existing AI-derived
+    `ai_research` category) -- this AI Research Rating synthesizes
+    fundamental/Analyst Consensus/Technical Summary evidence, never an
+    already-AI-derived score, however it was itself computed.
     """
     items: list[AIEvidenceItem] = []
     for name, category in categories.items():
+        if name in _EXCLUDED_CATEGORIES:
+            continue
         if category.status.value == "UNAVAILABLE":
             continue
         detail = f"{category.label} score = "

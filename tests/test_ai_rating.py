@@ -604,3 +604,87 @@ def test_deterministic_provider_all_domains_available_produces_a_valid_synthesis
     assert assessment.rating != AIDimensionValue.REVIEW
     assert assessment.score is not None
     assert assessment.confidence > 0.5
+
+
+# --- AI-on-AI circularity: the legacy ai_research category is never evidence ---
+
+
+def _substantive_categories() -> dict:
+    """Sufficient fundamental evidence (plus Analyst Consensus/Technical
+    Summary, supplied by the caller) to produce a real, non-REVIEW rating."""
+    return {
+        "business_quality": _FakeCategory("Business Quality", 80.0, 1.0, "AVAILABLE"),
+        "earnings_growth": _FakeCategory("Earnings Growth", 70.0, 1.0, "AVAILABLE"),
+        "valuation": _FakeCategory("Valuation", 60.0, 1.0, "AVAILABLE"),
+        "financial_strength": _FakeCategory("Financial Strength", 75.0, 1.0, "AVAILABLE"),
+        "momentum": _FakeCategory("Momentum", 65.0, 1.0, "AVAILABLE"),
+    }
+
+
+def test_legacy_ai_research_category_is_absent_from_the_evidence_payload():
+    """Auditability requirement: the legacy ai_research category must not
+    appear in the payload at all -- not present with zero weight, simply
+    not an input."""
+    categories = _substantive_categories()
+    categories["ai_research"] = _FakeCategory("AI Research", 90.0, 1.0, "AVAILABLE")
+    items = build_evidence_payload(categories=categories)
+    ids = [item.evidence_id for item in items]
+    assert "fundamental:ai_research" not in ids
+    assert not any("ai_research" in eid for eid in ids)
+
+
+def test_mutating_legacy_ai_research_category_does_not_change_the_evidence_payload():
+    """Steps 1-5 from the correction request, tested at the evidence-
+    payload boundary: build the payload once, mutate only the legacy
+    ai_research category to a materially different score, rebuild the
+    payload, and assert it is unchanged."""
+    categories = _substantive_categories()
+    analyst = _FakeConsensus(rating="BUY", coverage=1.0)
+    technical = _FakeTechnical(overall="BUY", coverage=1.0)
+
+    categories_positive_legacy = dict(categories)
+    categories_positive_legacy["ai_research"] = _FakeCategory("AI Research", 95.0, 1.0, "AVAILABLE")
+    payload_before = build_evidence_payload(
+        categories=categories_positive_legacy, analyst_consensus=analyst, technical_summary=technical
+    )
+
+    categories_negative_legacy = dict(categories)
+    categories_negative_legacy["ai_research"] = _FakeCategory("AI Research", 5.0, 1.0, "AVAILABLE")
+    payload_after = build_evidence_payload(
+        categories=categories_negative_legacy, analyst_consensus=analyst, technical_summary=technical
+    )
+
+    assert [item.model_dump() for item in payload_before] == [item.model_dump() for item in payload_after]
+
+
+def test_mutating_legacy_ai_research_category_does_not_change_the_resulting_ai_rating():
+    """Same scenario carried through to the final AIResearchAssessment: a
+    radically different legacy ai_research score/status must not move the
+    new AI Research Rating's score, rating, dimensions, or confidence."""
+    categories = _substantive_categories()
+    analyst = _FakeConsensus(rating="BUY", coverage=1.0)
+    technical = _FakeTechnical(overall="BUY", coverage=1.0)
+    coverage = build_evidence_coverage(fundamental_coverage=1.0, analyst_consensus=analyst, technical_summary=technical)
+
+    def _assess(legacy_category):
+        merged = dict(categories)
+        merged["ai_research"] = legacy_category
+        evidence = build_evidence_payload(categories=merged, analyst_consensus=analyst, technical_summary=technical)
+        raw = DeterministicAIRatingProvider().assess("NVDA", evidence)
+        return build_ai_research_assessment(
+            ticker="NVDA", raw=raw, evidence=evidence, evidence_coverage=coverage,
+            research_schema_version="stockresearch-v2", as_of=date.today(),
+        )
+
+    very_positive_legacy = _assess(_FakeCategory("AI Research", 98.0, 1.0, "AVAILABLE"))
+    very_negative_legacy = _assess(_FakeCategory("AI Research", 2.0, 1.0, "AVAILABLE"))
+    legacy_unavailable = _assess(_FakeCategory("AI Research", None, 0.0, "UNAVAILABLE"))
+
+    assert very_positive_legacy.score == very_negative_legacy.score == legacy_unavailable.score
+    assert very_positive_legacy.rating == very_negative_legacy.rating == legacy_unavailable.rating
+    assert very_positive_legacy.confidence == very_negative_legacy.confidence == legacy_unavailable.confidence
+    assert very_positive_legacy.dimensions == very_negative_legacy.dimensions == legacy_unavailable.dimensions
+    # And it produced a real, substantive rating in the first place --
+    # this is not vacuously true because everything landed on REVIEW.
+    assert very_positive_legacy.rating != AIDimensionValue.REVIEW
+    assert very_positive_legacy.score is not None
