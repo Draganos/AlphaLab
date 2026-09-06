@@ -1,3 +1,5 @@
+from alpha_lab.research.ai_rating import AIDimensionValue, AIResearchAssessment
+from alpha_lab.research.analyst_consensus import AnalystConsensus, AnalystRating
 from alpha_lab.research.build import build_stock_research
 from alpha_lab.research.comparison import (
     CategoryComparison,
@@ -19,6 +21,8 @@ from alpha_lab.research.model import (
 )
 from alpha_lab.research.service import ResearchService
 from alpha_lab.research.snapshots import RESEARCH_SCHEMA_VERSION, ResearchSnapshotRepository
+from alpha_lab.research.supplemental_service import SupplementalResearchService
+from alpha_lab.research.technical import TechnicalRating, TechnicalSummary
 from alpha_lab.research.universe import ResearchUniverse, load_universe
 
 __all__ = [
@@ -42,4 +46,11 @@ __all__ = [
     "MetricChange",
     "ChangeType",
     "compare_stock_research",
+    "AnalystConsensus",
+    "AnalystRating",
+    "TechnicalSummary",
+    "TechnicalRating",
+    "AIResearchAssessment",
+    "AIDimensionValue",
+    "SupplementalResearchService",
 ]

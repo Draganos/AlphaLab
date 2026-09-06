@@ -28,6 +28,8 @@ CAPABILITY_FIELDS = (
     "classification.description", "classification.activities",
     "documents.sec_filings", "documents.earnings_releases",
     "documents.official_announcements", "documents.news",
+    "analyst_recommendations", "analyst_recommendation_summary",
+    "analyst_price_targets", "technical_price_history",
 )
 
 
@@ -50,6 +52,21 @@ PROVIDER_CAPABILITIES: dict[str, dict[str, Capability]] = {
         "business_classification": Capability.PARTIAL,
         "estimates.current": Capability.PARTIAL,
         "estimates.history": Capability.UNSUPPORTED,
+        # Analyst Consensus (recommendationTrend / financialData targets) --
+        # distinct from "estimates.*" above, which is EPS/revenue consensus
+        # for Analyst Revisions, not buy/hold/sell opinion or price targets.
+        # Coverage is real but inconsistent: large, well-covered names return
+        # a full recommendationTrend row; thinly-covered tickers often don't.
+        "analyst_recommendations": Capability.PARTIAL,
+        "analyst_recommendation_summary": Capability.PARTIAL,
+        "analyst_price_targets": Capability.PARTIAL,
+        # AlphaLab computes its own technical indicators from stored OHLCV
+        # history that YFinance already supplies reliably (see prices.* above)
+        # -- this capability is about that underlying history being
+        # available at all, not about any one ticker having enough of it for
+        # a specific indicator (that is a per-indicator coverage check, not
+        # a capability fact).
+        "technical_price_history": Capability.RELIABLE_CURRENT,
     },
     "SECCompanyFactsProvider": {
         "fundamentals.reported": Capability.RELIABLE_POINT_IN_TIME,

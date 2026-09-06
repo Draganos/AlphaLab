@@ -305,3 +305,92 @@ def test_save_failure_propagates_rather_than_being_swallowed(repository, monkeyp
         repository.save(_aapl_v1())
     # And the failed write must not have silently landed anyway.
     assert repository.get_latest("AAPL") is None
+
+
+# --- the three new supplemental research domains persist in the same snapshot ---
+
+
+def _sample_analyst_consensus():
+    from alpha_lab.research.analyst_consensus import build_analyst_consensus
+
+    return build_analyst_consensus(
+        ticker="AAPL", strong_buy=18, buy=12, hold=5, sell=1, strong_sell=0,
+        target_current=100.0, target_low=80.0, target_mean=130.0,
+        target_median=125.0, target_high=160.0, as_of=_EVAL_V1, source="YFinanceProvider",
+    )
+
+
+def _sample_technical_summary():
+    import pandas as pd
+
+    from alpha_lab.research.technical import build_technical_summary
+
+    closes = pd.Series(range(100, 400), index=pd.date_range("2025-01-01", periods=300))
+    frame = pd.DataFrame({"close": closes.astype(float), "high": closes * 1.01, "low": closes * 0.99})
+    return build_technical_summary("AAPL", frame, as_of=_EVAL_V1, source="AlphaLabPriceHistory")
+
+
+def test_snapshot_persists_analyst_consensus_technical_and_ai_assessment(repository):
+    research = _aapl_v1().model_copy(
+        update={
+            "analyst_consensus": _sample_analyst_consensus(),
+            "technical_summary": _sample_technical_summary(),
+        }
+    )
+    summary = repository.save(research)
+    reloaded = repository.get(summary.snapshot_id)
+
+    assert reloaded.analyst_consensus is not None
+    assert reloaded.analyst_consensus.rating == research.analyst_consensus.rating
+    assert reloaded.analyst_consensus.total_analysts == 36
+
+    assert reloaded.technical_summary is not None
+    assert reloaded.technical_summary.overall_rating == research.technical_summary.overall_rating
+    assert reloaded.technical_summary.coverage == research.technical_summary.coverage
+
+    # ai_research_assessment was never set on this research object -- must
+    # round-trip as None, not a fabricated default.
+    assert reloaded.ai_research_assessment is None
+
+
+def test_snapshot_without_supplemental_domains_round_trips_them_as_none(repository):
+    """A research object that never had Analyst Consensus/Technical
+    Summary/AI Research computed (e.g. before this feature existed, or
+    simply not yet refreshed) must persist and reload with all three as
+    None -- never a fabricated placeholder."""
+    research = _aapl_v1()
+    assert research.analyst_consensus is None
+    assert research.technical_summary is None
+    assert research.ai_research_assessment is None
+
+    summary = repository.save(research)
+    reloaded = repository.get(summary.snapshot_id)
+    assert reloaded.analyst_consensus is None
+    assert reloaded.technical_summary is None
+    assert reloaded.ai_research_assessment is None
+
+
+def test_supplemental_domains_are_frozen_in_a_historical_snapshot(repository):
+    """Persisting v2 with different supplemental evidence must not alter
+    the already-persisted v1 snapshot's (empty) supplemental fields --
+    immutability applies to these new fields exactly as it does to the
+    rest of StockResearch."""
+    v1_summary = repository.save(_aapl_v1())
+    research_v2 = _aapl_v2().model_copy(update={"analyst_consensus": _sample_analyst_consensus()})
+    repository.save(research_v2)
+
+    reloaded_v1 = repository.get(v1_summary.snapshot_id)
+    assert reloaded_v1.analyst_consensus is None
+
+
+def test_adding_only_analyst_consensus_changes_the_snapshot_identity(repository):
+    """The payload hash must reflect the new fields -- otherwise a
+    genuinely different research state (same fundamentals, newly-available
+    Analyst Consensus) would be wrongly treated as identical and silently
+    not persisted as a new snapshot."""
+    without = repository.save(_aapl_v1())
+    with_consensus = repository.save(
+        _aapl_v1().model_copy(update={"analyst_consensus": _sample_analyst_consensus()})
+    )
+    assert without.snapshot_id != with_consensus.snapshot_id
+    assert len(repository.list_for_ticker("AAPL")) == 2

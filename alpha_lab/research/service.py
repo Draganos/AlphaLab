@@ -33,6 +33,7 @@ from alpha_lab.research.build import build_stock_research
 from alpha_lab.research.comparison import ResearchComparison, compare_stock_research
 from alpha_lab.research.model import ResearchSnapshotSummary, StockResearch
 from alpha_lab.research.snapshots import ResearchSnapshotRepository
+from alpha_lab.research.supplemental_service import SupplementalResearchService
 from alpha_lab.screener.service import LiveResearchRecord, MarketScreenerService
 
 
@@ -40,6 +41,7 @@ class ResearchService:
     def __init__(self, engine: Engine, settings: Settings):
         self._screener = MarketScreenerService(engine, settings)
         self._snapshots = ResearchSnapshotRepository(engine)
+        self._supplemental = SupplementalResearchService(engine)
 
     # --- Current research (live, not persisted history) -------------------
 
@@ -63,9 +65,26 @@ class ResearchService:
         for the ticker at all, which is distinct from a StockResearch whose
         categories/metrics are UNAVAILABLE (research exists; evidence is
         simply missing). This never touches historical snapshot storage.
+
+        Enriched with the current Analyst Consensus / Technical Summary /
+        AI Research Rating, if any have been computed for this ticker — a
+        pure database read of each (see ``SupplementalResearchService``),
+        never a provider call and never a recomputation. Any of the three
+        can be ``None`` independently; that never affects the fundamental
+        score/categories/coverage above, which are computed and read
+        entirely separately.
         """
         record = self._find_record(ticker)
-        return None if record is None else build_stock_research(record)
+        if record is None:
+            return None
+        research = build_stock_research(record)
+        return research.model_copy(
+            update={
+                "analyst_consensus": self._supplemental.get_analyst_consensus(ticker),
+                "technical_summary": self._supplemental.get_technical_summary(ticker),
+                "ai_research_assessment": self._supplemental.get_ai_research_assessment(ticker),
+            }
+        )
 
     def _find_record(self, ticker: str) -> LiveResearchRecord | None:
         normalized = ticker.strip().upper()

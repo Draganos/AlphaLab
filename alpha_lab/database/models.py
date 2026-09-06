@@ -370,3 +370,52 @@ class ResearchSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), index=True
     )
+
+
+class CurrentAnalystConsensus(Base):
+    """Current (not historical) Analyst Consensus, one row per ticker.
+
+    Upserted by an explicit refresh (see
+    alpha_lab.research.supplemental_service.SupplementalResearchService);
+    never written by a read path. A failed refresh leaves this row
+    untouched -- the last successfully computed consensus is never erased
+    by a provider failure. `payload` is the full serialized
+    alpha_lab.research.analyst_consensus.AnalystConsensus.
+    """
+
+    __tablename__ = "current_analyst_consensus"
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class CurrentTechnicalSummary(Base):
+    """Current Technical Summary, one row per ticker. See
+    CurrentAnalystConsensus's docstring for the upsert/failure semantics;
+    `payload` is the full serialized
+    alpha_lab.research.technical.TechnicalSummary.
+    """
+
+    __tablename__ = "current_technical_summary"
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class CurrentAIResearchAssessment(Base):
+    """Current AI Research Rating, one row per ticker. See
+    CurrentAnalystConsensus's docstring for the upsert/failure semantics;
+    `payload` is the full serialized
+    alpha_lab.research.ai_rating.AIResearchAssessment.
+    """
+
+    __tablename__ = "current_ai_research_assessments"
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )

@@ -231,6 +231,40 @@ def test_get_research_history_is_empty_when_nothing_has_been_persisted(research_
     assert service.get_research_history("AAPL") == []
 
 
+def test_history_entries_distinguish_same_day_snapshots_by_created_at(research_service):
+    """Regression test for the Snapshot History date bug: two snapshots
+    saved on the same calendar day (evaluation_date only changes on a
+    screener rebuild, so two same-day rebuilds with genuinely different
+    content share it) must still be distinguishable in history by their
+    actual persistence timestamp (`created_at`), not just `evaluation_date`
+    -- the root cause was that the UI showed only evaluation_date, making
+    distinct same-day snapshots look identical/stuck. Both fields must be
+    present, correct, and `created_at` must actually differ and order
+    newest-first alongside evaluation_date."""
+    service, engine = research_service
+    _seed_current_research(engine, evaluation_date=date(2026, 9, 5), overall_score=60.0)
+    first = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    Phase3Repository(engine).save_current_research(
+        [_record("AAPL", evaluation_date=date(2026, 9, 5), overall_score=90.0)]
+    )
+    second = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    # Genuinely different content -> genuinely different snapshots, even
+    # though evaluation_date is identical for both.
+    assert first.snapshot_id != second.snapshot_id
+    assert first.evaluation_date == second.evaluation_date == date(2026, 9, 5)
+
+    history = service.get_research_history("AAPL")
+    assert len(history) == 2
+    assert all(entry.created_at is not None for entry in history)
+    # Newest-first ordering must be resolvable even with identical
+    # evaluation_date, using created_at (and id) as the tiebreaker.
+    assert history[0].snapshot_id == second.snapshot_id
+    assert history[1].snapshot_id == first.snapshot_id
+    assert history[0].created_at >= history[1].created_at
+
+
 def test_persisting_identical_research_twice_does_not_duplicate_history(research_service):
     service, engine = research_service
     _seed_current_research(engine)
@@ -286,3 +320,83 @@ def test_get_stock_research_never_writes_a_historical_snapshot(research_service,
     service.get_research_history("AAPL")
     service.get_latest_snapshot("AAPL")
     # No assertion error raised above means no read path called save().
+
+
+# --- historical snapshots must never pick up "current" supplemental state ---
+
+
+def test_historical_snapshot_never_gains_supplemental_data_computed_after_it_was_saved(
+    research_service,
+):
+    """A historical snapshot persisted before Analyst Consensus/Technical
+    Summary/AI Research Rating existed for a ticker must still show them as
+    None after those domains are later refreshed -- current-state tables
+    must never leak into an already-persisted historical snapshot. Only
+    the *current* view (get_stock_research) may reflect newly-refreshed
+    supplemental data."""
+    from datetime import timedelta
+
+    import pandas as pd
+
+    from alpha_lab.database.models import Price
+    from alpha_lab.providers.base import MarketDataProvider
+    from alpha_lab.research.supplemental_service import SupplementalResearchService
+
+    service, engine = research_service
+    _seed_current_research(engine)
+
+    # Persist a historical snapshot while no supplemental data exists yet.
+    pre_refresh_research = service.get_stock_research("AAPL")
+    assert pre_refresh_research.analyst_consensus is None
+    assert pre_refresh_research.technical_summary is None
+    assert pre_refresh_research.ai_research_assessment is None
+    saved = service.persist_snapshot(pre_refresh_research)
+
+    # Now populate "current" supplemental state for the same ticker.
+    with Session(engine) as session:
+        for i in range(300):
+            session.add(Price(
+                ticker="AAPL", date=date(2025, 1, 1) + timedelta(days=i),
+                close=100 + i * 0.5, high=101 + i * 0.5, low=99 + i * 0.5,
+            ))
+        session.commit()
+
+    class _FakeProvider(MarketDataProvider):
+        provider_name = "FakeProvider"
+
+        def get_company_info(self, ticker):
+            return {}
+
+        def get_price_history(self, ticker, start, end):
+            return pd.DataFrame()
+
+        def get_financials(self, ticker):
+            return pd.DataFrame()
+
+        def get_analyst_consensus(self, ticker):
+            return {
+                "ticker": ticker, "as_of": date.today(), "strong_buy": 10, "buy": 5,
+                "hold": 2, "sell": 0, "strong_sell": 0, "target_current": 100.0,
+                "target_low": 90.0, "target_mean": 120.0, "target_median": 118.0,
+                "target_high": 140.0, "source": "FakeProvider",
+            }
+
+    supplemental = SupplementalResearchService(engine)
+    supplemental.refresh_analyst_consensus("AAPL", _FakeProvider())
+    supplemental.refresh_technical_summary("AAPL")
+
+    # The CURRENT view now reflects the freshly-refreshed data...
+    post_refresh_research = service.get_stock_research("AAPL")
+    assert post_refresh_research.analyst_consensus is not None
+    assert post_refresh_research.technical_summary is not None
+
+    # ...but the ALREADY-PERSISTED historical snapshot must not have
+    # retroactively gained it.
+    reloaded_snapshot = service.get_research_snapshot(saved.snapshot_id)
+    assert reloaded_snapshot.analyst_consensus is None
+    assert reloaded_snapshot.technical_summary is None
+    assert reloaded_snapshot.ai_research_assessment is None
+
+    latest = service.get_latest_snapshot("AAPL")
+    assert latest.analyst_consensus is None
+    assert latest.technical_summary is None

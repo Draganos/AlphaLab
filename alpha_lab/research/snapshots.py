@@ -36,7 +36,11 @@ from alpha_lab.research.model import ResearchSnapshotSummary, StockResearch
 # Bump when StockResearch's shape changes in a way that could change how a
 # stored payload should be interpreted. Existing rows keep their original
 # value forever; this module never rewrites a persisted schema version.
-RESEARCH_SCHEMA_VERSION = "stockresearch-v1"
+# v2: added optional analyst_consensus/technical_summary/ai_research_assessment
+# fields. Old v1 payloads deserialize unchanged (those fields default to
+# None); this version bump is a documentation/audit signal, not a breaking
+# migration -- see alpha_lab.research.model.StockResearch.
+RESEARCH_SCHEMA_VERSION = "stockresearch-v2"
 
 
 class ResearchSnapshotRepository:
