@@ -151,6 +151,48 @@ def test_failed_analyst_refresh_does_not_erase_previously_computed_consensus(eng
     assert after.total_analysts == before.total_analysts
 
 
+def test_refresh_all_skips_ai_refresh_when_analyst_refresh_fails(engine):
+    """The higher-level orchestration case: a three-domain refresh where
+    Analyst Consensus fails must not still refresh AI Research Rating with
+    a missing evidence domain. Refreshing anyway would silently replace a
+    previously valid, substantive AI assessment with a weaker one (or
+    REVIEW) derived from incomplete evidence -- the failure should be
+    visible, not laundered into a degraded-but-successful-looking refresh.
+
+    This fails against the pre-fix implementation, which passed
+    analyst_consensus=None straight through to refresh_ai_research_assessment
+    regardless of whether the analyst refresh had failed."""
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    research = _stub_research(overall_coverage=1.0)
+
+    # Establish a substantive "before" AI assessment built from all three
+    # domains, so a later silent downgrade would be observable.
+    analyst = service.refresh_analyst_consensus("NVDA", _FakeAnalystProvider(_raw_consensus()))
+    technical = service.refresh_technical_summary("NVDA")
+    before = service.refresh_ai_research_assessment(
+        "NVDA", research, analyst_consensus=analyst, technical_summary=technical
+    )
+    assert before.score is not None
+
+    failing_provider = _FakeAnalystProvider(
+        raises=ProviderError(ProviderErrorKind.RATE_LIMITED, "FakeProvider", "rate limited")
+    )
+    result = service.refresh_all("NVDA", failing_provider, research)
+
+    assert result.analyst_error is not None
+    assert result.ai_research_assessment is None
+    # Technical Summary is independent of Analyst Consensus and has no
+    # provider dependency -- it must still refresh.
+    assert result.technical_summary is not None
+
+    after = service.get_ai_research_assessment("NVDA")
+    assert after is not None
+    assert after.score == before.score
+    assert after.rating == before.rating
+    assert after.generated_at == before.generated_at
+
+
 def test_technical_summary_refresh_never_needs_a_provider_and_always_succeeds(engine):
     """No Security/Price rows at all -- must not raise, must yield an
     honest zero-coverage REVIEW summary."""

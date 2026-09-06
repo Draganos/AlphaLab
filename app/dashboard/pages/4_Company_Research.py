@@ -8,7 +8,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
 from alpha_lab.phase3 import Phase3Repository
-from alpha_lab.providers import ProviderError, YFinanceProvider
+from alpha_lab.providers import YFinanceProvider
 from alpha_lab.research import CATEGORY_LABELS, CATEGORY_ORDER, ResearchService
 from alpha_lab.research.ai_rating import DIMENSION_NAMES
 from alpha_lab.research.supplemental_service import SupplementalResearchService
@@ -543,15 +543,19 @@ try:
     )
     if st.button("🔄 Refresh for this ticker", key="refresh_supplemental"):
         supplemental = SupplementalResearchService(engine)
-        analyst = technical = None
         with st.spinner(f"Refreshing {ticker}..."):
-            try:
-                analyst = supplemental.refresh_analyst_consensus(ticker, YFinanceProvider())
-            except ProviderError as error:
-                st.warning(f"Analyst Consensus not refreshed: {error.kind.value} — {error.reason}")
-            technical = supplemental.refresh_technical_summary(ticker)
-            supplemental.refresh_ai_research_assessment(
-                ticker, research, analyst_consensus=analyst, technical_summary=technical
+            result = supplemental.refresh_all(ticker, YFinanceProvider(), research)
+        if result.analyst_error is not None:
+            error = result.analyst_error
+            st.warning(f"Analyst Consensus not refreshed: {error.kind.value} — {error.reason}")
+            # The AI Research Rating explicitly synthesizes all three
+            # domains; refreshing it anyway would silently replace a
+            # previously valid assessment with one missing this domain's
+            # evidence. See SupplementalResearchService.refresh_all.
+            st.warning(
+                "AI Research Rating not refreshed — it requires Analyst "
+                "Consensus, which failed to refresh above. The previous "
+                "AI Research Rating (if any) is unchanged."
             )
         st.success("Refresh complete — reload the page to see the updated panels above.")
 

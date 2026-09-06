@@ -18,6 +18,7 @@ preparation) happens before any database write, exactly mirroring
 ``alpha_lab.ingestion.service.IngestionService``'s existing safety pattern.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import pandas as pd
@@ -31,6 +32,7 @@ from alpha_lab.database.models import (
     Price,
 )
 from alpha_lab.providers.base import MarketDataProvider
+from alpha_lab.providers.errors import ProviderError
 from alpha_lab.research.ai_rating import (
     AIResearchAssessment,
     build_ai_research_assessment,
@@ -41,6 +43,20 @@ from alpha_lab.research.ai_rating import (
 from alpha_lab.research.analyst_consensus import AnalystConsensus, build_analyst_consensus
 from alpha_lab.research.model import StockResearch
 from alpha_lab.research.technical import TechnicalSummary, build_technical_summary
+
+
+@dataclass
+class SupplementalRefreshResult:
+    """Outcome of `SupplementalResearchService.refresh_all` -- one explicit
+    three-domain refresh. `analyst_error` is set (and `ai_research_assessment`
+    left `None`) exactly when Analyst Consensus failed to refresh; see
+    `refresh_all` for why the AI assessment is skipped rather than degraded
+    in that case."""
+
+    analyst_consensus: AnalystConsensus | None
+    technical_summary: TechnicalSummary
+    ai_research_assessment: AIResearchAssessment | None
+    analyst_error: ProviderError | None
 
 
 class SupplementalResearchService:
@@ -164,6 +180,41 @@ class SupplementalResearchService:
         )
         self._upsert(CurrentAIResearchAssessment, symbol, assessment.model_dump(mode="json"))
         return assessment
+
+    def refresh_all(
+        self, ticker: str, provider: MarketDataProvider, research: StockResearch
+    ) -> SupplementalRefreshResult:
+        """The explicit "Refresh for this ticker" action's full sequence:
+        Analyst Consensus, then Technical Summary (independent of Analyst
+        Consensus, so always attempted), then AI Research Rating -- but only
+        when Analyst Consensus refreshed cleanly.
+
+        A failed Analyst Consensus refresh never triggers an AI refresh: the
+        AI Research Rating explicitly synthesizes all three domains, and
+        synthesizing it anyway with a missing Analyst Consensus would
+        silently replace a previously valid assessment with a weaker one
+        derived from incomplete evidence, rather than surfacing the failure.
+        The existing AI Research Rating (if any) is left exactly as it was
+        when Analyst Consensus fails.
+        """
+        analyst: AnalystConsensus | None = None
+        analyst_error: ProviderError | None = None
+        try:
+            analyst = self.refresh_analyst_consensus(ticker, provider)
+        except ProviderError as error:
+            analyst_error = error
+        technical = self.refresh_technical_summary(ticker)
+        ai_assessment: AIResearchAssessment | None = None
+        if analyst_error is None:
+            ai_assessment = self.refresh_ai_research_assessment(
+                ticker, research, analyst_consensus=analyst, technical_summary=technical
+            )
+        return SupplementalRefreshResult(
+            analyst_consensus=analyst,
+            technical_summary=technical,
+            ai_research_assessment=ai_assessment,
+            analyst_error=analyst_error,
+        )
 
     def _upsert(self, model, ticker: str, payload: dict) -> None:
         with Session(self.engine) as session:
