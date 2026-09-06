@@ -172,3 +172,29 @@ class StockResearch(BaseModel):
     configuration_hash: str
     evaluation_date: date
     generated_at: datetime
+
+
+class ResearchSnapshotSummary(BaseModel):
+    """Lightweight metadata for one persisted historical StockResearch row.
+
+    Used for history listings (e.g. a ticker's snapshot timeline) without
+    deserializing every snapshot's full payload — see
+    alpha_lab.research.snapshots.ResearchSnapshotRepository.list_for_ticker.
+    Fetch the full StockResearch for one entry via
+    ResearchSnapshotRepository.get(snapshot_id) / ResearchService.get_research_snapshot.
+    """
+
+    snapshot_id: str
+    ticker: str
+    evaluation_date: date
+    generated_at: datetime
+    rating_version: str
+    configuration_hash: str
+    research_schema_version: str
+    overall_score: float | None = Field(None, ge=0, le=100)
+    overall_coverage: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=10)
+    confidence_label: str
+    data_quality_status: str
+    payload_hash: str
+    created_at: datetime

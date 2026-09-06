@@ -1,4 +1,11 @@
 from alpha_lab.research.build import build_stock_research
+from alpha_lab.research.comparison import (
+    CategoryComparison,
+    ChangeType,
+    MetricChange,
+    ResearchComparison,
+    compare_stock_research,
+)
 from alpha_lab.research.model import (
     CATEGORY_LABELS,
     CATEGORY_ORDER,
@@ -7,9 +14,11 @@ from alpha_lab.research.model import (
     ConfidenceBreakdown,
     MetricEvidence,
     MetricStatus,
+    ResearchSnapshotSummary,
     StockResearch,
 )
 from alpha_lab.research.service import ResearchService
+from alpha_lab.research.snapshots import RESEARCH_SCHEMA_VERSION, ResearchSnapshotRepository
 from alpha_lab.research.universe import ResearchUniverse, load_universe
 
 __all__ = [
@@ -25,4 +34,12 @@ __all__ = [
     "CATEGORY_LABELS",
     "CATEGORY_ORDER",
     "ResearchService",
+    "ResearchSnapshotRepository",
+    "ResearchSnapshotSummary",
+    "RESEARCH_SCHEMA_VERSION",
+    "ResearchComparison",
+    "CategoryComparison",
+    "MetricChange",
+    "ChangeType",
+    "compare_stock_research",
 ]

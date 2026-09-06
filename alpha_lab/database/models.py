@@ -327,3 +327,46 @@ class CurrentResearchSnapshot(Base):
     )
     ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class ResearchSnapshot(Base):
+    """Immutable, append-only historical alpha_lab.research.StockResearch record.
+
+    Never updated in place — see alpha_lab.research.snapshots.ResearchSnapshotRepository,
+    which exposes only save/get/list operations, no update. A row is a frozen
+    point-in-time research state: `payload` is the exact StockResearch JSON as
+    it existed at `evaluation_date`/`generated_at`, and must never be
+    rebuilt from current provider data on read. Separate from
+    CurrentResearchSnapshot/CurrentResearchBuild, which persist the
+    pre-canonical LiveResearchRecord for the live screener and are owned by
+    alpha_lab.screener; this table is owned by alpha_lab.research and stores
+    the canonical, evidence-first object instead.
+    """
+
+    __tablename__ = "research_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Deterministic content identity: sha256 of {ticker, evaluation_date,
+    # rating_version, configuration_hash, payload_hash} — see
+    # alpha_lab.research.snapshots._snapshot_id. Deliberately excludes
+    # generated_at so re-persisting identical research seconds apart is
+    # idempotent rather than creating a duplicate row.
+    snapshot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
+    evaluation_date: Mapped[date] = mapped_column(Date, index=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime)
+    rating_version: Mapped[str] = mapped_column(String(64), index=True)
+    configuration_hash: Mapped[str] = mapped_column(String(64), index=True)
+    research_schema_version: Mapped[str] = mapped_column(String(32), index=True)
+    overall_score: Mapped[float | None] = mapped_column(Float)
+    overall_coverage: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    confidence_label: Mapped[str] = mapped_column(String(32))
+    data_quality_status: Mapped[str] = mapped_column(String(32))
+    # Deterministic hash of the canonical StockResearch payload (excluding
+    # generated_at) — answers "has the persisted research actually changed?",
+    # not a cryptographic authentication of the row.
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
