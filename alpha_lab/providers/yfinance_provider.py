@@ -117,6 +117,65 @@ class YFinanceProvider(MarketDataProvider):
             )
         return pd.DataFrame(rows)
 
+    def get_analyst_consensus(self, ticker: str) -> dict[str, Any]:
+        """Raw analyst recommendation counts + price targets for `ticker`.
+
+        Returns a plain dict of raw inputs (not the canonical
+        ``AnalystConsensus`` model) -- consistent with ``get_company_info``'s
+        existing style. ``alpha_lab.research.analyst_consensus.build_analyst_consensus``
+        turns this into the canonical, rated object; that mapping is kept
+        pure and provider-independent so it can be unit-tested without a
+        provider at all.
+
+        Only the current ("0m") recommendationTrend row is used -- the
+        other rows the endpoint returns are trailing months of the same
+        trend, which is Analyst *Revisions* territory (out of scope here;
+        see the module docstring in analyst_consensus.py).
+        """
+        ticker_obj = self._ticker(ticker)
+        recommendations = call_with_classification(
+            lambda: ticker_obj.get_recommendations(),
+            provider=self.provider_name,
+        )
+        targets = call_with_classification(
+            lambda: ticker_obj.get_analyst_price_targets(),
+            provider=self.provider_name,
+        )
+        counts = _current_recommendation_counts(recommendations)
+        return {
+            "ticker": ticker.upper(),
+            "as_of": date.today(),
+            "strong_buy": counts.get("strongBuy"),
+            "buy": counts.get("buy"),
+            "hold": counts.get("hold"),
+            "sell": counts.get("sell"),
+            "strong_sell": counts.get("strongSell"),
+            "target_current": _number(targets.get("current"), positive=True),
+            "target_low": _number(targets.get("low"), positive=True),
+            "target_mean": _number(targets.get("mean"), positive=True),
+            "target_median": _number(targets.get("median"), positive=True),
+            "target_high": _number(targets.get("high"), positive=True),
+            "source": self.provider_name,
+        }
+
+
+def _current_recommendation_counts(frame: pd.DataFrame) -> dict[str, int | None]:
+    """The "0m" (current month) row of yfinance's recommendationTrend, or an
+    empty dict if that row is missing -- never a guessed/zeroed fallback."""
+    if frame is None or frame.empty or "period" not in frame:
+        return {}
+    current = frame[frame["period"] == "0m"]
+    if current.empty:
+        return {}
+    row = current.iloc[0]
+    result: dict[str, int | None] = {}
+    for column in ("strongBuy", "buy", "hold", "sell", "strongSell"):
+        if column not in row or pd.isna(row[column]):
+            result[column] = None
+        else:
+            result[column] = int(row[column])
+    return result
+
 
 def _number(value: Any, *, positive: bool = False) -> float | None:
     try:

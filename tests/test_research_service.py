@@ -231,6 +231,40 @@ def test_get_research_history_is_empty_when_nothing_has_been_persisted(research_
     assert service.get_research_history("AAPL") == []
 
 
+def test_history_entries_distinguish_same_day_snapshots_by_created_at(research_service):
+    """Regression test for the Snapshot History date bug: two snapshots
+    saved on the same calendar day (evaluation_date only changes on a
+    screener rebuild, so two same-day rebuilds with genuinely different
+    content share it) must still be distinguishable in history by their
+    actual persistence timestamp (`created_at`), not just `evaluation_date`
+    -- the root cause was that the UI showed only evaluation_date, making
+    distinct same-day snapshots look identical/stuck. Both fields must be
+    present, correct, and `created_at` must actually differ and order
+    newest-first alongside evaluation_date."""
+    service, engine = research_service
+    _seed_current_research(engine, evaluation_date=date(2026, 9, 5), overall_score=60.0)
+    first = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    Phase3Repository(engine).save_current_research(
+        [_record("AAPL", evaluation_date=date(2026, 9, 5), overall_score=90.0)]
+    )
+    second = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    # Genuinely different content -> genuinely different snapshots, even
+    # though evaluation_date is identical for both.
+    assert first.snapshot_id != second.snapshot_id
+    assert first.evaluation_date == second.evaluation_date == date(2026, 9, 5)
+
+    history = service.get_research_history("AAPL")
+    assert len(history) == 2
+    assert all(entry.created_at is not None for entry in history)
+    # Newest-first ordering must be resolvable even with identical
+    # evaluation_date, using created_at (and id) as the tiebreaker.
+    assert history[0].snapshot_id == second.snapshot_id
+    assert history[1].snapshot_id == first.snapshot_id
+    assert history[0].created_at >= history[1].created_at
+
+
 def test_persisting_identical_research_twice_does_not_duplicate_history(research_service):
     service, engine = research_service
     _seed_current_research(engine)

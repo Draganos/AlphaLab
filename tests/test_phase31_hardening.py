@@ -314,3 +314,19 @@ def test_streamlit_render_paths_read_snapshots_and_home_limits_legacy_universe()
     assert ".build_live_records()" not in research_service
     assert 'tickers=settings.universe.get("us", [])' in home
     assert "ttl=900" in home
+
+
+def test_company_research_history_ui_shows_snapshot_created_at_not_only_evaluation_date():
+    """Static regression guard for the Snapshot History date bug: the
+    history table and snapshot selector must render `entry.created_at`
+    (when AlphaLab actually persisted the row) distinctly from
+    `entry.evaluation_date` (what evidence date the research applies to).
+    Showing only evaluation_date was the root cause — two snapshots saved
+    on the same day looked identical/stuck in the UI even with different
+    content. See test_research_service.py's
+    test_history_entries_distinguish_same_day_snapshots_by_created_at for
+    the underlying data-layer proof that the two fields genuinely differ."""
+    root = Path(__file__).resolve().parents[1]
+    company = (root / "app/dashboard/pages/4_Company_Research.py").read_text()
+    assert "entry.created_at" in company
+    assert "entry.evaluation_date" in company

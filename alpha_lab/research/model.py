@@ -44,6 +44,10 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from alpha_lab.research.ai_rating import AIResearchAssessment
+from alpha_lab.research.analyst_consensus import AnalystConsensus
+from alpha_lab.research.technical import TechnicalSummary
+
 CATEGORY_LABELS: dict[str, str] = {
     "business_quality": "Business Quality",
     "earnings_growth": "Earnings Growth",
@@ -172,6 +176,16 @@ class StockResearch(BaseModel):
     configuration_hash: str
     evaluation_date: date
     generated_at: datetime
+    # Three separate research domains, distinct from the fundamental score
+    # above (`overall_score`/`categories`) -- never blended into it, and
+    # optional because not every ticker/snapshot has had them computed.
+    # None means "not computed for this research state", never "computed
+    # and unavailable" (that distinction lives inside each object itself,
+    # e.g. AnalystConsensus.rating == REVIEW). See
+    # alpha_lab.research.{analyst_consensus,technical,ai_rating}.
+    analyst_consensus: AnalystConsensus | None = None
+    technical_summary: TechnicalSummary | None = None
+    ai_research_assessment: AIResearchAssessment | None = None
 
 
 class ResearchSnapshotSummary(BaseModel):
