@@ -8,8 +8,6 @@ import json
 
 import pytest
 import requests.exceptions
-import curl_cffi.requests.exceptions as curl_exceptions
-from curl_cffi import requests as curl_requests
 import yfinance.exceptions as yf_exceptions
 
 from alpha_lab.providers.errors import (
@@ -17,6 +15,40 @@ from alpha_lab.providers.errors import (
     ProviderErrorKind,
     call_with_classification,
     classify_yfinance_error,
+)
+
+# curl_cffi ships a native libcurl-impersonate binary. It may be genuinely
+# absent, or present but refused at load time (e.g. Windows Smart App
+# Control blocking an unsigned DLL) -- either way that's an environment
+# fact, not a bug in the tests that don't need it, so only the curl_cffi-
+# specific tests below skip; everything else in this file must still run.
+try:
+    import curl_cffi.requests.exceptions as curl_exceptions
+    from curl_cffi import requests as curl_requests
+
+    _CURL_CFFI_IMPORT_ERROR: Exception | None = None
+except ImportError as exc:  # pragma: no cover - exercised on Windows/Smart App Control
+    curl_exceptions = None
+    curl_requests = None
+    _CURL_CFFI_IMPORT_ERROR = exc
+
+requires_curl_cffi = pytest.mark.skipif(
+    curl_exceptions is None,
+    reason=f"curl_cffi not importable (absent, or blocked by OS policy): {_CURL_CFFI_IMPORT_ERROR}",
+)
+
+# Parametrize argument lists are built at collection time, before a skipif
+# marker ever runs, so the exception instances themselves must only be
+# constructed when curl_cffi actually imported -- otherwise collection
+# itself would crash with an AttributeError on curl_exceptions is None.
+_CURL_CFFI_NETWORK_EXCEPTIONS = (
+    [
+        curl_exceptions.DNSError("Could not resolve host: query1.finance.yahoo.com"),
+        curl_exceptions.ConnectionError("Failed to connect to query2.finance.yahoo.com"),
+        curl_exceptions.Timeout("Connection timed out"),
+    ]
+    if curl_exceptions is not None
+    else [pytest.param(None, marks=requires_curl_cffi, id="curl_cffi-unavailable")]
 )
 
 
@@ -71,9 +103,11 @@ def test_network_and_dns_failures_are_classified_as_network_unavailable_not_rate
 # yfinance prefers curl_cffi over plain requests (see yfinance/_http.py);
 # the tests above cover the requests-shaped exceptions as a compatibility
 # fallback, but the classifier must also handle what the backend actually
-# used in production raises.
+# used in production raises. These tests skip cleanly (not error, not
+# collection failure) wherever curl_cffi's native binary can't load.
 
 
+@requires_curl_cffi
 def test_curl_cffi_http_429_is_classified_as_rate_limited():
     response = curl_requests.Response()
     response.status_code = 429
@@ -82,20 +116,14 @@ def test_curl_cffi_http_429_is_classified_as_rate_limited():
     assert error.kind == ProviderErrorKind.RATE_LIMITED
 
 
-@pytest.mark.parametrize(
-    "exc",
-    [
-        curl_exceptions.DNSError("Could not resolve host: query1.finance.yahoo.com"),
-        curl_exceptions.ConnectionError("Failed to connect to query2.finance.yahoo.com"),
-        curl_exceptions.Timeout("Connection timed out"),
-    ],
-)
+@pytest.mark.parametrize("exc", _CURL_CFFI_NETWORK_EXCEPTIONS)
 def test_curl_cffi_connection_and_dns_failures_are_classified_as_network_unavailable(exc):
     error = classify_yfinance_error(exc, provider="YFinanceProvider")
     assert error.kind == ProviderErrorKind.NETWORK_UNAVAILABLE
     assert error.kind != ProviderErrorKind.RATE_LIMITED
 
 
+@requires_curl_cffi
 def test_curl_cffi_json_decode_error_on_empty_body_is_the_same_rate_limit_fallback():
     """curl_cffi's JSONDecodeError also subclasses json.JSONDecodeError (and
     OSError) -- must still hit the narrow rate-limit fallback, not the

@@ -43,8 +43,8 @@ def main() -> int:
         import curl_cffi
 
         print(f"curl_cffi: {curl_cffi.__version__}")
-    except ImportError:
-        print("curl_cffi: not installed (yfinance falls back to plain requests)")
+    except ImportError as error:
+        print(f"curl_cffi: not importable (absent, or blocked by OS policy: {error})")
     print(f"HTTP backend in use: {_http_backend_name()}")
 
     if not args.ticker:
