@@ -101,6 +101,12 @@ AlphaLab is pinned to `yfinance==1.7.0` (tested with `curl_cffi==0.16.3` as its 
 
 None of these ever become a fabricated zero, empty-but-valid dataset, or missing field silently treated as legitimate. `scripts/load_us_data.py` ingests each requested ticker independently: one ticker failing never aborts the rest of the run, previously ingested valid data for that ticker is never erased by a failed refresh (provider calls happen before any database write), and the run prints a categorized summary of what succeeded and failed. The process exits non-zero if any requested ticker did not complete, so scheduled/automated ingestion can detect an incomplete load.
 
+#### Running without curl_cffi (e.g. Windows Smart App Control)
+
+yfinance prefers `curl_cffi` for its browser TLS fingerprinting, which ships a native `libcurl-impersonate` binary. Some locked-down environments won't load it — notably Windows with Smart App Control or another Application Control policy enabled, which blocks the unsigned DLL at load time. yfinance already has a supported opt-out for this: set the environment variable `YF_DISABLE_CURL_CFFI=1` before anything imports `yfinance`, and it uses the plain `requests` library for every HTTP call instead of ever attempting to load `curl_cffi`.
+
+**Trade-off:** plain `requests` can't replicate curl_cffi's browser TLS/HTTP2 fingerprint, so Yahoo may rate-limit or block this client somewhat more readily. This does not require weakening any OS security policy, and AlphaLab's own reliability behavior is unaffected either way: `RATE_LIMITED`/`NETWORK_UNAVAILABLE` classification, bounded retries, per-ticker failure isolation, and the non-zero exit on partial failure all work identically regardless of which HTTP backend yfinance ends up using, since AlphaLab's provider error boundary classifies by exception shape (`OSError`, yfinance's own exceptions, HTTP status codes), never by which library raised it.
+
 ## Start the dashboard
 
 ```bash
