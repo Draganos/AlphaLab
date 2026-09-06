@@ -4,6 +4,7 @@ from alpha_lab.providers.synthetic import SyntheticFixtureProvider
 from alpha_lab.providers.universe_csv import CSVSecurityUniverseProvider
 from alpha_lab.providers.nasdaq_universe import NasdaqTraderUniverseProvider
 from alpha_lab.providers.sec_edgar import SECClient, SECCompanyFactsProvider
+from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
 from alpha_lab.providers.capabilities import (
     Capability,
     CAPABILITY_FIELDS,
@@ -22,6 +23,8 @@ __all__ = [
     "NasdaqTraderUniverseProvider",
     "SECClient",
     "SECCompanyFactsProvider",
+    "ProviderError",
+    "ProviderErrorKind",
     "Capability",
     "CAPABILITY_FIELDS",
     "FIELD_SOURCE_PRIORITY",

@@ -1,4 +1,11 @@
-"""Optional US data provider. Missing fields remain null."""
+"""Optional US data provider. Missing fields remain null.
+
+External call failures (rate limiting, network/DNS unavailability, an
+unclassified provider error) are never treated as data -- they raise
+``ProviderError`` for the caller to handle, instead of surfacing raw
+yfinance/curl_cffi/requests internals or being silently swallowed into a
+zero, an empty frame, or a fabricated value.
+"""
 
 from datetime import date
 from typing import Any
@@ -6,6 +13,7 @@ import math
 import pandas as pd
 
 from alpha_lab.providers.base import MarketDataProvider
+from alpha_lab.providers.errors import call_with_classification
 
 
 class YFinanceProvider(MarketDataProvider):
@@ -15,7 +23,10 @@ class YFinanceProvider(MarketDataProvider):
         return yf.Ticker(symbol)
 
     def get_price_history(self, ticker: str, start: date, end: date) -> pd.DataFrame:
-        frame = self._ticker(ticker).history(start=start, end=end, auto_adjust=False)
+        frame = call_with_classification(
+            lambda: self._ticker(ticker).history(start=start, end=end, auto_adjust=False),
+            provider=self.provider_name,
+        )
         if frame.empty:
             return frame
         frame = frame.rename(columns={"Adj Close": "adjusted_close"})
@@ -32,7 +43,10 @@ class YFinanceProvider(MarketDataProvider):
         ]
 
     def get_company_info(self, ticker: str) -> dict[str, Any]:
-        info = self._ticker(ticker).get_info()
+        info = call_with_classification(
+            lambda: self._ticker(ticker).get_info(),
+            provider=self.provider_name,
+        )
         return {
             "ticker": ticker.upper(),
             "company_name": info.get("longName"),
@@ -49,9 +63,19 @@ class YFinanceProvider(MarketDataProvider):
         }
 
     def get_financials(self, ticker: str) -> pd.DataFrame:
-        statement = self._ticker(ticker).quarterly_income_stmt
-        cashflow = self._ticker(ticker).quarterly_cashflow
-        balance = self._ticker(ticker).quarterly_balance_sheet
+        ticker_obj = self._ticker(ticker)
+        statement = call_with_classification(
+            lambda: ticker_obj.quarterly_income_stmt,
+            provider=self.provider_name,
+        )
+        cashflow = call_with_classification(
+            lambda: ticker_obj.quarterly_cashflow,
+            provider=self.provider_name,
+        )
+        balance = call_with_classification(
+            lambda: ticker_obj.quarterly_balance_sheet,
+            provider=self.provider_name,
+        )
         if statement.empty:
             return pd.DataFrame()
         rows: list[dict[str, Any]] = []
