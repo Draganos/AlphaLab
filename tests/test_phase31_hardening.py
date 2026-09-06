@@ -314,3 +314,47 @@ def test_streamlit_render_paths_read_snapshots_and_home_limits_legacy_universe()
     assert ".build_live_records()" not in research_service
     assert 'tickers=settings.universe.get("us", [])' in home
     assert "ttl=900" in home
+
+
+def test_company_research_history_ui_shows_snapshot_created_at_not_only_evaluation_date():
+    """Static regression guard for the Snapshot History date bug: the
+    history table and snapshot selector must render `entry.created_at`
+    (when AlphaLab actually persisted the row) distinctly from
+    `entry.evaluation_date` (what evidence date the research applies to).
+    Showing only evaluation_date was the root cause — two snapshots saved
+    on the same day looked identical/stuck in the UI even with different
+    content. See test_research_service.py's
+    test_history_entries_distinguish_same_day_snapshots_by_created_at for
+    the underlying data-layer proof that the two fields genuinely differ."""
+    root = Path(__file__).resolve().parents[1]
+    company = (root / "app/dashboard/pages/4_Company_Research.py").read_text()
+    assert "entry.created_at" in company
+    assert "entry.evaluation_date" in company
+
+
+def test_company_research_ui_exposes_analyst_technical_and_ai_detail():
+    """Static regression guard for the UI/UX refinement pass: Analyst
+    Consensus price targets, the technical Indicators detail, and the AI
+    Research Rating's six dimensions + evidence-used expander must actually
+    be rendered by the page, not just computed and discarded. These fields
+    already existed on AnalystConsensus/TechnicalSummary/AIResearchAssessment
+    before this change -- this only guards that the presentation layer keeps
+    surfacing them."""
+    root = Path(__file__).resolve().parents[1]
+    company = (root / "app/dashboard/pages/4_Company_Research.py").read_text()
+    # Analyst Consensus: full price target range, not only the mean.
+    assert "consensus.target_current" in company
+    assert "consensus.target_low" in company
+    assert "consensus.target_high" in company
+    # Technical Summary: individual indicators are inspectable, and an
+    # unavailable indicator is never rendered as Neutral.
+    assert "technical.indicators" in company
+    assert '"Unavailable" if signal is None else' in company
+    # AI Research Rating: the six dimensions and the evidence actually cited.
+    assert "DIMENSION_NAMES" in company
+    assert "assessment.dimensions[name]" in company
+    assert "Evidence used" in company
+    assert "assessment.supporting_evidence" in company
+    # REVIEW stays a legitimate outcome with its own computed reason, never
+    # silently upgraded to a directional rating.
+    assert "assessment.evidence_gaps" in company

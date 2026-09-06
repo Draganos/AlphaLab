@@ -8,7 +8,11 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
 from alpha_lab.phase3 import Phase3Repository
+from alpha_lab.providers import ProviderError, YFinanceProvider
 from alpha_lab.research import CATEGORY_LABELS, CATEGORY_ORDER, ResearchService
+from alpha_lab.research.ai_rating import DIMENSION_NAMES
+from alpha_lab.research.supplemental_service import SupplementalResearchService
+from alpha_lab.research.technical import IndicatorCategory
 
 st.set_page_config(page_title="AlphaLab Company Research", layout="wide")
 st.title("Company Research")
@@ -21,6 +25,226 @@ st.warning(
 def _dash(value) -> str:
     """Never render None as 0/blank/False — an explicit placeholder instead."""
     return "—" if value is None else str(value)
+
+
+def _rating_label(rating) -> str:
+    return rating.value.replace("_", " ").title()
+
+
+_DIMENSION_LABELS = {
+    "business_outlook": "Business Outlook",
+    "growth_prospects": "Growth Prospects",
+    "competitive_position": "Competitive Position",
+    "valuation_context": "Valuation Context",
+    "risk_profile": "Risk Profile",
+    "catalyst_strength": "Catalyst Strength",
+}
+
+_INDICATOR_SIGNAL_LABELS = {1: "Buy", 0: "Neutral", -1: "Sell"}
+
+
+def _indicator_signal_label(signal: int | None) -> str:
+    """UNAVAILABLE != NEUTRAL: an indicator with no signal is never shown as Neutral."""
+    return "Unavailable" if signal is None else _INDICATOR_SIGNAL_LABELS[signal]
+
+
+def _distribution_bar(label: str, count: int | None, max_count: int, width: int = 12) -> str:
+    """One line of a monospace distribution bar. A missing count renders as
+    '—', never as an empty/zero bar, so absence stays visually distinct from
+    a confirmed zero."""
+    if count is None:
+        return f"{label:<11} —"
+    filled = round((count / max_count) * width) if max_count > 0 else 0
+    return f"{label:<11} {'█' * filled}{' ' * (width - filled)} {count}"
+
+
+def _render_analyst_consensus_panel(column, consensus) -> None:
+    column.markdown("**Analyst Consensus**")
+    if consensus is None:
+        column.caption("Not yet computed for this ticker.")
+        return
+    column.markdown(f"### {_rating_label(consensus.rating)}")
+    if consensus.rating.value == "REVIEW":
+        column.caption("Insufficient or ambiguous recommendation data for a safe consensus.")
+    column.write(
+        {
+            "Strong Buy": _dash(consensus.strong_buy),
+            "Buy": _dash(consensus.buy),
+            "Hold": _dash(consensus.hold),
+            "Sell": _dash(consensus.sell),
+            "Strong Sell": _dash(consensus.strong_sell),
+        }
+    )
+    counts = (
+        ("Strong Buy", consensus.strong_buy),
+        ("Buy", consensus.buy),
+        ("Hold", consensus.hold),
+        ("Sell", consensus.sell),
+        ("Strong Sell", consensus.strong_sell),
+    )
+    max_count = max((count for _, count in counts if count is not None), default=0)
+    column.code("\n".join(_distribution_bar(label, count, max_count) for label, count in counts))
+    column.caption(f"{_dash(consensus.total_analysts)} analyst(s)")
+    price_targets = (
+        ("Current", consensus.target_current),
+        ("Average", consensus.target_mean),
+        ("Low", consensus.target_low),
+        ("High", consensus.target_high),
+    )
+    if any(value is not None for _, value in price_targets):
+        column.markdown("**Price Target**")
+        column.write({label: _dash(None if value is None else f"${value:,.2f}") for label, value in price_targets})
+    if consensus.upside_to_mean is not None:
+        column.caption(f"Implied upside: {consensus.upside_to_mean:+.1%}")
+    column.caption(f"Coverage {consensus.coverage:.0%} · source {consensus.source} ({consensus.as_of})")
+
+
+def _render_technical_summary_panel(column, technical) -> None:
+    column.markdown("**Technical Summary**")
+    if technical is None:
+        column.caption("Not yet computed for this ticker.")
+        return
+    column.markdown(f"### {_rating_label(technical.overall_rating)}")
+    if technical.overall_rating.value == "REVIEW":
+        column.caption("Insufficient indicator coverage for a safe rating.")
+    column.write(
+        {
+            "Moving averages": f"{_rating_label(technical.moving_average_rating)} "
+            f"({technical.moving_average_available}/{technical.moving_average_total})",
+            "Oscillators": f"{_rating_label(technical.oscillator_rating)} "
+            f"({technical.oscillator_available}/{technical.oscillator_total})",
+        }
+    )
+    total = technical.moving_average_total + technical.oscillator_total
+    available = technical.moving_average_available + technical.oscillator_available
+    column.caption(
+        f"Coverage {available}/{total} ({technical.coverage:.1%}) · "
+        f"{technical.timeframe.value} · {technical.as_of}"
+    )
+    with column.expander("Indicators"):
+        moving_averages = [
+            indicator for indicator in technical.indicators
+            if indicator.category == IndicatorCategory.MOVING_AVERAGE
+        ]
+        oscillators = [
+            indicator for indicator in technical.indicators
+            if indicator.category == IndicatorCategory.OSCILLATOR
+        ]
+
+        def _indicator_rows(indicators):
+            return [
+                {
+                    "Indicator": indicator.name,
+                    "Value": _dash(None if indicator.value is None else round(indicator.value, 2)),
+                    "Signal": _indicator_signal_label(indicator.signal),
+                }
+                for indicator in indicators
+            ]
+
+        st.markdown("**Moving Averages**")
+        st.dataframe(_indicator_rows(moving_averages), width="stretch", hide_index=True)
+        st.markdown("**Oscillators**")
+        st.dataframe(_indicator_rows(oscillators), width="stretch", hide_index=True)
+
+
+def _render_ai_research_panel(column, assessment) -> None:
+    column.markdown("**AI Research Rating**")
+    if assessment is None:
+        column.caption("Not yet computed for this ticker.")
+        return
+    score_label = "Unavailable" if assessment.score is None else f"{assessment.score:.0f} / 100"
+    column.markdown(f"### {score_label}")
+    column.caption(_rating_label(assessment.rating))
+    if assessment.rating.value == "REVIEW":
+        column.caption("Insufficient evidence for a reliable directional assessment.")
+        if assessment.evidence_gaps:
+            column.caption("Reasons: " + "; ".join(assessment.evidence_gaps))
+    column.caption(f"Confidence: {assessment.confidence:.0%}")
+    column.caption(f"Evidence referenced: {len(assessment.supporting_evidence)}")
+    if assessment.evidence_gaps:
+        column.caption(f"Evidence gaps: {len(assessment.evidence_gaps)}")
+    coverage = assessment.evidence_coverage
+    column.caption(
+        "AI evidence coverage — Fundamental "
+        f"{coverage.fundamental_coverage:.0%} · Analyst {coverage.analyst_coverage:.0%} · "
+        f"Technical {coverage.technical_coverage:.0%} · Overall {coverage.overall_ai_evidence_coverage:.0%}"
+    )
+    column.write(
+        {
+            _DIMENSION_LABELS[name]: _rating_label(assessment.dimensions[name].value)
+            for name in DIMENSION_NAMES
+        }
+    )
+    with column.expander("Evidence used"):
+        if assessment.supporting_evidence:
+            st.write(assessment.supporting_evidence)
+        else:
+            st.caption("No evidence was cited by the provider.")
+
+
+def _render_supplemental_panels(research) -> None:
+    """Analyst Consensus / Technical Summary / AI Research Rating -- three
+    research outputs separate from the AlphaLab fundamental score above.
+    Never implies these contribute to that score; each renders
+    independently and any of the three can be unavailable on its own."""
+    st.caption(
+        "Separate research outputs, not inputs to the AlphaLab Fundamental "
+        "Score above — each is independent and may be unavailable on its own. "
+        "'AI Research Rating' here is a cross-domain synthesis, distinct from "
+        "the fundamental 'AI Research' category and 'AI research evidence' "
+        "section further below on this page."
+    )
+    columns = st.columns(3)
+    _render_analyst_consensus_panel(columns[0], research.analyst_consensus)
+    _render_technical_summary_panel(columns[1], research.technical_summary)
+    _render_ai_research_panel(columns[2], research.ai_research_assessment)
+
+
+_FUNDAMENTAL_INTERPRETATION_BY_SCORE = (
+    (85, "Exceptional"),
+    (70, "Strong"),
+    (55, "Positive"),
+    (40, "Neutral"),
+    (25, "Weak"),
+)
+
+
+def _qualitative_fundamental_label(research) -> str:
+    if research.overall_score is None:
+        return "Unavailable"
+    for threshold, label in _FUNDAMENTAL_INTERPRETATION_BY_SCORE:
+        if research.overall_score >= threshold:
+            return label
+    return "Weak"
+
+
+def _render_research_summary(research) -> None:
+    """Qualitative-only cross-domain summary — never a new composite score."""
+    st.subheader("Research Summary")
+    st.caption("Qualitative context only. This is not a combined score.")
+    rows = [
+        {"Domain": "Fundamentals", "Assessment": _qualitative_fundamental_label(research)},
+        {
+            "Domain": "Analyst Consensus",
+            "Assessment": "Not yet computed"
+            if research.analyst_consensus is None
+            else _rating_label(research.analyst_consensus.rating),
+        },
+        {
+            "Domain": "Technicals",
+            "Assessment": "Not yet computed"
+            if research.technical_summary is None
+            else _rating_label(research.technical_summary.overall_rating),
+        },
+        {
+            "Domain": "AI Research Rating",
+            "Assessment": "Not yet computed"
+            if research.ai_research_assessment is None
+            else _rating_label(research.ai_research_assessment.rating),
+        },
+        {"Domain": "Evidence quality (confidence)", "Assessment": research.confidence_label},
+    ]
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def _render_stock_research(research, *, quote=None) -> None:
@@ -49,6 +273,19 @@ def _render_stock_research(research, *, quote=None) -> None:
         "Confidence is not the same as Overall Score, and Coverage is not the "
         "same as Confidence — see the confidence breakdown below."
     )
+
+    st.divider()
+    _render_supplemental_panels(research)
+    st.divider()
+    _render_research_summary(research)
+    st.divider()
+    st.subheader("AlphaLab Fundamental Research")
+    st.caption(
+        "The section below is the existing quantitative AlphaLab research "
+        "system. Analyst Consensus, Technical Summary, and AI Research "
+        "above are separate outputs and never change this score."
+    )
+
     if quote is not None:
         st.write(
             {
@@ -166,10 +403,20 @@ def _render_stock_research(research, *, quote=None) -> None:
 
 
 def _render_history_list(history) -> None:
+    """Shows both dates deliberately: `evaluation_date` is the date the
+    underlying evidence applies to (set once per screener rebuild, so two
+    snapshots saved hours apart on the same day can share it); `Snapshot
+    saved` (`created_at`) is when AlphaLab actually persisted this exact
+    row. Showing only evaluation_date previously made same-day snapshots
+    look identical/stuck even when their content genuinely differed —
+    that was the root cause of the "wrong date" reports, not a bad value
+    in either field. See regression test
+    test_history_list_rows_distinguish_same_day_snapshots_by_created_at."""
     st.dataframe(
         [
             {
                 "Evaluation date": entry.evaluation_date,
+                "Snapshot saved": entry.created_at,
                 "Score": "—" if entry.overall_score is None else f"{entry.overall_score:.1f}/100",
                 "Coverage": f"{entry.overall_coverage:.0%}",
                 "Confidence": f"{entry.confidence:.1f}/10 ({entry.confidence_label})",
@@ -186,7 +433,8 @@ def _render_history_list(history) -> None:
 
 def _snapshot_option_label(entry) -> str:
     score = "—" if entry.overall_score is None else f"{entry.overall_score:.1f}/100"
-    return f"{entry.evaluation_date} · score {score} · {entry.snapshot_id[:8]}"
+    saved = entry.created_at.strftime("%Y-%m-%d %H:%M:%S")
+    return f"{entry.evaluation_date} (saved {saved}) · score {score} · {entry.snapshot_id[:8]}"
 
 
 def _render_comparison(comparison) -> None:
@@ -286,6 +534,28 @@ try:
     _render_stock_research(research, quote=quote)
 
     st.divider()
+    st.subheader("Refresh Analyst Consensus, Technical Summary & AI Research")
+    st.caption(
+        "Opening this page or changing the ticker never calls a provider or "
+        "recomputes these. Only this explicit action does — Analyst "
+        "Consensus makes one live yfinance call; Technical Summary and AI "
+        "Research use only already-stored data."
+    )
+    if st.button("🔄 Refresh for this ticker", key="refresh_supplemental"):
+        supplemental = SupplementalResearchService(engine)
+        analyst = technical = None
+        with st.spinner(f"Refreshing {ticker}..."):
+            try:
+                analyst = supplemental.refresh_analyst_consensus(ticker, YFinanceProvider())
+            except ProviderError as error:
+                st.warning(f"Analyst Consensus not refreshed: {error.kind.value} — {error.reason}")
+            technical = supplemental.refresh_technical_summary(ticker)
+            supplemental.refresh_ai_research_assessment(
+                ticker, research, analyst_consensus=analyst, technical_summary=technical
+            )
+        st.success("Refresh complete — reload the page to see the updated panels above.")
+
+    st.divider()
     st.subheader("Save this research as a historical snapshot")
     st.caption(
         "Opening this page, changing the ticker, or viewing history never "
@@ -320,7 +590,11 @@ try:
         selected_entry = history[
             [_snapshot_option_label(entry) for entry in history].index(selected_label)
         ]
-        with st.expander(f"Historical snapshot detail — {selected_entry.evaluation_date}", expanded=False):
+        with st.expander(
+            f"Historical snapshot detail — evaluation {selected_entry.evaluation_date} "
+            f"(saved {selected_entry.created_at.strftime('%Y-%m-%d %H:%M:%S')})",
+            expanded=False,
+        ):
             st.caption(
                 "Read-only: this is the persisted snapshot exactly as recorded, "
                 "not rebuilt from current data."
