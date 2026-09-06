@@ -159,3 +159,130 @@ def test_get_stock_research_only_converts_the_requested_ticker_not_the_universe(
 
     service.get_stock_research("AAPL")
     assert converted_tickers == ["AAPL"]
+
+
+# --- Historical snapshot boundary --------------------------------------
+
+
+def _seed_current_research(engine, ticker: str = "AAPL", **record_overrides) -> None:
+    with Session(engine) as session:
+        if session.get(Security, ticker) is None:
+            session.add(Security(ticker=ticker))
+            session.commit()
+    Phase3Repository(engine).save_current_research([_record(ticker, **record_overrides)])
+
+
+def test_persist_snapshot_then_get_research_snapshot_round_trips(research_service):
+    service, engine = research_service
+    _seed_current_research(engine)
+    research = service.get_stock_research("AAPL")
+
+    summary = service.persist_snapshot(research)
+    reloaded = service.get_research_snapshot(summary.snapshot_id)
+
+    assert reloaded is not None
+    assert reloaded.ticker == "AAPL"
+    assert reloaded.overall_score == research.overall_score
+
+
+def test_get_research_snapshot_for_unknown_id_returns_none(research_service):
+    service, _ = research_service
+    assert service.get_research_snapshot("unknown-id") is None
+
+
+def test_get_latest_snapshot_is_distinct_from_get_stock_research(research_service):
+    """get_latest_snapshot reflects the last *persisted* history entry, which
+    can lag behind current research if nothing has been saved since a
+    refresh — the two accessors must not be conflated."""
+    service, engine = research_service
+    _seed_current_research(engine, overall_score=50.0)
+
+    # No snapshot persisted yet: current research exists, history does not.
+    assert service.get_stock_research("AAPL") is not None
+    assert service.get_latest_snapshot("AAPL") is None
+
+    first_research = service.get_stock_research("AAPL")
+    service.persist_snapshot(first_research)
+    assert service.get_latest_snapshot("AAPL").overall_score == pytest.approx(50.0)
+
+    # Current research changes, but nothing is re-persisted.
+    Phase3Repository(engine).save_current_research([_record("AAPL", overall_score=90.0)])
+    assert service.get_stock_research("AAPL").overall_score == pytest.approx(90.0)
+    assert service.get_latest_snapshot("AAPL").overall_score == pytest.approx(50.0)
+
+
+def test_get_research_history_lists_persisted_snapshots_newest_first(research_service):
+    service, engine = research_service
+    _seed_current_research(engine, evaluation_date=date(2026, 8, 28), overall_score=60.0)
+    service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    Phase3Repository(engine).save_current_research(
+        [_record("AAPL", evaluation_date=date(2026, 9, 5), overall_score=65.0)]
+    )
+    service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    history = service.get_research_history("AAPL")
+    assert [entry.evaluation_date for entry in history] == [date(2026, 9, 5), date(2026, 8, 28)]
+
+
+def test_get_research_history_is_empty_when_nothing_has_been_persisted(research_service):
+    service, engine = research_service
+    _seed_current_research(engine)
+    assert service.get_research_history("AAPL") == []
+
+
+def test_persisting_identical_research_twice_does_not_duplicate_history(research_service):
+    service, engine = research_service
+    _seed_current_research(engine)
+    research = service.get_stock_research("AAPL")
+
+    service.persist_snapshot(research)
+    service.persist_snapshot(research)
+
+    assert len(service.get_research_history("AAPL")) == 1
+
+
+def test_compare_snapshots_returns_none_when_either_id_is_missing(research_service):
+    service, engine = research_service
+    _seed_current_research(engine)
+    summary = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    assert service.compare_snapshots(summary.snapshot_id, "missing") is None
+    assert service.compare_snapshots("missing", summary.snapshot_id) is None
+
+
+def test_compare_snapshots_reports_the_score_change_between_two_persisted_states(
+    research_service,
+):
+    service, engine = research_service
+    _seed_current_research(engine, evaluation_date=date(2026, 8, 28), overall_score=60.0)
+    older = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    Phase3Repository(engine).save_current_research(
+        [_record("AAPL", evaluation_date=date(2026, 9, 5), overall_score=72.0)]
+    )
+    newer = service.persist_snapshot(service.get_stock_research("AAPL"))
+
+    comparison = service.compare_snapshots(older.snapshot_id, newer.snapshot_id)
+    assert comparison is not None
+    assert comparison.overall_score_old == pytest.approx(60.0)
+    assert comparison.overall_score_new == pytest.approx(72.0)
+    assert comparison.overall_score_changed is True
+
+
+def test_get_stock_research_never_writes_a_historical_snapshot(research_service, monkeypatch):
+    """Ordinary reads (what a Streamlit rerun does) must never persist
+    history — only an explicit persist_snapshot call may write."""
+    service, engine = research_service
+    _seed_current_research(engine)
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("get_stock_research must never write a snapshot")
+
+    monkeypatch.setattr(service._snapshots, "save", _fail)
+
+    service.get_stock_research("AAPL")
+    service.list_current_research()
+    service.get_research_history("AAPL")
+    service.get_latest_snapshot("AAPL")
+    # No assertion error raised above means no read path called save().

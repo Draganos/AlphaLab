@@ -24,6 +24,22 @@ def test_schema_initialization_is_idempotent():
     assert "provider" in {column["name"] for column in inspect(engine).get_columns("prices")}
 
 
+def test_schema_initialization_creates_research_snapshots_table_idempotently():
+    """New table added for PR #15 historical research persistence; a plain
+    Base.metadata.create_all is sufficient here since nothing pre-existing
+    is altered, but repeated init must still be safe."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    create_schema(engine)
+    assert "research_snapshots" in inspect(engine).get_table_names()
+    columns = {column["name"] for column in inspect(engine).get_columns("research_snapshots")}
+    assert {
+        "snapshot_id", "ticker", "evaluation_date", "generated_at",
+        "rating_version", "configuration_hash", "research_schema_version",
+        "payload_hash", "payload",
+    } <= columns
+
+
 def test_point_in_time_fields_are_separate(db_session: Session):
     db_session.add(Security(ticker="ASOF", currency="USD"))
     db_session.add(Fundamental(ticker="ASOF", period=date(2024, 3, 31),
