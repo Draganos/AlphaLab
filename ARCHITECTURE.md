@@ -45,6 +45,11 @@ AlphaLab is organized into two kinds of evidence today:
   prices already ingested into AlphaLab's own `Price` table (Phase 2, step
   1). **Market-derived proxies only — never official economic data, and no
   code path into any scoring or ranking calculation** — see §16.
+- **Alignment** (`alpha_lab.alignment`) — a small, categorical-only
+  comparison of AlphaLab Macro Regime against Donatien External
+  Calibration (Phase 2, step 2 / "Phase 2B"). Produces one of
+  `ALIGNED`/`CONFLICT`/`NEUTRAL`/`INSUFFICIENT_DATA` — **no numeric score,
+  and no code path into any scoring or ranking calculation** — see §17.
 
 ## 2. Deterministic components
 
@@ -61,6 +66,7 @@ involvement.
 | Technical Summary (`alpha_lab.research.technical`) | AlphaLab's own stored `Price` history | `TechnicalSummary` (15 indicators, rollup rating) | `current_technical_summary` | `as_of`, `computed_at` | No |
 | Macro Regime (`alpha_lab.macro.regime`) | AlphaLab's own stored `Price` history for 6 market-proxy tickers (^VIX, ^TNX, ^IRX, DX-Y.NYB, CL=F, GC=F) | `MacroAssessment` (regime, 5 indicators, coverage) | `current_macro_assessment`, `macro_assessment_snapshots` | `as_of`, `computed_at` | **No — market-derived proxies only, never official economic data, no scoring authority** |
 | Calibration parsing (`alpha_lab.providers.donatien`) | Donatien's `<pre class="cal-json">` HTML block | `DonatienCalibration` (validated, normalized) | `current_external_calibration`, `external_calibration_snapshots` | `source_observed_at`, `retrieved_at` | **No — zero scoring authority in Phase 1** |
+| Alignment (`alpha_lab.alignment.alignment`) | Already-computed `MacroAssessment` + `DonatienCalibration` (no network) | `AlignmentAssessment` (categorical `alignment` + audit fields, no score) | `current_alignment_assessment`, `alignment_assessment_snapshots` | `as_of`, `computed_at` | **No — categorical comparison only, no scoring authority** |
 | News metadata | — | **FUTURE / NOT IMPLEMENTED** (`ResearchNewsProvider` interface exists; no implementation) | — | — | — |
 | Backtesting (`alpha_lab.backtest`) | `HistoricalScoringService` output | `BacktestResult` (Sharpe, drawdown, turnover, ...) | `backtest_runs` | `created_at` | Yes (evaluates ranking, doesn't rank live) |
 
@@ -100,20 +106,27 @@ integration is possible, without that integration existing yet):
   employment via FRED or similar), multi-region regimes, or any comparison
   against Donatien's own regime label (§10 of the original brief) — that
   remains future work.
-- **CalibrationAlignment** — a future evidence layer connecting Donatien's
-  sector/tier weights to AlphaLab securities via canonical sector/GICS
-  mapping. Not implemented; AlphaLab currently has no controlled GICS
-  taxonomy (`Security.sector`/`.industry` are free-text passthrough from
-  yfinance).
-- **NewsImpact** — a future classification of news events against existing
-  theses/calibration. Not implemented.
-- **Conviction Layer** — a future cross-domain agreement/conflict
-  assessment. Not implemented, and per the project brief must not become a
-  simple average when it is.
-- **Signal Conflict Detection** — not implemented.
-- **Ranking integration for Donatien/News/Macro** — not implemented, and
-  must not be added without empirical backtest validation per the project
-  brief.
+- **Alignment** (`alpha_lab.alignment`, §17) is now implemented, but only a
+  narrow slice: a two-input, categorical-only comparison of Market Regime
+  vs. Donatien's `scenario_weights`. The following remain **NOT
+  IMPLEMENTED**:
+  - **CalibrationAlignment (security-level)** — connecting Donatien's
+    sector/tier weights to individual AlphaLab securities via canonical
+    sector/GICS mapping. AlphaLab currently has no controlled GICS
+    taxonomy (`Security.sector`/`.industry` are free-text passthrough from
+    yfinance).
+  - **NewsImpact** — a future classification of news events against
+    existing theses/calibration.
+  - **Full Conviction Layer** — a cross-domain agreement/conflict
+    assessment spanning more than Market Regime + Donatien (e.g. adding
+    News, Analyst Consensus, or AI Research Rating as further inputs).
+    §17's Alignment is a first, deliberately narrow instance of this
+    concept — not the full layer — and per the project brief must never
+    become a simple average when the fuller version is built.
+  - **Signal Conflict Detection** beyond §17's two-input case.
+- **Ranking integration for Donatien/News/Macro/Alignment** — not
+  implemented, and must not be added without empirical backtest validation
+  per the project brief.
 
 ## 6. Provider boundary
 
@@ -349,9 +362,156 @@ import-boundary check (`alpha_lab.macro` is never imported by
 `research`/`screener`/`strategy`/`backtest`/`portfolio`/`ratings`/`factors`)
 and a bit-identical `HistoricalScoringService` regression test.
 
-**Not implemented in this step** (see §5): comparison against Donatien's
-regime label (§10 of the original brief), official economic data (FRED or
+**Not implemented in this step** (see §5): official economic data (FRED or
 similar), multi-region scopes beyond the `"US"` default, market breadth
 (would require the full ingested universe, not a single-ticker proxy — no
 honest single-ticker substitute exists), and inflation expectations
-(breakeven rates aren't reliably available via yfinance).
+(breakeven rates aren't reliably available via yfinance). Comparison
+against Donatien's regime label is implemented as a narrow, categorical-only
+layer in Phase 2B — see §17.
+
+## 17. Donatien ↔ Market Regime Alignment (Phase 2, step 2 / "Phase 2B")
+
+Scope decision, made before implementation: a small, focused comparison
+between the two evidence layers that already exist (§16's Macro Regime and
+Donatien External Calibration) — explicitly not News, AI synthesis,
+conviction scoring, portfolio weighting, or backtest integration. If any of
+those become a hard dependency, the correct response is to stop and expand
+scope deliberately, not fold them in here.
+
+**Absolutely no numeric score.** `alpha_lab.alignment.alignment.Alignment`
+is a 4-value enum: `ALIGNED` / `CONFLICT` / `NEUTRAL` / `INSUFFICIENT_DATA`.
+There is no `alignment_score`, `conviction_score`, weighted average, or
+hidden percentage anywhere in this module —
+`tests/test_alignment.py::test_no_alignment_score_field_exists_on_the_model`
+asserts the model has no such field.
+
+**The deterministic mapping.** Donatien exposes exactly one field with
+enough structure to classify deterministically: `scenario_weights` (a
+scenario-name → weight mapping). The four scenario names consistently
+observed in it — `"Reacceleration"`, `"Soft Landing"`, `"Stagflation"`,
+`"Deflationary Bust"` — are a standard institutional growth/inflation
+quadrant framework, not an AlphaLab invention:
+
+| Scenario | Quadrant | Donatien lean bucket |
+|---|---|---|
+| Reacceleration | rising growth | `CONSTRUCTIVE` |
+| Soft Landing | moderating, non-recessionary growth | `CONSTRUCTIVE` |
+| Stagflation | rising inflation, weakening growth | `DEFENSIVE` |
+| Deflationary Bust | contracting growth and prices | `DEFENSIVE` |
+
+`classify_donatien_lean` sums the weight in each bucket; whichever bucket
+is strictly larger is the lean. A tie, or a `scenario_weights` payload
+containing none of these four names (a taxonomy AlphaLab has not verified),
+resolves to `MIXED`/`UNKNOWN` respectively — never guessed.
+
+Donatien's other fields — `dominant_regime` (free-text prose, no confirmed
+vocabulary), `confidence` (a word, not a number), and `defensiveness` (a
+plain number with no documented scale) — are **audit-only context**. They
+are retained on `AlignmentAssessment` for display and are never inputs to
+the classification
+(`tests/test_alignment.py::test_dominant_regime_confidence_and_defensiveness_never_affect_the_classification`
+proves changing them arbitrarily while holding `scenario_weights` fixed
+does not change the result).
+
+**The alignment table**:
+
+| Market Regime | Donatien lean | Alignment |
+|---|---|---|
+| `RISK_ON` | `CONSTRUCTIVE` | `ALIGNED` |
+| `RISK_ON` | `DEFENSIVE` | `CONFLICT` |
+| `RISK_ON` | `MIXED` | `NEUTRAL` |
+| `RISK_OFF` | `DEFENSIVE` | `ALIGNED` |
+| `RISK_OFF` | `CONSTRUCTIVE` | `CONFLICT` |
+| `RISK_OFF` | `MIXED` | `NEUTRAL` |
+| `NEUTRAL` | any | `NEUTRAL` |
+| `REVIEW` | any | `INSUFFICIENT_DATA` |
+| either side missing/unavailable | — | `INSUFFICIENT_DATA` |
+| any | `UNKNOWN` (unrecognized taxonomy) | `INSUFFICIENT_DATA` |
+
+`MacroRegime.REVIEW` always maps to `INSUFFICIENT_DATA` — there is no
+textbook basis for a deterministic rule that would let an unassessable
+market regime still produce a directional verdict.
+
+**Auditability.** Every field needed to answer "why was this date
+`ALIGNED`?" is retained directly on `AlignmentAssessment` (and therefore on
+the persisted payload): `market_regime`, `market_regime_coverage`,
+`market_as_of`, `donatien_lean`, `donatien_scenario_weights`, plus the
+audit-only `donatien_dominant_regime`/`donatien_confidence`/
+`donatien_defensiveness`/`donatien_run_date`/`donatien_source_observed_at`/
+`donatien_retrieved_at` — no opaque recomputation is ever required.
+
+**Point-in-time correctness.** `alpha_lab.alignment.service.AlignmentService.refresh`
+makes no network call; it reads whichever evidence was already knowable by
+the requested `as_of` and recomputes the categorical comparison. This
+required adding one new, purely additive read method to each existing
+service (no new persistence pattern):
+
+- `MacroRegimeService.get_assessment_as_of(scope, as_of=...)` — the most
+  recent `MacroAssessmentSnapshot` whose own `as_of` is at or before the
+  requested date. Safe because `refresh()` (§16) already guarantees a
+  snapshot's content used no `Price` row dated after its own `as_of`.
+- `ExternalCalibrationService.get_calibration_as_of(source, as_of=...)` —
+  the most recent `ExternalCalibrationSnapshot` whose `retrieved_at` is at
+  or before the requested date. This filters on `retrieved_at` (when
+  AlphaLab actually observed the content), **never** on Donatien's own
+  `source_run_date`/`macro_report_date` — mirroring
+  `alpha_lab.database.queries.latest_fundamentals_as_of`'s
+  `publication_date`-based filtering ("was this knowable by then," not
+  "what period does it describe"). Filtering on `source_run_date` instead
+  would risk look-ahead bias: a Donatien report dated before `as_of` that
+  AlphaLab did not actually retrieve until after `as_of` must never be used
+  for that `as_of`.
+
+`AlignmentService.refresh` uses these two methods unconditionally, even for
+`as_of=today` — there is exactly one point-in-time-safe code path for
+current and historical alignment, never a separate "current" shortcut that
+could drift from it. Verified by
+`tests/test_alignment_service.py::test_a_later_donatien_snapshot_does_not_affect_an_earlier_alignment`,
+`::test_a_later_macro_snapshot_does_not_affect_an_earlier_alignment`, and
+`::test_historical_as_of_uses_the_nearest_prior_snapshot_not_the_latest_overall`.
+
+**Degradation.** Either source unavailable, `REVIEW`, or an unrecognized
+Donatien taxonomy → `INSUFFICIENT_DATA`, always — never a fabricated
+`ALIGNED`/`CONFLICT`/`NEUTRAL`. There is no "failed refresh" mode in the
+network sense (this module makes no network call), so the equivalent
+invariant is: recomputing with partial or absent evidence never raises and
+never invents a directional verdict
+(`tests/test_alignment_service.py::test_missing_donatien_evidence_produces_insufficient_data_not_a_fabricated_value`,
+`::test_missing_macro_evidence_produces_insufficient_data_not_a_fabricated_value`).
+
+**Persistence**: `current_alignment_assessment` (one row per `scope`,
+reusing Macro Regime's own `"US"` default) and
+`alignment_assessment_snapshots` (immutable, append-only, `snapshot_id =
+sha256(scope, content_hash)`), the same `Current*`/`*Snapshot` pattern as
+every other evidence layer — no third persistence convention was invented.
+The content hash excludes every date/freshness field (`as_of`,
+`market_as_of`, `donatien_run_date`, `donatien_source_observed_at`,
+`donatien_retrieved_at`) for the same reason §16's macro content hash
+excludes `as_of`: a freshness marker advancing by itself, with nothing
+substantive changing on either side, must not defeat deduplication.
+Verified by
+`tests/test_alignment_service.py::test_identical_substantive_content_creates_no_duplicate_snapshot_across_days`.
+
+**Refresh/UI**: explicit only — `scripts/refresh_alignment.py` or the
+"Recompute alignment" button on `app/dashboard/pages/7_Alignment.py`. No
+page load ever fetches data or even queries the network — this module has
+no provider at all. The page shows Market Regime + Donatien = Alignment
+(e.g. Market Regime `RISK_OFF` / Donatien lean `DEFENSIVE` → `ALIGNED`)
+with the audit fields alongside it, plus a simple Date/Alignment/Market
+regime/Donatien lean history table.
+
+**Non-integration with existing scoring**: identical guarantee to Donatien
+and Macro Regime — verified by
+`tests/test_alignment_regression.py::test_no_scoring_module_imports_the_alignment_code`
+(static import-boundary check) and
+`::test_historical_scoring_is_identical_with_and_without_an_alignment_assessment`
+(bit-identical `HistoricalScoringService` regression). The reverse
+direction is checked too —
+`::test_macro_and_calibration_never_import_the_alignment_code` — so the
+dependency strictly flows Market Regime + Donatien → Alignment → Dashboard,
+never the other way.
+
+**Not implemented in this step** (see §5): security-level
+CalibrationAlignment (sector/GICS mapping), News, the full multi-input
+Conviction Layer, and any ranking/backtest integration.

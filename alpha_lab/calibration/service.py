@@ -15,7 +15,7 @@ meant to be triggered explicitly (a script), never from an ordinary page
 render.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from sqlalchemy import Engine, select
 from sqlalchemy.exc import IntegrityError
@@ -94,6 +94,34 @@ class ExternalCalibrationService:
             rows = session.scalars(statement).all()
             session.expunge_all()
             return list(rows)
+
+    def get_calibration_as_of(
+        self, source: str = DEFAULT_CALIBRATION_SOURCE, *, as_of: date
+    ) -> ExternalCalibrationSnapshot | None:
+        """Point-in-time historical lookup. Filters on `retrieved_at` (when
+        AlphaLab's own refresh actually observed this content), never on
+        Donatien's self-reported `source_run_date`/`macro_report_date` --
+        mirroring `alpha_lab.database.queries.latest_fundamentals_as_of`'s
+        publication_date-based filtering: was this knowable by `as_of`, not
+        what period it describes. Filtering on source_run_date instead
+        would risk look-ahead bias -- a Donatien report dated before
+        `as_of` that AlphaLab did not actually retrieve until after `as_of`
+        must never be used for that `as_of`.
+        """
+        upper_bound = datetime.combine(as_of, time.max)
+        with Session(self.engine) as session:
+            row = session.scalars(
+                select(ExternalCalibrationSnapshot)
+                .where(
+                    ExternalCalibrationSnapshot.source == source,
+                    ExternalCalibrationSnapshot.retrieved_at <= upper_bound,
+                )
+                .order_by(ExternalCalibrationSnapshot.retrieved_at.desc())
+                .limit(1)
+            ).first()
+            if row is not None:
+                session.expunge(row)
+            return row
 
     # --- refresh: explicit, provider call happens before any DB write ------
 
