@@ -312,6 +312,21 @@ previously-stored price history, if any, is untouched and still
 contributes to coverage) — the refresh is never aborted by one ticker's
 failure.
 
+**Point-in-time correctness**: `refresh(as_of=...)` only reads `Price` rows
+with `date <= as_of` when building each proxy's history, mirroring
+`HistoricalScoringService`'s own PIT filtering exactly. Without this
+filter, a database already holding price rows dated after `as_of` (e.g.
+from a later, unrelated refresh) could leak future observations into a
+supposedly historical assessment — the same class of bug
+`alpha_lab.database.queries.latest_fundamentals_as_of` exists to prevent
+for fundamentals. Verified by
+`tests/test_macro_service.py::test_refresh_never_uses_price_rows_dated_after_as_of`.
+
+**Methodology honesty**: the VIX/yield-curve thresholds (§ above) are a
+transparent, versioned methodology (`MACRO_METHODOLOGY_VERSION`), not a
+claim of empirical backtesting or statistical validation — they encode
+widely-cited textbook conventions, nothing more.
+
 **Persistence**: `current_macro_assessment` (one row per `scope`, default
 `"US"`) and `macro_assessment_snapshots` (immutable, append-only,
 `snapshot_id = sha256(scope, content_hash)`), mirroring the

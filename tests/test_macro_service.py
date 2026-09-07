@@ -124,3 +124,36 @@ def test_get_current_and_get_history_are_empty_before_any_refresh(engine):
     assert service.get_current() is None
     assert service.get_current_assessment() is None
     assert service.get_history() == []
+
+
+def test_refresh_never_uses_price_rows_dated_after_as_of(engine):
+    """Point-in-time regression: a database that already holds price rows
+    dated after `as_of` (e.g. from a later, unrelated refresh) must never
+    leak those future observations into a historical assessment.
+
+    Fails against the pre-fix implementation, which read a ticker's full
+    price history with no `Price.date <= as_of` filter at all."""
+    from sqlalchemy.orm import Session
+
+    from alpha_lab.database.models import Price
+    from alpha_lab.macro.regime import MacroRegime
+
+    service = MacroRegimeService(engine)
+    service.refresh(_FakeMacroProvider(), as_of=date(2024, 6, 1))  # calm VIX=12 -> RISK_ON
+
+    # Simulate a future, extreme VIX spike already sitting in the database
+    # (e.g. ingested by a later refresh) dated well after as_of.
+    with Session(engine) as session:
+        session.add(Price(
+            ticker="^VIX", date=date(2024, 12, 1), close=90.0, high=90.0, low=90.0,
+            provider="test", source="future-injection",
+        ))
+        session.commit()
+
+    # Recomputing the SAME historical as_of must be completely unaffected
+    # by that future row.
+    result = service.refresh(_FakeMacroProvider(), as_of=date(2024, 6, 1))
+    assessment = service.get_current_assessment()
+    vix = next(i for i in assessment.indicators if i.ticker == "^VIX")
+    assert vix.value == pytest.approx(12.0)
+    assert result.regime == MacroRegime.RISK_ON.value

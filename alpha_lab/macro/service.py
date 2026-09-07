@@ -135,6 +135,15 @@ class MacroRegimeService:
         assessment (reduced coverage), never as a reason to abort the whole
         refresh or fabricate a value. This mirrors the existing "missing
         != erroring" evidence-integrity rule.
+
+        Point-in-time: only Price rows with `date <= as_of` are read when
+        building each proxy's history, mirroring
+        HistoricalScoringService's own PIT filtering. Without this, a
+        database that already holds price rows dated after `as_of` (e.g.
+        ingested by a later, unrelated refresh) could leak future
+        observations into a supposedly historical assessment -- the same
+        class of bug alpha_lab.database.queries.latest_fundamentals_as_of
+        exists to prevent for fundamentals.
         """
         as_of = as_of or date.today()
         start = as_of.fromordinal(as_of.toordinal() - lookback_days)
@@ -149,7 +158,9 @@ class MacroRegimeService:
         with Session(self.engine) as session:
             for ticker in MACRO_PROXY_TICKERS:
                 rows = session.scalars(
-                    select(Price).where(Price.ticker == ticker).order_by(Price.date)
+                    select(Price)
+                    .where(Price.ticker == ticker, Price.date <= as_of)
+                    .order_by(Price.date)
                 ).all()
                 frame = pd.DataFrame(
                     [{"date": row.date, "close": row.close} for row in rows if row.close is not None]
