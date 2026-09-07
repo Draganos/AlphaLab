@@ -37,9 +37,14 @@ AlphaLab is organized into two kinds of evidence today:
   system's stable core; nothing in this document changes its behavior.
 - **External Calibration** (`alpha_lab.calibration`,
   `alpha_lab.providers.donatien`) — a single third-party market
-  regime/scenario snapshot (Donatien), added in this phase. It is fetched,
+  regime/scenario snapshot (Donatien), added in Phase 1. It is fetched,
   validated, timestamped, hashed, persisted, and displayed. **It has no
   code path into any scoring or ranking calculation** — see §6.
+- **AlphaLab Macro Regime** (`alpha_lab.macro`) — a deterministic,
+  AlphaLab-computed regime read derived from market-observable proxy
+  prices already ingested into AlphaLab's own `Price` table (Phase 2, step
+  1). **Market-derived proxies only — never official economic data, and no
+  code path into any scoring or ranking calculation** — see §16.
 
 ## 2. Deterministic components
 
@@ -54,7 +59,7 @@ involvement.
 | Fundamental scoring (`alpha_lab.strategy.scoring`, `alpha_lab.factors`) | Price/fundamental factors | `CompositeResult`/`HistoricalScore` (0–100 score) | `factor_scores`, `current_research_snapshots` | `generated_at`, `evaluation_date` | **Yes — the core ranking signal** |
 | Analyst Consensus (`alpha_lab.research.analyst_consensus`) | yfinance recommendation/target data | `AnalystConsensus` (rating, counts, price targets) | `current_analyst_consensus` (current), `research_snapshots` (historical, embedded in `StockResearch`) | `as_of`, `computed_at` | No — separate research output |
 | Technical Summary (`alpha_lab.research.technical`) | AlphaLab's own stored `Price` history | `TechnicalSummary` (15 indicators, rollup rating) | `current_technical_summary` | `as_of`, `computed_at` | No |
-| Macro calculations | — | **FUTURE / NOT IMPLEMENTED** | — | — | — |
+| Macro Regime (`alpha_lab.macro.regime`) | AlphaLab's own stored `Price` history for 6 market-proxy tickers (^VIX, ^TNX, ^IRX, DX-Y.NYB, CL=F, GC=F) | `MacroAssessment` (regime, 5 indicators, coverage) | `current_macro_assessment`, `macro_assessment_snapshots` | `as_of`, `computed_at` | **No — market-derived proxies only, never official economic data, no scoring authority** |
 | Calibration parsing (`alpha_lab.providers.donatien`) | Donatien's `<pre class="cal-json">` HTML block | `DonatienCalibration` (validated, normalized) | `current_external_calibration`, `external_calibration_snapshots` | `source_observed_at`, `retrieved_at` | **No — zero scoring authority in Phase 1** |
 | News metadata | — | **FUTURE / NOT IMPLEMENTED** (`ResearchNewsProvider` interface exists; no implementation) | — | — | — |
 | Backtesting (`alpha_lab.backtest`) | `HistoricalScoringService` output | `BacktestResult` (Sharpe, drawdown, turnover, ...) | `backtest_runs` | `created_at` | Yes (evaluates ranking, doesn't rank live) |
@@ -89,8 +94,12 @@ integration is possible, without that integration existing yet):
 - **News Engine** — no ingestion, no model, no provider implementation.
   `alpha_lab.providers.interfaces.ResearchNewsProvider` is an abstract
   interface with zero implementations.
-- **Macro Engine** — no macro data provider, no regime classification
-  beyond Donatien's own externally-supplied regime label.
+- **Full Macro Engine** — `alpha_lab.macro` (§16) implements a narrow,
+  market-proxy-only regime read (VIX, yield curve, USD, oil, gold via
+  yfinance). It does NOT implement official economic data (CPI, GDP,
+  employment via FRED or similar), multi-region regimes, or any comparison
+  against Donatien's own regime label (§10 of the original brief) — that
+  remains future work.
 - **CalibrationAlignment** — a future evidence layer connecting Donatien's
   sector/tier weights to AlphaLab securities via canonical sector/GICS
   mapping. Not implemented; AlphaLab currently has no controlled GICS
@@ -251,7 +260,7 @@ in the same database
 Donatien has no stock-level score, no ranking influence, and no automatic
 interaction with any existing AlphaLab system in Phase 1.
 
-## 15. Also new this phase: dashboard schema self-healing
+## 15. Also new in Phase 1: dashboard schema self-healing
 
 Unrelated to Donatien specifically, but fixed alongside it: every Streamlit
 page now calls `create_schema(engine)` on load, matching the convention
@@ -260,3 +269,89 @@ against a database created before a later model was added (any of the
 `Current*` tables, or now the External Calibration tables) would crash with
 `OperationalError: no such table`. This never deletes or rewrites existing
 data — `create_schema` is purely additive.
+
+## 16. AlphaLab Macro Regime (Phase 2, step 1)
+
+Scope decision, made before implementation: built entirely from
+market-observable proxy prices via the existing `YFinanceProvider`/
+`IngestionService` — no new provider architecture, no FRED or other
+official-economic-data integration. Every indicator is a **market-derived
+proxy**, never official economic data (CPI, GDP, employment) — that
+distinction is stated on the UI page itself and must never be blurred.
+
+**Indicators** (`alpha_lab.macro.regime`, `MACRO_PROXY_TICKERS`): CBOE
+Volatility Index (`^VIX`), 10Y-3M Treasury yield spread (derived from
+`^TNX`/`^IRX`), US Dollar Index trend (`DX-Y.NYB`), WTI Crude Oil trend
+(`CL=F`), Gold trend (`GC=F`) — 5 indicators total. Each has its own
+availability status; a missing proxy reduces `coverage` and is reported as
+`UNAVAILABLE` for that one indicator only — it never fabricates a value,
+never forces a Neutral/0 reading, and never invalidates the other
+indicators (verified by `tests/test_macro_regime.py`'s missing-indicator
+tests and `tests/test_macro_service.py`'s ingestion-failure tests).
+
+**Regime classification**: `regime`/`regime_score` are derived only from
+the two indicators with a well-established, textbook risk-on/risk-off
+interpretation — VIX level and the yield curve spread (a curve inversion is
+the same recession signal the NY Fed's own model uses). USD/oil/gold trend
+signals (price vs. trailing 50-day SMA, the same convention
+`alpha_lab.research.technical` already uses) are reported as informational
+context and deliberately never fold into the regime score — their
+relationship to risk regime is not a single well-established direction, and
+inventing one would not be a deterministic, defensible mapping.
+`MacroRegime.REVIEW` (not a forced `NEUTRAL`) is used when neither VIX nor
+the yield curve spread is available.
+
+**Provider/ingestion boundary**: unlike Donatien (a single external fetch),
+macro regime proxies are ingested into AlphaLab's own `Security`/`Price`
+tables via the *existing* `IngestionService` — reused exactly as any other
+ticker would be, not a new ingestion path. `build_macro_assessment` itself
+is a pure function over already-stored price history, computed with zero
+network calls, exactly mirroring `alpha_lab.research.technical`'s design. A
+proxy ticker whose ingestion fails is skipped for that refresh only (its
+previously-stored price history, if any, is untouched and still
+contributes to coverage) — the refresh is never aborted by one ticker's
+failure.
+
+**Point-in-time correctness**: `refresh(as_of=...)` only reads `Price` rows
+with `date <= as_of` when building each proxy's history, mirroring
+`HistoricalScoringService`'s own PIT filtering exactly. Without this
+filter, a database already holding price rows dated after `as_of` (e.g.
+from a later, unrelated refresh) could leak future observations into a
+supposedly historical assessment — the same class of bug
+`alpha_lab.database.queries.latest_fundamentals_as_of` exists to prevent
+for fundamentals. Verified by
+`tests/test_macro_service.py::test_refresh_never_uses_price_rows_dated_after_as_of`.
+
+**Methodology honesty**: the VIX/yield-curve thresholds (§ above) are a
+transparent, versioned methodology (`MACRO_METHODOLOGY_VERSION`), not a
+claim of empirical backtesting or statistical validation — they encode
+widely-cited textbook conventions, nothing more.
+
+**Persistence**: `current_macro_assessment` (one row per `scope`, default
+`"US"`) and `macro_assessment_snapshots` (immutable, append-only,
+`snapshot_id = sha256(scope, content_hash)`), mirroring the
+`CurrentExternalCalibration`/`ExternalCalibrationSnapshot` pattern exactly.
+The content hash deliberately excludes every `as_of` timestamp (top-level
+and per-indicator) — a calendar day passing while every proxy's value stays
+genuinely flat must not defeat deduplication, the same reasoning
+`ResearchSnapshot._payload_hash` already applies to `generated_at`.
+
+**Refresh/UI**: explicit only — `scripts/refresh_macro_regime.py` or the
+"Refresh macro regime" button on `app/dashboard/pages/6_Macro_Regime.py`
+(a dedicated page, deliberately separate from the Donatien page, to keep
+"AlphaLab's own deterministic regime" and "Donatien's external regime"
+visually and architecturally distinct pending §10's future comparison
+layer). No page load ever fetches market data.
+
+**Non-integration with existing scoring**: identical guarantee to
+Donatien — verified by `tests/test_macro_regression.py`'s static
+import-boundary check (`alpha_lab.macro` is never imported by
+`research`/`screener`/`strategy`/`backtest`/`portfolio`/`ratings`/`factors`)
+and a bit-identical `HistoricalScoringService` regression test.
+
+**Not implemented in this step** (see §5): comparison against Donatien's
+regime label (§10 of the original brief), official economic data (FRED or
+similar), multi-region scopes beyond the `"US"` default, market breadth
+(would require the full ingested universe, not a single-ticker proxy — no
+honest single-ticker substitute exists), and inflation expectations
+(breakeven rates aren't reliably available via yfinance).

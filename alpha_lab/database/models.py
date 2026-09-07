@@ -470,6 +470,59 @@ class ExternalCalibrationSnapshot(Base):
     )
 
 
+class CurrentMacroAssessment(Base):
+    """Current (not historical) AlphaLab Macro Regime read, one row per
+    `scope` (e.g. "US"). Upserted only by an explicit refresh (see
+    alpha_lab.macro.service.MacroRegimeService); never written by a read
+    path. A failed refresh (e.g. ingestion failure for a proxy ticker)
+    leaves this row untouched.
+
+    Deterministic, market-derived-proxy only -- never official economic
+    data, and never a scoring input. Nothing in alpha_lab.research/
+    screener/strategy/backtest/portfolio reads this table.
+    """
+
+    __tablename__ = "current_macro_assessment"
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True)
+    regime: Mapped[str] = mapped_column(String(16))
+    regime_score: Mapped[float | None] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    coverage: Mapped[float] = mapped_column(Float)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    methodology_version: Mapped[str] = mapped_column(String(32))
+    as_of: Mapped[date] = mapped_column(Date)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class MacroAssessmentSnapshot(Base):
+    """Immutable, append-only historical AlphaLab Macro Regime observation.
+
+    Mirrors ExternalCalibrationSnapshot's identity/hash pattern:
+    `snapshot_id` is a deterministic sha256 of {scope, content_hash}, so
+    re-persisting an unchanged assessment is idempotent rather than
+    creating a duplicate row.
+    """
+
+    __tablename__ = "macro_assessment_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(32), index=True)
+    regime: Mapped[str] = mapped_column(String(16))
+    regime_score: Mapped[float | None] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    coverage: Mapped[float] = mapped_column(Float)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    methodology_version: Mapped[str] = mapped_column(String(32))
+    as_of: Mapped[date] = mapped_column(Date)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class CurrentAIResearchAssessment(Base):
     """Current AI Research Rating, one row per ticker. See
     CurrentAnalystConsensus's docstring for the upsert/failure semantics;
