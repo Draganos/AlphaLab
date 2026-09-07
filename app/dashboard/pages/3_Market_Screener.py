@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from alpha_lab.config import load_settings
-from alpha_lab.database import make_engine
+from alpha_lab.database import create_schema, make_engine
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.search import (
@@ -24,6 +24,7 @@ st.warning(
 )
 settings = load_settings()
 engine = make_engine(settings.database_url)
+create_schema(engine)
 try:
     repository = Phase3Repository(engine)
     saved = repository.list_screeners()

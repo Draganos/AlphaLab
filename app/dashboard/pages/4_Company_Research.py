@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
-from alpha_lab.database import make_engine
+from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers import YFinanceProvider
@@ -509,6 +509,7 @@ def _render_comparison(comparison) -> None:
 
 settings = load_settings()
 engine = make_engine(settings.database_url)
+create_schema(engine)
 try:
     service = ResearchService(engine, settings)
     quotes = service.list_current_research()

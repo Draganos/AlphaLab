@@ -10,7 +10,7 @@ import streamlit as st
 from alpha_lab.backtest.database_runner import load_price_frames, run_database_backtest
 from alpha_lab.backtest import TransactionCostModel
 from alpha_lab.config import load_settings
-from alpha_lab.database import make_engine
+from alpha_lab.database import create_schema, make_engine
 from alpha_lab.experiments import compare_experiments, manual_buy_and_hold
 from alpha_lab.research import load_universe
 
@@ -18,6 +18,7 @@ st.title("Experiments A / B / C")
 st.write("Is AlphaLab outperforming a simple alternative after adjusting for risk and costs?")
 settings = load_settings()
 engine = make_engine(settings.database_url)
+create_schema(engine)
 universe = load_universe("data/universes/us_research_sample.csv")
 start = st.date_input("Start", date.today() - timedelta(days=365 * 3))
 end = st.date_input("End", date.today())

@@ -61,6 +61,10 @@ class BacktestSettings(BaseModel):
 
 class Settings(BaseModel):
     database_url: str = "sqlite:///data/alpha_lab.db"
+    # Donatien External Calibration source page. Configurable/overridable
+    # for the same reason database_url is: never hardcode an external
+    # endpoint where a deployment might need a different one.
+    donatien_url: str = "https://donatien.ca/members/reports/Portfolio/index.html"
     universe: dict[str, list[str]]
     strategy: StrategySettings
     weights: dict[str, float]
@@ -123,4 +127,5 @@ def load_settings(path: str | Path | None = None) -> Settings:
     with config_path.open(encoding="utf-8") as stream:
         values = yaml.safe_load(stream)
     values["database_url"] = os.getenv("ALPHALAB_DATABASE_URL", values["database_url"])
+    values["donatien_url"] = os.getenv("ALPHALAB_DONATIEN_URL", values["donatien_url"])
     return Settings.model_validate(values)

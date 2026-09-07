@@ -13,13 +13,20 @@ from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
 from alpha_lab.database.models import Price
-from alpha_lab.database.session import make_engine
+from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.strategy import HistoricalScoringService, interpretation
 
 st.set_page_config(page_title="AlphaLab", page_icon="α", layout="wide")
 settings = load_settings()
 engine = make_engine(settings.database_url)
+# Additive, idempotent schema bootstrap/upgrade -- every batch script already
+# does this before touching the database; the dashboard previously did not,
+# so a database created before a later model was added (e.g. the
+# Analyst Consensus / Technical Summary / AI Research / External Calibration
+# tables) would 500 with "no such table" here instead of self-healing. Never
+# drops or rewrites existing tables/data -- see alpha_lab.database.session.create_schema.
+create_schema(engine)
 
 
 @st.cache_data(ttl=900)

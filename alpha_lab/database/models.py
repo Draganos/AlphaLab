@@ -406,6 +406,70 @@ class CurrentTechnicalSummary(Base):
     )
 
 
+class CurrentExternalCalibration(Base):
+    """Current (not historical) external calibration, one row per source
+    (e.g. "Donatien"). Upserted only by an explicit refresh (see
+    alpha_lab.calibration.service.ExternalCalibrationService); never written
+    by a read path. A failed refresh leaves this row untouched -- the last
+    successfully validated calibration is never erased by a provider
+    failure or a schema-validation failure.
+
+    This is EXTERNAL_CALIBRATION, not ground truth and not a stock-rating
+    input -- nothing in alpha_lab.research/screener/strategy reads this
+    table. `source_run_time_raw` is kept verbatim (no seconds/timezone
+    exist in the source); `source_observed_at` is a best-effort naive
+    convenience combination of the source's own date+time, never a
+    timezone-attached or AlphaLab-retrieval-time substitute.
+    """
+
+    __tablename__ = "current_external_calibration"
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_run_date: Mapped[date | None] = mapped_column(Date)
+    source_run_time_raw: Mapped[str | None] = mapped_column(String(16))
+    source_observed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime)
+    supersedes: Mapped[str | None] = mapped_column(String(255))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    source_url: Mapped[str] = mapped_column(String(1024))
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class ExternalCalibrationSnapshot(Base):
+    """Immutable, append-only historical external calibration observation.
+
+    Mirrors alpha_lab.research.snapshots.ResearchSnapshot's identity/hash
+    pattern: `snapshot_id` is a deterministic sha256 of {source,
+    content_hash} so re-persisting an unchanged observation is idempotent
+    rather than creating a duplicate row. Unlike ResearchSnapshot, no field
+    is excluded from `content_hash` -- every field in the raw Donatien
+    payload is substantive source content, not an AlphaLab-added volatile
+    timestamp.
+    """
+
+    __tablename__ = "external_calibration_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_run_date: Mapped[date | None] = mapped_column(Date)
+    source_run_time_raw: Mapped[str | None] = mapped_column(String(16))
+    source_observed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime)
+    supersedes: Mapped[str | None] = mapped_column(String(255))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    source_url: Mapped[str] = mapped_column(String(1024))
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class CurrentAIResearchAssessment(Base):
     """Current AI Research Rating, one row per ticker. See
     CurrentAnalystConsensus's docstring for the upsert/failure semantics;

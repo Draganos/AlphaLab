@@ -10,7 +10,7 @@ import streamlit as st
 from alpha_lab.analytics import performance_metrics
 from alpha_lab.backtest.database_runner import run_database_backtest
 from alpha_lab.config import load_settings
-from alpha_lab.database import make_engine
+from alpha_lab.database import create_schema, make_engine
 from alpha_lab.research import load_universe
 
 st.title("Backtests")
@@ -18,6 +18,7 @@ st.error("SURVIVORSHIP BIAS RISK — the sample universe is not historical const
 st.info("Point-in-time rule: signals use closes and published fundamentals through T; execution is next available open.")
 settings = load_settings()
 engine = make_engine(settings.database_url)
+create_schema(engine)
 universe = load_universe("data/universes/us_research_sample.csv")
 c1, c2, c3 = st.columns(3)
 start = c1.date_input("Start", date.today() - timedelta(days=365 * 3))

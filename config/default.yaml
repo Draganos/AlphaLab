@@ -1,4 +1,5 @@
 database_url: sqlite:///data/alpha_lab.db
+donatien_url: https://donatien.ca/members/reports/Portfolio/index.html
 universe:
   us: [NVDA, MA, AAL, FTEC, GDX]
   uae: [EMAAR, ALEC, DUBAIRESI, PARKIN, AIRARABIA, ALDAR, ADNOCGAS, EAND, SALIK, DU]

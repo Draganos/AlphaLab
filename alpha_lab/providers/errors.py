@@ -40,6 +40,14 @@ class ProviderErrorKind(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     NETWORK_UNAVAILABLE = "NETWORK_UNAVAILABLE"
     NO_DATA = "NO_DATA"
+    # The call reached the upstream and got a response, but that response's
+    # *content* cannot be trusted: a required container/element is missing,
+    # the body isn't valid JSON, or it fails schema/type validation. Distinct
+    # from NETWORK_UNAVAILABLE (never got a response) and from AlphaLab's
+    # usual "missing data stays None" rule, which is about one optional
+    # field inside an otherwise-valid response -- this is about the whole
+    # response being unusable, so it is treated as a failed call.
+    INVALID_RESPONSE = "INVALID_RESPONSE"
     UNKNOWN_PROVIDER_ERROR = "UNKNOWN_PROVIDER_ERROR"
 
 
