@@ -116,6 +116,28 @@ class MacroRegimeService:
             session.expunge_all()
             return list(rows)
 
+    def get_assessment_as_of(
+        self, scope: str = DEFAULT_MACRO_SCOPE, *, as_of: date
+    ) -> MacroAssessmentSnapshot | None:
+        """Point-in-time historical lookup: the most recent snapshot whose
+        own `as_of` is at or before the requested date. Safe to use for a
+        historical `as_of` because `refresh()` already guarantees a
+        snapshot's content used no Price row dated after its own `as_of`
+        (see `refresh()`'s docstring) -- unlike `get_current`, this never
+        returns a later observation for an earlier request, regardless of
+        when the snapshot was actually computed in wall-clock time.
+        """
+        with Session(self.engine) as session:
+            row = session.scalars(
+                select(MacroAssessmentSnapshot)
+                .where(MacroAssessmentSnapshot.scope == scope, MacroAssessmentSnapshot.as_of <= as_of)
+                .order_by(MacroAssessmentSnapshot.as_of.desc(), MacroAssessmentSnapshot.created_at.desc())
+                .limit(1)
+            ).first()
+            if row is not None:
+                session.expunge(row)
+            return row
+
     # --- refresh: explicit, ingestion happens before any assessment write ---
 
     def refresh(

@@ -523,6 +523,55 @@ class MacroAssessmentSnapshot(Base):
     )
 
 
+class CurrentAlignmentAssessment(Base):
+    """Current (not historical) Donatien <-> Market Regime alignment read,
+    one row per `scope` (mirrors alpha_lab.macro's scope, e.g. "US").
+    Upserted only by an explicit refresh (see
+    alpha_lab.alignment.service.AlignmentService); never written by a read
+    path. A failed refresh (either upstream source unavailable) leaves this
+    row untouched.
+
+    Purely categorical: `alignment` is one of
+    ALIGNED/CONFLICT/NEUTRAL/INSUFFICIENT_DATA -- there is no
+    alignment_score/conviction_score anywhere in this table. Nothing in
+    alpha_lab.research/screener/strategy/backtest/portfolio reads this
+    table; see alpha_lab.alignment.alignment's module docstring.
+    """
+
+    __tablename__ = "current_alignment_assessment"
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    alignment: Mapped[str] = mapped_column(String(24))
+    methodology_version: Mapped[str] = mapped_column(String(32))
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class AlignmentAssessmentSnapshot(Base):
+    """Immutable, append-only historical alignment observation. Mirrors
+    MacroAssessmentSnapshot/ExternalCalibrationSnapshot's identity/hash
+    pattern: `snapshot_id` is a deterministic sha256 of {scope,
+    content_hash}, so re-persisting an unchanged alignment read is
+    idempotent rather than creating a duplicate row.
+    """
+
+    __tablename__ = "alignment_assessment_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(32), index=True)
+    as_of: Mapped[date] = mapped_column(Date, index=True)
+    alignment: Mapped[str] = mapped_column(String(24))
+    methodology_version: Mapped[str] = mapped_column(String(32))
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class CurrentAIResearchAssessment(Base):
     """Current AI Research Rating, one row per ticker. See
     CurrentAnalystConsensus's docstring for the upsert/failure semantics;

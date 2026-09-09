@@ -157,3 +157,56 @@ def test_refresh_never_uses_price_rows_dated_after_as_of(engine):
     vix = next(i for i in assessment.indicators if i.ticker == "^VIX")
     assert vix.value == pytest.approx(12.0)
     assert result.regime == MacroRegime.RISK_ON.value
+
+
+def test_get_assessment_as_of_selects_by_the_snapshots_own_as_of_not_by_creation_order(engine):
+    """Point-in-time design note: unlike Donatien (an externally-authored
+    report where AlphaLab's own `retrieved_at` can lag the source's
+    self-reported date, creating a real look-ahead risk), a
+    MacroAssessmentSnapshot's `as_of` IS the authoritative point-in-time
+    identity -- `refresh(as_of=X)` already guarantees the snapshot's
+    content used no Price row dated after X (see
+    test_refresh_never_uses_price_rows_dated_after_as_of above). There is
+    no separate "when AlphaLab actually observed this" timestamp to lag
+    behind, because nothing is observed from a third party -- it is
+    computed entirely from AlphaLab's own already-PIT-filtered Price
+    history, regardless of the real wall-clock time the computation
+    happened to run.
+
+    This test proves `get_assessment_as_of` is governed purely by the
+    snapshot's own `as_of` field: even when a snapshot describing an
+    EARLIER as_of is persisted (has a `created_at`) strictly AFTER a
+    snapshot describing a LATER as_of -- the inverse of normal
+    chronological backfill order -- the correct (earlier) snapshot is
+    still selected for an earlier query, and `created_at` never overrides
+    that choice."""
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.orm import Session
+
+    from alpha_lab.database.models import MacroAssessmentSnapshot
+    from alpha_lab.macro.regime import MacroRegime
+
+    service = MacroRegimeService(engine)
+    # Later as_of, computed (created_at) FIRST.
+    service.refresh(_FakeMacroProvider(), as_of=date(2024, 6, 10))
+    # Earlier as_of, computed (created_at) SECOND -- i.e. its row is
+    # persisted strictly after the later-as_of row above, inverting the
+    # usual chronological order.
+    service.refresh(
+        _FakeMacroProvider(overrides={"^VIX": 35.0, "^TNX": 40.0, "^IRX": 50.0}),
+        as_of=date(2024, 6, 1),
+    )
+
+    with Session(engine) as session:
+        rows = {
+            row.as_of: row
+            for row in session.scalars(sa_select(MacroAssessmentSnapshot)).all()
+        }
+        assert rows[date(2024, 6, 1)].created_at > rows[date(2024, 6, 10)].created_at
+
+    # A query for the earlier as_of must return the earlier (fear/RISK_OFF)
+    # snapshot -- never the later (calm/RISK_ON) one -- despite the later
+    # one having been created first.
+    earlier = service.get_assessment_as_of(as_of=date(2024, 6, 1))
+    assert earlier.as_of == date(2024, 6, 1)
+    assert earlier.regime == MacroRegime.RISK_OFF.value

@@ -151,7 +151,10 @@ def test_historical_snapshot_row_has_no_update_mechanism(engine):
     service = ExternalCalibrationService(engine)
     service.refresh(_FakeProvider(PAYLOAD))
     public_methods = {name for name in dir(service) if not name.startswith("_")}
-    assert public_methods == {"engine", "get_current", "get_current_calibration", "get_history", "refresh"}
+    assert public_methods == {
+        "engine", "get_current", "get_current_calibration", "get_history",
+        "get_calibration_as_of", "refresh",
+    }
 
 
 def test_get_current_calibration_returns_a_validated_donatien_calibration(engine):
