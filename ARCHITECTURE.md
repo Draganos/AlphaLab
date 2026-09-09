@@ -451,6 +451,23 @@ service (no new persistence pattern):
   recent `MacroAssessmentSnapshot` whose own `as_of` is at or before the
   requested date. Safe because `refresh()` (§16) already guarantees a
   snapshot's content used no `Price` row dated after its own `as_of`.
+  Deliberately **not** additionally filtered on `created_at` (when the
+  snapshot was persisted) — unlike Donatien below, there is no
+  "self-reported date vs. AlphaLab's own observation time" gap to guard
+  against here, because nothing is received from a third party with its
+  own claimed date. A `MacroAssessmentSnapshot`'s `as_of` already *is* the
+  authoritative point-in-time identity: the snapshot is computed entirely
+  from AlphaLab's own Price history, itself already filtered to
+  `date <= as_of` at computation time, regardless of the real wall-clock
+  time the computation happened to run (which, for any historical `as_of`,
+  is necessarily well after that date — that is how historical backfill
+  works, not a bug). Requiring `created_at <= as_of` here would make it
+  impossible to ever compute a usable historical snapshot after the fact,
+  which would break historical alignment entirely. Verified by
+  `tests/test_macro_service.py::test_get_assessment_as_of_selects_by_the_snapshots_own_as_of_not_by_creation_order`,
+  which persists an earlier-`as_of` snapshot strictly *after* (in
+  `created_at` terms) a later-`as_of` one and confirms the correct
+  (earlier) snapshot is still selected.
 - `ExternalCalibrationService.get_calibration_as_of(source, as_of=...)` —
   the most recent `ExternalCalibrationSnapshot` whose `retrieved_at` is at
   or before the requested date. This filters on `retrieved_at` (when
