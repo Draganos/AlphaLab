@@ -67,6 +67,7 @@ involvement.
 | Macro Regime (`alpha_lab.macro.regime`) | AlphaLab's own stored `Price` history for 6 market-proxy tickers (^VIX, ^TNX, ^IRX, DX-Y.NYB, CL=F, GC=F) | `MacroAssessment` (regime, 5 indicators, coverage) | `current_macro_assessment`, `macro_assessment_snapshots` | `as_of`, `computed_at` | **No — market-derived proxies only, never official economic data, no scoring authority** |
 | Calibration parsing (`alpha_lab.providers.donatien`) | Donatien's `<pre class="cal-json">` HTML block | `DonatienCalibration` (validated, normalized) | `current_external_calibration`, `external_calibration_snapshots` | `source_observed_at`, `retrieved_at` | **No — zero scoring authority in Phase 1** |
 | Alignment (`alpha_lab.alignment.alignment`) | Already-computed `MacroAssessment` + `DonatienCalibration` (no network) | `AlignmentAssessment` (categorical `alignment` + audit fields, no score) | `current_alignment_assessment`, `alignment_assessment_snapshots` | `as_of`, `computed_at` | **No — categorical comparison only, no scoring authority** |
+| CalibrationAlignment (`alpha_lab.calibration.sector_alignment`) | `Security.sector` (yfinance/Morningstar) + already-stored `CurrentExternalCalibration` (no network) | `list[SectorTierWeight]` (Donatien's own published `pct` per matching tier line) | None — recomputed fresh on every call | n/a (no persistence) | **No — data connection only, no verdict, no scoring authority** |
 | News metadata | — | **FUTURE / NOT IMPLEMENTED** (`ResearchNewsProvider` interface exists; no implementation) | — | — | — |
 | Backtesting (`alpha_lab.backtest`) | `HistoricalScoringService` output | `BacktestResult` (Sharpe, drawdown, turnover, ...) | `backtest_runs` | `created_at` | Yes (evaluates ranking, doesn't rank live) |
 
@@ -108,13 +109,13 @@ integration is possible, without that integration existing yet):
   remains future work.
 - **Alignment** (`alpha_lab.alignment`, §17) is now implemented, but only a
   narrow slice: a two-input, categorical-only comparison of Market Regime
-  vs. Donatien's `scenario_weights`. The following remain **NOT
-  IMPLEMENTED**:
-  - **CalibrationAlignment (security-level)** — connecting Donatien's
-    sector/tier weights to individual AlphaLab securities via canonical
-    sector/GICS mapping. AlphaLab currently has no controlled GICS
-    taxonomy (`Security.sector`/`.industry` are free-text passthrough from
-    yfinance).
+  vs. Donatien's `scenario_weights`. **CalibrationAlignment
+  (security-level)** (`alpha_lab.calibration.sector_alignment`, §18) is
+  also now implemented, but only as a read-only data connection (which
+  Donatien tier weight lines reference a security's approximate sector,
+  at Donatien's own published weight) — not a categorical verdict, and not
+  built on a real GICS taxonomy (see §18's disclosed approximation). The
+  following remain **NOT IMPLEMENTED**:
   - **NewsImpact** — a future classification of news events against
     existing theses/calibration.
   - **Full Conviction Layer** — a cross-domain agreement/conflict
@@ -530,5 +531,67 @@ dependency strictly flows Market Regime + Donatien → Alignment → Dashboard,
 never the other way.
 
 **Not implemented in this step** (see §5): security-level
-CalibrationAlignment (sector/GICS mapping), News, the full multi-input
-Conviction Layer, and any ranking/backtest integration.
+CalibrationAlignment (sector/GICS mapping) — now implemented separately in
+§18 — News, the full multi-input Conviction Layer, and any ranking/backtest
+integration.
+
+## 18. CalibrationAlignment: security-level sector context (audit-only)
+
+Scope (approved before implementation): a small, read-only DATA
+CONNECTION between Donatien's tier weight lines and individual AlphaLab
+securities — explicitly **not** a new categorical judgment. It never
+produces an `ALIGNED`/`CONFLICT`/`NEUTRAL` verdict (that vocabulary
+belongs to §17's cross-evidence-layer comparison) and never computes a
+score — it reports exactly the `pct` Donatien itself published for any
+tier weight line whose `gics_sector` matches the security's own sector.
+
+**The taxonomy gap, disclosed rather than papered over.**
+`alpha_lab.calibration.sector_taxonomy` exists because AlphaLab's
+`Security.sector` (sourced from yfinance) follows Morningstar's 11-sector
+classification, not true GICS — despite both schemes having 11 broadly
+similar sectors, several names differ (e.g. Morningstar "Technology" vs.
+GICS "Information Technology"; "Financial Services" vs. "Financials";
+"Healthcare" vs. "Health Care"; "Consumer Cyclical"/"Consumer Defensive"
+vs. "Consumer Discretionary"/"Consumer Staples"; "Basic Materials" vs.
+"Materials"), and even where names align, a specific company's Morningstar
+sector and true GICS sector can still diverge at the boundaries.
+`MORNINGSTAR_TO_GICS_SECTOR` is a disclosed, best-effort **name**
+correspondence only — never presented as verified GICS classification —
+the same transparency standard already applied to §16's VIX/yield-curve
+bands and §17's scenario-weight quadrant classification. Building a
+genuine GICS-classification data source was explicitly scoped out (would
+require a new provider/trust boundary) in favor of this narrower,
+immediately shippable connection using data AlphaLab already has.
+
+**Computation** (`alpha_lab.calibration.sector_alignment`):
+`sector_tier_weights(calibration, morningstar_sector=...)` is a pure
+function — given an already-fetched `DonatienCalibration` and a
+Morningstar sector string, it maps to the approximate GICS sector, then
+returns one `SectorTierWeight` (tier name, matched GICS sector, `pct`,
+vehicle, line name) per tier weight line whose own `gics_sector` matches.
+An unmapped/unrecognized sector, `None` sector, or no matching line at all
+all resolve to an empty list — never a fabricated weight.
+`get_sector_tier_weights_for_ticker(engine, ticker)` is the DB-backed
+convenience wrapper: reads the security's stored `sector` and the current
+Donatien calibration, then applies the pure function.
+
+**No persistence, no network.** Unlike every other evidence layer in this
+document, CalibrationAlignment has no `Current*`/`*Snapshot` tables at
+all — it is recomputed fresh on every call from already-stored
+`Security.sector` + `CurrentExternalCalibration`, exactly like a database
+join. There is nothing to refresh and nothing to go stale independently of
+its two already-refreshed inputs.
+
+**UI**: a new section on `app/dashboard/pages/4_Company_Research.py`
+("Donatien External Calibration — sector context") shown for whichever
+ticker is already selected on that page, clearly labeled audit-only with
+the Morningstar/GICS caveat stated inline. No new dedicated page — this is
+per-security context, not global market context (unlike §16/§17's own
+pages).
+
+**Non-integration with existing scoring**: verified by
+`tests/test_sector_alignment.py::test_no_scoring_module_imports_sector_alignment_code`
+(static import-boundary check, same pattern as every other evidence
+layer). `test_no_alignment_verdict_or_score_field_on_sector_tier_weight`
+structurally asserts the output model carries no score/verdict/confidence
+field.
