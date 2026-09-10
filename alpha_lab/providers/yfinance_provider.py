@@ -7,16 +7,17 @@ yfinance/curl_cffi/requests internals or being silently swallowed into a
 zero, an empty frame, or a fabricated value.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 import math
 import pandas as pd
 
 from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.providers.errors import call_with_classification
+from alpha_lab.providers.interfaces import ResearchNewsProvider
 
 
-class YFinanceProvider(MarketDataProvider):
+class YFinanceProvider(MarketDataProvider, ResearchNewsProvider):
     def _ticker(self, symbol: str):
         import yfinance as yf
 
@@ -162,6 +163,106 @@ class YFinanceProvider(MarketDataProvider):
             "target_high": _number(targets.get("high"), positive=True),
             "source": self.provider_name,
         }
+
+
+    def get_news(self, ticker: str, since: date | None = None) -> list[dict[str, Any]]:
+        """Recent news items for `ticker`, best-effort normalized to
+        `{title, url, publisher, summary, published_at, raw}`.
+
+        SCHEMA CAVEAT (explicit, not glossed over): yfinance's news endpoint
+        has changed JSON shape across library versions (an older flat
+        `{title, link, publisher, providerPublishTime}` shape, and a newer
+        nested `{"content": {...}}` shape), and this environment has no
+        network access to confirm which shape yfinance 1.7.0 actually
+        returns live. `_normalize_news_item` below tries both known shapes
+        and returns None for anything that matches neither -- such an item
+        is dropped by the caller (`NewsService.refresh`), never guessed
+        into a fabricated record. If the live shape turns out to be a
+        third, unrecognized form, every item is safely dropped (an honest
+        `coverage == 0` outcome) rather than silently returning wrong data.
+
+        `since` is accepted for interface compliance
+        (`ResearchNewsProvider.get_news`) but yfinance's `Ticker.news`
+        exposes no date-range parameter -- it only returns whatever Yahoo
+        currently has cached for this ticker (recent items, not a
+        historical archive). Incrementality is therefore handled entirely
+        on the storage side (`NewsService.refresh`'s content-hash
+        deduplication), not by this call. This is also why this feed can
+        never retroactively backfill news that existed before AlphaLab
+        started refreshing a given ticker -- see the module docstring in
+        `alpha_lab.news.service`.
+        """
+        raw_items = call_with_classification(
+            lambda: self._ticker(ticker).get_news(count=20),
+            provider=self.provider_name,
+        )
+        normalized: list[dict[str, Any]] = []
+        for item in raw_items or []:
+            record = _normalize_news_item(item)
+            if record is not None:
+                normalized.append(record)
+        return normalized
+
+
+def _normalize_news_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Best-effort extraction across the two known yfinance news shapes.
+    Returns None (never a guess) if neither shape's required fields are
+    present -- see `YFinanceProvider.get_news`'s schema caveat."""
+    if not isinstance(item, dict):
+        return None
+
+    content = item.get("content") if isinstance(item.get("content"), dict) else None
+
+    if content is not None:
+        title = content.get("title")
+        publisher = (content.get("provider") or {}).get("displayName") if isinstance(content.get("provider"), dict) else None
+        url = None
+        for url_field in ("canonicalUrl", "clickThroughUrl"):
+            candidate = content.get(url_field)
+            if isinstance(candidate, dict) and candidate.get("url"):
+                url = candidate["url"]
+                break
+        summary = content.get("summary") or content.get("description")
+        published_raw = content.get("pubDate") or content.get("displayTime")
+        published_at = _parse_timestamp(published_raw)
+    else:
+        title = item.get("title")
+        publisher = item.get("publisher")
+        url = item.get("link")
+        summary = item.get("summary")
+        published_at = _parse_timestamp(item.get("providerPublishTime"))
+
+    if not title or not url or published_at is None:
+        return None
+
+    return {
+        "title": title,
+        "url": url,
+        "publisher": publisher,
+        "summary": summary,
+        "published_at": published_at,
+        "raw": item,
+    }
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Accepts a unix timestamp (legacy shape) or an ISO-8601 string
+    (newer shape). Returns None -- never a guessed date -- for anything
+    else."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=UTC).replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
+    return None
 
 
 def _current_recommendation_counts(frame: pd.DataFrame) -> dict[str, int | None]:

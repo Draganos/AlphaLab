@@ -50,6 +50,11 @@ AlphaLab is organized into two kinds of evidence today:
   Calibration (Phase 2, step 2 / "Phase 2B"). Produces one of
   `ALIGNED`/`CONFLICT`/`NEUTRAL`/`INSUFFICIENT_DATA` — **no numeric score,
   and no code path into any scoring or ranking calculation** — see §17.
+- **News Engine** (`alpha_lab.news`, Phase 2C) — a PIT-safe news evidence
+  layer: ingestion → validated/stored article → deterministic read
+  exposure only. **No sentiment, no relevance score, no NewsImpact
+  classification, and no code path into any scoring or ranking
+  calculation** — see §19.
 
 ## 2. Deterministic components
 
@@ -68,7 +73,7 @@ involvement.
 | Calibration parsing (`alpha_lab.providers.donatien`) | Donatien's `<pre class="cal-json">` HTML block | `DonatienCalibration` (validated, normalized) | `current_external_calibration`, `external_calibration_snapshots` | `source_observed_at`, `retrieved_at` | **No — zero scoring authority in Phase 1** |
 | Alignment (`alpha_lab.alignment.alignment`) | Already-computed `MacroAssessment` + `DonatienCalibration` (no network) | `AlignmentAssessment` (categorical `alignment` + audit fields, no score) | `current_alignment_assessment`, `alignment_assessment_snapshots` | `as_of`, `computed_at` | **No — categorical comparison only, no scoring authority** |
 | CalibrationAlignment (`alpha_lab.calibration.sector_alignment`) | `Security.sector` (yfinance/Morningstar) + already-stored `CurrentExternalCalibration` (no network) | `list[SectorTierWeight]` (Donatien's own published `pct` per matching tier line) | None — recomputed fresh on every call | n/a (no persistence) | **No — data connection only, no verdict, no scoring authority** |
-| News metadata | — | **FUTURE / NOT IMPLEMENTED** (`ResearchNewsProvider` interface exists; no implementation) | — | — | — |
+| News Engine (`alpha_lab.news`) | `YFinanceProvider.get_news` (recent Yahoo Finance news items, per ticker) | `NewsArticle` (validated, deduplicated) | `news_articles` (append-only, no `Current*` counterpart) | `published_at`, `retrieved_at`, `created_at` | **No — evidence only, no sentiment/relevance/classification, no scoring authority** |
 | Backtesting (`alpha_lab.backtest`) | `HistoricalScoringService` output | `BacktestResult` (Sharpe, drawdown, turnover, ...) | `backtest_runs` | `created_at` | Yes (evaluates ranking, doesn't rank live) |
 
 ## 3. AI-derived components
@@ -98,9 +103,12 @@ nothing in this phase built toward them beyond leaving the door open (e.g.
 Donatien's stored timestamps are structured so a future point-in-time
 integration is possible, without that integration existing yet):
 
-- **News Engine** — no ingestion, no model, no provider implementation.
-  `alpha_lab.providers.interfaces.ResearchNewsProvider` is an abstract
-  interface with zero implementations.
+- **News Engine** (`alpha_lab.news`, §19) is now implemented, but only as
+  an evidence layer: ingestion → validated/stored article →
+  deterministic read exposure. The following remain **NOT IMPLEMENTED**:
+  - **NewsImpact** — a future classification of news events against
+    existing theses/calibration (distinct from the News Engine itself,
+    which only stores and exposes articles verbatim).
 - **Full Macro Engine** — `alpha_lab.macro` (§16) implements a narrow,
   market-proxy-only regime read (VIX, yield curve, USD, oil, gold via
   yfinance). It does NOT implement official economic data (CPI, GDP,
@@ -116,8 +124,6 @@ integration is possible, without that integration existing yet):
   at Donatien's own published weight) — not a categorical verdict, and not
   built on a real GICS taxonomy (see §18's disclosed approximation). The
   following remain **NOT IMPLEMENTED**:
-  - **NewsImpact** — a future classification of news events against
-    existing theses/calibration.
   - **Full Conviction Layer** — a cross-domain agreement/conflict
     assessment spanning more than Market Regime + Donatien (e.g. adding
     News, Analyst Consensus, or AI Research Rating as further inputs).
@@ -125,6 +131,8 @@ integration is possible, without that integration existing yet):
     concept — not the full layer — and per the project brief must never
     become a simple average when the fuller version is built.
   - **Signal Conflict Detection** beyond §17's two-input case.
+  - **NewsImpact** (see above) is itself a prerequisite input to a future
+    Full Conviction Layer, not something this bullet duplicates.
 - **Ranking integration for Donatien/News/Macro/Alignment** — not
   implemented, and must not be added without empirical backtest validation
   per the project brief.
@@ -595,3 +603,103 @@ pages).
 layer). `test_no_alignment_verdict_or_score_field_on_sector_tier_weight`
 structurally asserts the output model carries no score/verdict/confidence
 field.
+
+## 19. News Engine (Phase 2C)
+
+Scope (approved before implementation, following a dedicated sequencing
+decision after §18 shipped): an evidence layer only —
+`ingestion -> validated/stored article -> deterministic read exposure`.
+No sentiment, no relevance score, no `NewsImpact` classification, no
+conviction, and no code path into `alpha_lab.research`/`.screener`/
+`.strategy`/`.backtest`/`.portfolio`/`.ratings`/`.factors`.
+
+**Provider**: `YFinanceProvider.get_news` (`alpha_lab.providers.yfinance_provider`),
+implementing the previously-unused `ResearchNewsProvider` interface,
+reusing the existing `call_with_classification` error-classification
+wrapper (no new provider-error taxonomy). Chosen over a paid
+aggregator/API-key source or a per-company RSS registry because it
+requires no new dependency (yfinance is already pinned) and is already
+ticker-scoped, which also settles entity association for free (see
+below).
+
+**Schema caveat, disclosed rather than glossed over**: yfinance's news
+JSON shape has changed across library versions (an older flat
+`{title, link, publisher, providerPublishTime}` shape and a newer nested
+`{"content": {...}}` shape), and this environment has no network access
+to confirm which shape is live today. `_normalize_news_item` tries both
+known shapes and returns `None` for anything matching neither — such an
+item is dropped, never guessed into a fabricated record. If the live
+shape turns out to be a third, unrecognized form, every item is safely
+dropped (an honest empty result) rather than silently returning wrong
+data.
+
+**Coverage caveat** (mirrors §16's "market-derived proxies, never
+official data" honesty pattern): `get_news` returns whatever Yahoo
+currently has cached for a ticker — a handful of recent items, not a
+historical archive. A refresh can only ever capture news *from the point
+it is run onward*; it can never retroactively backfill news that existed
+before AlphaLab first refreshed a given ticker. This must never be
+presented as a source capable of validating a backtest against news from
+before the feature existed.
+
+**Ticker/entity association**: by construction, not fuzzy resolution —
+`get_news(ticker)` is already scoped to one `Security.ticker` per call,
+exactly like `IngestionService.ingest(ticker, ...)`. No entity-resolution
+logic was introduced or is needed.
+
+**Persistence**: `news_articles` (`alpha_lab.database.models.NewsArticleRecord`)
+is append-only with **no `Current*` counterpart** — a deliberate departure
+from the `Current*`/`*Snapshot` pattern used by Macro Regime/Donatien/
+Alignment, because News is inherently a growing log of many observations
+per ticker over time (mirroring `SECCompanyFact`'s shape), not a single
+"latest state" to upsert. Deduplication is a `UniqueConstraint` on
+`content_hash` (`alpha_lab.news.article.compute_content_hash`, over
+`{ticker, url, title, published_at}` — deliberately excluding
+`publisher`/`summary`, since a provider correcting either must not be
+treated as a new article).
+
+**Point-in-time correctness**. Three distinct timestamps, never
+substituted for one another:
+
+| Field | Meaning | PIT role |
+|---|---|---|
+| `published_at` | The source's own claimed publication time | Informational only — display/windowing (`since`/`until`), **never** the eligibility boundary |
+| `retrieved_at` | When AlphaLab's own refresh actually observed and stored this article | **The sole PIT eligibility boundary** |
+| `created_at` | Database write time | Pure bookkeeping, never queried |
+
+`NewsService.get_history(ticker, as_of=...)` filters
+`retrieved_at <= end_of(as_of)` — the identical convention already used by
+`ExternalCalibrationService.get_calibration_as_of`, for the identical
+reason confirmed correct in the Phase 2B PIT review: an article whose
+`published_at` predates a historical `as_of` but whose `retrieved_at` is
+*after* it must never leak into that historical query, because AlphaLab
+genuinely did not have it stored yet. Verified by
+`tests/test_news_service.py::test_as_of_excludes_an_article_retrieved_after_the_query_date`.
+
+**Validation/failure semantics**: required fields are a non-empty title,
+a well-formed `http(s)` URL, and a parseable `published_at`
+(`alpha_lab.news.article.parse_news_article`) — any record missing one is
+dropped individually (never fabricated), never aborting the rest of the
+batch. Provider-call failures are classified via the existing
+`ProviderErrorKind` taxonomy and raised before any database write
+(fetch-before-write), so a failed refresh leaves every previously stored
+article, for every ticker, completely untouched — verified by
+`tests/test_news_service.py::test_a_later_failed_refresh_never_erases_previously_stored_articles`.
+
+**Refresh/UI**: explicit only — `scripts/refresh_news.py <tickers...>` or
+the "Refresh news for this ticker" button on
+`app/dashboard/pages/4_Company_Research.py`. No page load or ticker change
+ever fetches news. Placed as a section on the existing Company Research
+page (per-security evidence), not a new dedicated page — mirroring §18's
+placement, not §16/§17's (global market evidence).
+
+**Non-integration with existing scoring**: identical guarantee to every
+other evidence layer — verified by
+`tests/test_news_regression.py::test_no_scoring_module_imports_the_news_code`
+(static import-boundary check) and
+`::test_historical_scoring_is_identical_with_and_without_news_articles`
+(bit-identical `HistoricalScoringService` regression).
+
+**Not implemented in this step** (see §5): `NewsImpact` (classification of
+news against theses/calibration), sentiment/relevance scoring, any News
+input to the Full Conviction Layer, and any ranking/backtest integration.
