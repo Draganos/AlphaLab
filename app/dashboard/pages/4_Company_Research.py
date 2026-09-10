@@ -4,6 +4,7 @@ import streamlit as st
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from alpha_lab.calibration.sector_alignment import get_sector_tier_weights_for_ticker
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
@@ -533,6 +534,39 @@ try:
         )
 
     _render_stock_research(research, quote=quote)
+
+    st.divider()
+    st.subheader("Donatien External Calibration — sector context (audit-only)")
+    st.caption(
+        "Which of Donatien's own published tier weight lines reference this "
+        "security's sector, and at exactly the weight Donatien published — "
+        "not a new score, not an alignment verdict, and not a ranking "
+        "input. The sector match uses a best-effort Morningstar-to-GICS "
+        "name correspondence (AlphaLab's `sector` field is Morningstar's "
+        "taxonomy via yfinance, not verified GICS), so treat this as "
+        "informational context, never as certified sector classification."
+    )
+    sector_weights = get_sector_tier_weights_for_ticker(engine, ticker)
+    if not sector_weights:
+        st.info(
+            "No Donatien tier weight line matches this security's sector "
+            "(or no calibration/sector data is available)."
+        )
+    else:
+        st.dataframe(
+            [
+                {
+                    "Tier": row.tier,
+                    "Matched GICS sector": row.gics_sector,
+                    "Weight %": row.pct,
+                    "Vehicle": row.vehicle,
+                    "Line": row.line_name,
+                }
+                for row in sector_weights
+            ],
+            width="stretch",
+            hide_index=True,
+        )
 
     st.divider()
     st.subheader("Refresh Analyst Consensus, Technical Summary & AI Research")
