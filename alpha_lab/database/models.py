@@ -572,6 +572,41 @@ class AlignmentAssessmentSnapshot(Base):
     )
 
 
+class NewsArticleRecord(Base):
+    """One validated news article for one security. Append-only, immutable
+    once written -- there is no `Current*` counterpart, unlike Macro
+    Regime/Donatien/Alignment: News is inherently a growing log of many
+    observations per ticker over time (mirroring `SECCompanyFact`'s
+    shape), not a single "latest state" to upsert.
+
+    PIT-critical fields: `retrieved_at` (when AlphaLab's own refresh
+    actually observed this article -- the sole point-in-time availability
+    boundary) and `content_hash` (identity, so a re-fetch of the same
+    article is idempotent rather than a duplicate observation).
+    `published_at` is the source's own claimed publication time --
+    informational only, never used to decide historical query eligibility
+    (see `alpha_lab.news.service.NewsService.get_history`).
+    `created_at` is pure database bookkeeping, never used in a query.
+    """
+
+    __tablename__ = "news_articles"
+    __table_args__ = (UniqueConstraint("content_hash", name="uq_news_articles_content_hash"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(1024))
+    publisher: Mapped[str | None] = mapped_column(String(255))
+    url: Mapped[str] = mapped_column(String(2048))
+    summary: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    provider: Mapped[str] = mapped_column(String(64))
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class CurrentAIResearchAssessment(Base):
     """Current AI Research Rating, one row per ticker. See
     CurrentAnalystConsensus's docstring for the upsert/failure semantics;

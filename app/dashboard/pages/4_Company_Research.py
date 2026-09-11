@@ -8,8 +8,10 @@ from alpha_lab.calibration.sector_alignment import get_sector_tier_weights_for_t
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
+from alpha_lab.news import NewsService
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers import YFinanceProvider
+from alpha_lab.providers.errors import ProviderError
 from alpha_lab.research import CATEGORY_LABELS, CATEGORY_ORDER, ResearchService
 from alpha_lab.research.ai_rating import DIMENSION_NAMES
 from alpha_lab.research.supplemental_service import SupplementalResearchService
@@ -567,6 +569,52 @@ try:
             width="stretch",
             hide_index=True,
         )
+
+    st.divider()
+    st.subheader("News (evidence only)")
+    st.caption(
+        "Stored news articles for this ticker, exactly as reported — no "
+        "sentiment, no relevance score, no NewsImpact classification, and "
+        "no effect on the Alpha score, ranking, or portfolio weights. "
+        "Opening this page or changing the ticker never fetches news; only "
+        "the explicit refresh below does."
+    )
+    news_service = NewsService(engine)
+    articles = news_service.get_history(ticker, limit=20)
+    if not articles:
+        st.info(
+            "No news has been refreshed yet for this ticker. Use the "
+            "explicit refresh below, or run "
+            "`python scripts/refresh_news.py " + ticker + "`."
+        )
+    else:
+        st.dataframe(
+            [
+                {
+                    "Published": row.published_at,
+                    "Title": row.title,
+                    "Publisher": _dash(row.publisher),
+                    "URL": row.url,
+                    "Retrieved (UTC)": row.retrieved_at,
+                }
+                for row in articles
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    if st.button("🔄 Refresh news for this ticker", key="refresh_news"):
+        with st.spinner(f"Refreshing news for {ticker}..."):
+            try:
+                result = news_service.refresh(YFinanceProvider(), ticker)
+            except ProviderError as error:
+                st.error(f"News not refreshed: {error.kind.value} — {error.reason}")
+            else:
+                st.success(
+                    f"Refresh complete — fetched {result.fetched}, stored "
+                    f"{result.stored} new, {result.duplicates} already known, "
+                    f"{result.invalid} invalid/skipped. Reload the page to see "
+                    "the updated list above."
+                )
 
     st.divider()
     st.subheader("Refresh Analyst Consensus, Technical Summary & AI Research")
