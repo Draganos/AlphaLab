@@ -15,7 +15,8 @@ from alpha_lab.config import load_settings
 from alpha_lab.database.models import Price
 from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
-from alpha_lab.strategy import HistoricalScoringService, interpretation
+from alpha_lab.screener import MarketScreenerService
+from alpha_lab.search import ScreenCriteria, ScreenRecord, apply_screen
 
 st.set_page_config(page_title="AlphaLab", page_icon="α", layout="wide")
 settings = load_settings()
@@ -31,24 +32,73 @@ create_schema(engine)
 
 @st.cache_data(ttl=900)
 def build_screener() -> pd.DataFrame:
-    evaluation_date = date.today()
-    scores = HistoricalScoringService(engine, settings).score_universe_as_of(
-        evaluation_date, tickers=settings.universe.get("us", [])
-    )
-    if not scores:
+    """Canonical current-research read -- same MarketScreenerService.read_current_research()
+    + ScreenRecord/apply_screen mapping used by app/dashboard/pages/3_Market_Screener.py,
+    so both pages agree on ticker/company/price/market cap/category scores/overall
+    score/coverage/data quality/Sharia status for the same current research build.
+    Never rebuilds, never calls a provider, never scores anything itself -- a pure
+    database read (see MarketScreenerService.read_current_research's own docstring),
+    safe to cache and safe on every page load. Returns an empty DataFrame when no
+    current research build has been persisted yet; callers must not fabricate rows
+    for that case. This intentionally does not touch HistoricalScoringService --
+    that engine remains reserved for the point-in-time backtester."""
+    records = MarketScreenerService(engine, settings).read_current_research()
+    if not records:
         return pd.DataFrame()
-    rows = []
-    for score in scores:
-        category = score.category_scores
-        rows.append({"Ticker": score.ticker, "Company": score.company, "Sector": score.sector,
-                     "Price": score.raw_factors.get("last_price"), "Composite score": score.score,
-                     "Raw interpretation": interpretation(score.score),
-                     "Confidence label": score.confidence_label, "Data coverage": score.coverage,
-                     "Eligibility": "Eligible" if score.eligible else f"Excluded: {score.exclusion_reason}",
-                     "EPS score": category["earnings"], "Revision score": None, "Valuation score": None,
-                     "Momentum score": category["momentum"], "Quality score": category["fundamentals"],
-                     "Balance sheet score": category["balance_sheet"],
-                     "Dividend score": None, "AI score": None})
+    screen_records = [
+        ScreenRecord(
+            ticker=item.ticker,
+            company_name=item.company,
+            country=item.country,
+            exchange=item.exchange,
+            sector=item.sector,
+            industry=item.industry,
+            themes=item.themes,
+            ethical_status=item.ethical_status,
+            overall_score=item.overall_score,
+            growth_score=item.category_scores.get("earnings_growth"),
+            revisions_score=item.category_scores.get("analyst_revisions"),
+            quality_score=item.category_scores.get("business_quality"),
+            valuation_score=item.category_scores.get("valuation"),
+            momentum_score=item.category_scores.get("momentum"),
+            financial_strength_score=item.category_scores.get("financial_strength"),
+            ai_research_score=item.category_scores.get("ai_research"),
+            shareholder_return_score=item.category_scores.get("shareholder_return"),
+            debt_to_ebitda=item.raw_metrics.get("debt_ebitda"),
+            market_cap=item.market_cap,
+            coverage=item.overall_live_coverage,
+        )
+        for item in records
+    ]
+    # Every ethical status is included here (unlike 3_Market_Screener.py's default
+    # PASS-only widget) so this summary table never silently drops a security --
+    # Sharia Status is displayed as its own column instead.
+    all_statuses = ScreenCriteria(ethical_status=["PASS", "REVIEW", "EXCLUDED", "UNKNOWN"])
+    selected = apply_screen(screen_records, all_statuses)
+    indexed = {item.ticker: item for item in records}
+    rows = [
+        {
+            "Ticker": item.ticker,
+            "Company": item.company_name,
+            "Price": indexed[item.ticker].price,
+            "Market Cap": item.market_cap,
+            "Sector": item.sector,
+            "Industry": item.industry,
+            "Overall Rating": item.overall_score,
+            "Growth": item.growth_score,
+            "Revisions": item.revisions_score,
+            "Quality": item.quality_score,
+            "Valuation": item.valuation_score,
+            "Momentum": item.momentum_score,
+            "Financial Strength": item.financial_strength_score,
+            "AI Rating": item.ai_research_score,
+            "Shareholder Return": item.shareholder_return_score,
+            "Coverage": item.coverage,
+            "Data Quality": indexed[item.ticker].data_quality_status,
+            "Sharia Status": item.ethical_status,
+        }
+        for item in selected
+    ]
     return pd.DataFrame(rows)
 
 
@@ -64,25 +114,25 @@ right.write(f"Paper starting value setting: AED {settings.paper_trading['initial
 st.header("Stock Screener")
 screen = build_screener()
 if screen.empty:
-    st.warning("No securities are loaded. Run `python scripts/load_us_data.py` with network access. AlphaLab will not fabricate sample prices.")
+    st.info(
+        "No persisted current research build exists. Run "
+        "`python scripts/rebuild_research.py` after loading data."
+    )
 else:
     sectors = sorted(screen["Sector"].dropna().unique())
     selected = st.multiselect("Sector", sectors)
-    minimum = st.slider("Minimum composite score", 0, 100, 0)
-    filtered = screen[(screen["Composite score"].fillna(-1) >= minimum)]
+    minimum = st.slider("Minimum overall rating", 0, 100, 0)
+    filtered = screen[(screen["Overall Rating"].fillna(-1) >= minimum)]
     if selected:
         filtered = filtered[filtered["Sector"].isin(selected)]
-    low_confidence = filtered["Confidence label"].str.startswith(("Insufficient", "Provisional"), na=False).sum()
-    if low_confidence:
-        st.warning(f"{low_confidence} displayed score(s) have insufficient or provisional data coverage.")
     st.dataframe(filtered, width="stretch", hide_index=True, column_config={
-        "Data coverage": st.column_config.ProgressColumn("Data coverage", min_value=0.0, max_value=1.0,
-                                                         format="percent"),
-        "Confidence label": st.column_config.TextColumn("Coverage confidence"),
+        "Coverage": st.column_config.ProgressColumn("Coverage", min_value=0.0, max_value=1.0,
+                                                     format="percent"),
     })
     ticker = st.selectbox("Factor breakdown", filtered["Ticker"] if not filtered.empty else screen["Ticker"])
     row = screen.set_index("Ticker").loc[ticker]
-    factor_columns = [c for c in screen if c.endswith("score") and c != "Composite score"]
+    factor_columns = ["Growth", "Revisions", "Quality", "Valuation", "Momentum",
+                       "Financial Strength", "AI Rating", "Shareholder Return"]
     chart = pd.DataFrame({"Factor": factor_columns, "Score": [row[c] for c in factor_columns]}).dropna()
     if chart.empty:
         st.warning("Factor inputs are unavailable for this security.")
@@ -104,4 +154,4 @@ for ticker, observed in latest_by_ticker.items():
                          "Detail": issue.detail if issue else "Current within configured limit"})
 if quality_rows:
     st.dataframe(pd.DataFrame(quality_rows), hide_index=True, width="stretch")
-st.caption("Estimate revisions, valuation, dividend, and AI inputs are marked unavailable/unsupported in Phase 1 rather than imputed.")
+st.caption("Unavailable evidence for any category (Growth, Revisions, Quality, Valuation, Momentum, Financial Strength, AI Rating, Shareholder Return) is shown as unavailable rather than imputed.")
