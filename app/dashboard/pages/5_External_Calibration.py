@@ -39,32 +39,63 @@ def _dash(value) -> str:
 
 
 def _render_calibration(calibration: DonatienCalibration) -> None:
+    """Every field below except `dominant_regime`/`scenario_weights`/`tiers`
+    is Optional on `DonatienCalibration` (see that model's docstring):
+    Donatien's live schema changed on 2026-09-14, and this page must render
+    correctly under either the original or the current shape -- a field
+    genuinely absent from whichever observation this is renders as "not
+    reported by source", never as a blank/crashed section and never as a
+    fabricated value."""
     st.subheader("Source data")
     left, right = st.columns(2)
     left.markdown(f"**Dominant regime**\n\n{calibration.dominant_regime}")
-    right.metric("Confidence", calibration.confidence)
+    right.metric("Confidence", _dash(calibration.confidence))
 
     st.markdown("**Scenario weights**")
     st.write(calibration.scenario_weights)
 
     columns = st.columns(2)
-    columns[0].metric("Defensiveness", calibration.defensiveness)
+    columns[0].metric("Defensiveness", _dash(calibration.defensiveness))
     columns[1].markdown("**Top drivers**")
-    columns[1].write(
-        {driver.name: driver.dominance for driver in calibration.top_drivers}
-    )
+    if calibration.top_drivers is None:
+        columns[1].caption("Not reported by source for this observation.")
+    else:
+        columns[1].write(
+            {driver.name: driver.dominance for driver in calibration.top_drivers}
+        )
 
     st.markdown("**Key changes**")
-    for change in calibration.key_changes:
-        st.markdown(f"- {change}")
+    if calibration.key_changes is None:
+        st.caption("Not reported by source for this observation.")
+    else:
+        for change in calibration.key_changes:
+            st.markdown(f"- {change}")
 
     st.markdown("**Trend / Contrarian split**")
-    st.write(calibration.trend_contrarian_split)
+    if calibration.trend_contrarian_split is None:
+        st.caption(
+            "Not reported at the top level for this observation "
+            "(see per-tier Trend % / Contrarian % below instead)."
+        )
+    else:
+        st.write(calibration.trend_contrarian_split)
+
+    if calibration.macro_report or calibration.note:
+        st.markdown("**Source notes**")
+        if calibration.macro_report:
+            st.caption(f"Referenced report: {calibration.macro_report}")
+        if calibration.note:
+            st.markdown(calibration.note)
 
     st.subheader("Tiers")
     for tier_name, tier in calibration.tiers.items():
         with st.expander(tier_name):
-            st.caption(tier.expected_behaviour)
+            if tier.expected_behaviour:
+                st.caption(tier.expected_behaviour)
+            if tier.trend_pct is not None or tier.contrarian_pct is not None:
+                st.caption(
+                    f"Trend % / Contrarian %: {_dash(tier.trend_pct)} / {_dash(tier.contrarian_pct)}"
+                )
             rows = [
                 {
                     "Line item": name,
@@ -72,6 +103,7 @@ def _render_calibration(calibration: DonatienCalibration) -> None:
                     "Asset class": line.asset_class,
                     "Vehicle": line.vehicle,
                     "GICS sector": _dash(line.gics_sector),
+                    "Tag": _dash(line.tag),
                 }
                 for name, line in tier.weights.items()
             ]

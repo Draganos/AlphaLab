@@ -56,6 +56,46 @@ def _payload(**overrides):
     return payload
 
 
+# Fetched live from https://donatien.ca on 2026-09-14 during the Phase 2G
+# schema investigation (see alpha_lab.providers.donatien's module-level
+# "Schema revision" docstring) -- trimmed to one tier/one weight line per
+# tier for brevity, but every key and value type here is exactly as
+# observed, not invented. Confirms the live schema no longer includes
+# run_time/confidence/defensiveness/top_drivers/key_changes/
+# trend_contrarian_split/tiers.*.expected_behaviour, and now includes
+# macro_report/note/tiers.*.trend_pct/tiers.*.contrarian_pct/
+# tiers.*.weights.*.tag, none of which the original CONFIRMED_PAYLOAD had.
+LIVE_PAYLOAD_2026_09_14 = {
+    "run_date": "2026-09-09",
+    "macro_report_date": "2026-09-09",
+    "macro_report": "MacroDriver_Weekly_20260909.html",
+    "dominant_regime": "Energy-shock stagflation, intensified",
+    "note": "Defensive-equity budget was cut and moved to ballast.",
+    "scenario_weights": {
+        "Deflationary Bust": 20,
+        "Energy-Shock Stagflation": 48,
+        "Reacceleration": 10,
+        "Soft Landing": 22,
+    },
+    "tiers": {
+        "Aggressive": {
+            "trend_pct": 80,
+            "contrarian_pct": 20,
+            "weights": {
+                "Energy": {
+                    "pct": 15,
+                    "asset_class": "equity",
+                    "vehicle": "XLE",
+                    "gics_sector": "Energy",
+                    "tag": "trend",
+                },
+                "Gold": {"pct": 12, "asset_class": "commodity", "vehicle": "GLD", "tag": "trend"},
+            },
+        },
+    },
+}
+
+
 # --- payload / schema --------------------------------------------------------
 
 
@@ -110,6 +150,58 @@ def test_malformed_nested_tier_fails_schema_validation():
 def test_unexpected_structure_top_level_not_an_object():
     with pytest.raises(ValidationError):
         parse_donatien_payload(["not", "an", "object"])  # type: ignore[arg-type]
+
+
+# --- schema revision (Phase 2G): both payload shapes must coexist -----------
+
+
+def test_confirmed_payload_still_parses_and_the_new_only_fields_are_none():
+    """The original schema must keep validating after the revision -- rows
+    persisted under it must remain readable (see test_calibration_service.py
+    for the persistence-level proof)."""
+    calibration = parse_donatien_payload(CONFIRMED_PAYLOAD)
+    assert calibration.macro_report is None
+    assert calibration.note is None
+    assert calibration.tiers["Aggressive"].trend_pct is None
+    assert calibration.tiers["Aggressive"].contrarian_pct is None
+    assert calibration.tiers["Aggressive"].weights["Gold"].tag is None
+
+
+def test_live_2026_09_14_payload_parses_successfully():
+    """The actual payload fetched live from donatien.ca during the Phase 2G
+    investigation -- not a hypothesis, the real response."""
+    calibration = parse_donatien_payload(LIVE_PAYLOAD_2026_09_14)
+    assert calibration.run_date == date(2026, 9, 9)
+    assert calibration.macro_report == "MacroDriver_Weekly_20260909.html"
+    assert calibration.note == "Defensive-equity budget was cut and moved to ballast."
+    assert calibration.tiers["Aggressive"].trend_pct == 80
+    assert calibration.tiers["Aggressive"].contrarian_pct == 20
+    assert calibration.tiers["Aggressive"].weights["Energy"].tag == "trend"
+
+
+def test_live_payload_shape_has_none_for_every_field_the_original_schema_required():
+    """The inverse of the confirmed-payload check above: fields the original
+    schema required are honestly None under the current live shape, never
+    fabricated or defaulted to something else."""
+    calibration = parse_donatien_payload(LIVE_PAYLOAD_2026_09_14)
+    assert calibration.run_time is None
+    assert calibration.confidence is None
+    assert calibration.defensiveness is None
+    assert calibration.top_drivers is None
+    assert calibration.key_changes is None
+    assert calibration.trend_contrarian_split is None
+    assert calibration.tiers["Aggressive"].expected_behaviour is None
+
+
+def test_still_rejects_a_field_unrecognized_under_either_schema():
+    """extra="forbid" must still fail loudly on a genuinely unknown field --
+    verified against the CURRENT live shape, not just the original one (see
+    test_unexpected_top_level_field_fails_schema_validation above for the
+    original-shape case)."""
+    payload = json.loads(json.dumps(LIVE_PAYLOAD_2026_09_14))
+    payload["a_third_schema_generation_field"] = "surprise"
+    with pytest.raises(ValidationError):
+        parse_donatien_payload(payload)
 
 
 # --- HTML extraction ---------------------------------------------------------
@@ -195,6 +287,21 @@ def test_provider_fetch_succeeds_with_a_valid_confirmed_payload(monkeypatch):
     assert result.calibration.dominant_regime.startswith("Stagflation-lite")
     assert result.content_hash == compute_content_hash(CONFIRMED_PAYLOAD)
     assert result.raw_payload == CONFIRMED_PAYLOAD
+
+
+def test_provider_fetch_succeeds_with_the_current_live_shape_payload(monkeypatch):
+    """End-to-end fetch -> extract -> parse -> validate against the actual
+    2026-09-14 live payload shape, not just the pure parse function."""
+    monkeypatch.setattr(
+        donatien_module,
+        "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(_html_for(LIVE_PAYLOAD_2026_09_14)),
+    )
+    provider = DonatienProvider("https://donatien.ca/fake")
+    result = provider.fetch()
+    assert result.calibration.tiers["Aggressive"].trend_pct == 80
+    assert result.content_hash == compute_content_hash(LIVE_PAYLOAD_2026_09_14)
+    assert result.raw_payload == LIVE_PAYLOAD_2026_09_14
 
 
 def test_provider_fetch_raises_network_unavailable_on_http_error(monkeypatch):
