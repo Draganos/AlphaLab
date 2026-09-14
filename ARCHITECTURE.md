@@ -703,3 +703,112 @@ other evidence layer — verified by
 **Not implemented in this step** (see §5): `NewsImpact` (classification of
 news against theses/calibration), sentiment/relevance scoring, any News
 input to the Full Conviction Layer, and any ranking/backtest integration.
+
+## 20. Donatien schema revision (Phase 2G)
+
+Donatien's live payload changed shape between when `DonatienCalibration`
+(§ above, `alpha_lab.providers.donatien`) was originally modeled and
+2026-09-14, when the live payload was fetched and inspected directly for
+the first time in an environment with real network access. Confirmed,
+field by field, against the actual response (not the earlier hypothesis
+from a validation-error message alone):
+
+- **No longer present**: `run_time`, `confidence`, `defensiveness`,
+  `top_drivers`, `key_changes`, `trend_contrarian_split`,
+  `tiers.<tier>.expected_behaviour`.
+- **Newly present**: top-level `macro_report` (a report filename) and
+  `note` (free text); per-tier `trend_pct`/`contrarian_pct` (the same
+  trend/contrarian concept `trend_contrarian_split` used to express as one
+  string like `"80/20"`, now pre-split into two numbers); per-weight-line
+  `tag` (`"trend"`/`"contra"` observed, no documented full vocabulary,
+  modeled as free text like `confidence`/`dominant_regime`).
+
+**Why every changed field became Optional rather than the model being
+replaced**: `ExternalCalibrationService.get_current_calibration()`/
+`get_history()` re-validate every previously persisted
+`normalized_payload` against `DonatienCalibration` on every read, not just
+at write time. A hard schema replacement would have made a row persisted
+under the original shape unreadable the moment this file changed. Every
+field that differs between the two observed shapes is therefore Optional
+(default `None`) on both sides, so one model accepts either shape; a field
+being `None` means the source did not report it under whichever shape
+produced that particular observation, never inferred from the other
+shape's equivalent field. `extra="forbid"` is unchanged at every level —
+a field neither shape has ever reported must still fail loudly, not be
+silently accepted.
+
+`app/dashboard/pages/5_External_Calibration.py` was updated to render
+every now-Optional field's absence explicitly (e.g. "Not reported by
+source for this observation") instead of the unconditional access that
+previously crashed (`TypeError: 'NoneType' object is not iterable` on
+`top_drivers`/`key_changes`) against the live payload — reproduced before
+the fix, confirmed clean after it.
+
+## 21. Analyst estimates (Phase 2H)
+
+`alpha_lab.database.models.Estimate` and its persistence helper
+(`alpha_lab.ingestion.estimates.snapshot_estimates`, content-hash-deduped,
+genuinely point-in-time) already existed but were never populated by any
+provider — `analyst_revisions` category coverage and `forward_pe`/
+`current_consensus_eps` were structurally always 0%/`None` for every
+security, not because of a code defect but because nothing had ever
+called `snapshot_estimates`.
+
+**Provider**: `YFinanceProvider.get_estimates` (`EstimateProvider`
+interface), using yfinance's `get_earnings_estimate()`/
+`get_revenue_estimate()` (available since the yfinance 1.7.0 already
+pinned; not previously wired up). Only the current/next **fiscal-year**
+consensus (`"0y"`/`"+1y"`) is captured. yfinance also exposes current/next
+**quarter** consensus (`"0q"`/`"+1q"`), but never an exact fiscal-period-
+end date for them — deriving one would mean adding 3/6 months to the
+company's last-reported-quarter-end, which for a company whose quarters
+end on a calendar month boundary (e.g. Dec 31) while an intervening
+quarter ends on a shorter month (e.g. Jun 30) can silently land a day off
+the true quarter-end (confirmed against real AAL/MA data during this
+investigation). Rather than persist a `fiscal_period` that could be
+fabricated by a day, the quarterly periods are not captured at all.
+`"0y"` uses the company's own `nextFiscalYearEnd` (from `get_info()`)
+directly; `"+1y"` is exactly 12 months after it — both precise, since a
+fiscal year is unambiguously 12 months and a 12-month step never crosses
+into a differently-sized month regardless of the anchor day.
+
+**Missing vs. no coverage**: an ETF's estimate call legitimately returns
+an empty result (confirmed live: yfinance itself returns an empty frame
+for FTEC/GDX, not an error) — this is "no analyst estimate coverage for
+this instrument type," structurally identical to how
+`get_analyst_consensus` already treats an ETF's missing `recommendationTrend`
+row. A period whose `avg` (consensus EPS) is missing is dropped, never
+zero-filled; `estimate_dispersion` is `None`, never `0`, when `low`/`high`
+are unavailable. A genuine provider failure (network, rate limit) still
+raises the existing classified `ProviderError` — distinct from, and never
+conflated with, a real empty result.
+
+**Refresh**: `scripts/refresh_estimates.py`, mirroring
+`refresh_supplemental_research.py`'s per-ticker failure isolation — one
+ticker's `ProviderError` never aborts the rest of the run and never
+erases that ticker's previously stored estimates; a no-coverage ticker is
+reported separately from a failure, never conflated with one.
+
+**Measured effect** (real 5-ticker universe, NVDA/MA/AAL/FTEC/GDX):
+`valuation` category coverage rose from 44% to 52% (the new `forward_pe`
+metric, fed by `current_consensus_eps` via the existing, unmodified
+`calculate_revision_factors`/`calculate_valuation_factors`) for the three
+equities with analyst estimate coverage; FTEC/GDX unchanged (genuinely no
+coverage). `analyst_revisions` category coverage remains 0% and will stay
+0% until a second, later refresh exists to compare against — revision
+history accumulates only from genuinely distinct future observations,
+never backfilled from today's snapshot. AI Research Rating gate behavior
+(pass/fail per ticker) is unchanged; only the underlying evidence-coverage
+number moved up slightly for the three equities, exactly as the existing,
+unmodified gates should respond to genuinely more evidence.
+
+**Not implemented in this step**: quarterly estimates (see above, blocked
+on precision, not a missing capability); `CompanyDocument` population —
+investigated (yfinance's `get_sec_filings()` returns filing metadata and
+links only, never the filing's own text, which `CompanyDocument.text`
+requires) and explicitly not implemented, since fetching and extracting
+text from each linked external filing page would be exactly the
+"scraping pages for financial-looking text" this phase's own rules
+forbid; estimate revision history for any of the five tickers (requires a
+second refresh at a later date, not something this phase can produce by
+construction).

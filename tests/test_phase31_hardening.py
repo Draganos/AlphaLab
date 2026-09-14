@@ -312,7 +312,12 @@ def test_streamlit_render_paths_read_snapshots_and_home_limits_legacy_universe()
     assert ".list_current_research()" in company and ".build_live_records()" not in company
     assert ".read_current_research()" in research_service
     assert ".build_live_records()" not in research_service
-    assert 'tickers=settings.universe.get("us", [])' in home
+    # Phase 2E: the home dashboard's Stock Screener was unified onto the same
+    # canonical current-research read every other render path already uses,
+    # replacing its prior direct call into HistoricalScoringService (a
+    # legacy, universe-scoped scoring run kept for the backtester only).
+    assert ".read_current_research()" in home and ".build_live_records()" not in home
+    assert "HistoricalScoringService(" not in home
     assert "ttl=900" in home
 
 

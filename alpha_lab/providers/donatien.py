@@ -25,6 +25,27 @@ nothing is invented. In particular:
   two separate numeric fields -- stored verbatim, never split.
 - ``tiers.<tier>.weights.<line>.gics_sector`` is present only for
   ``asset_class == "equity"`` rows; modeled as optional.
+
+Schema revision (Phase 2G, live payload fetched and inspected directly --
+see project brief): Donatien's live payload as of 2026-09-14 no longer
+includes ``run_time``, ``confidence``, ``defensiveness``, ``top_drivers``,
+``key_changes``, ``trend_contrarian_split``, or ``tiers.<tier>.expected_behaviour``
+at all, and now includes three fields the original schema never saw:
+top-level ``macro_report`` (a report filename) and ``note`` (free text), plus
+per-tier ``trend_pct``/``contrarian_pct`` (the same trend/contrarian split
+concept as the old ``trend_contrarian_split`` string, now pre-split into two
+numbers) and a per-weight-line ``tag`` (``"trend"``/``"contra"``, no
+documented full vocabulary -- modeled as free text like ``confidence``).
+Every field above is now Optional (default ``None``) rather than required,
+on both sides of the change, so a payload in either the original confirmed
+shape or the current live shape validates successfully under one model --
+this is a deliberate backwards-compatible schema (not a replacement),
+because ``ExternalCalibrationService.get_current_calibration``/history
+reads re-validate every previously persisted ``normalized_payload`` against
+*this* model on every read, not just at write time; an old-shape row must
+keep parsing after this change. ``extra="forbid"`` is deliberately kept at
+every level: a field this module has never observed under either shape must
+still fail loudly, never be silently accepted or dropped.
 """
 
 from datetime import UTC, date, datetime
@@ -64,13 +85,27 @@ class DonatienTierWeightLine(BaseModel):
     # Confirmed present only for equity rows in the observed payload; never
     # fabricated for commodity/fixed_income/cash rows.
     gics_sector: str | None = None
+    # Present only in the current (2026-09-14+) live schema -- free text
+    # ("trend"/"contra" observed), no documented full vocabulary, same
+    # honesty convention as `confidence`/`dominant_regime` below.
+    tag: str | None = None
 
 
 class DonatienTier(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_behaviour: str
+    # Present only in the original confirmed schema; absent from the current
+    # live payload (see module-level schema-revision note). None, never a
+    # fabricated placeholder, when the source didn't supply it.
+    expected_behaviour: str | None = None
     weights: dict[str, DonatienTierWeightLine]
+    # Present only in the current (2026-09-14+) live schema -- the same
+    # trend/contrarian split concept the original schema expressed as a
+    # single top-level string per tier (e.g. "84/16"), now pre-split into
+    # two numbers. Never derived from each other; each is exactly what the
+    # source reported for that field, or None if the source didn't supply it.
+    trend_pct: float | None = None
+    contrarian_pct: float | None = None
 
 
 class DonatienCalibration(BaseModel):
@@ -80,22 +115,47 @@ class DonatienCalibration(BaseModel):
     ``extra="forbid"`` at every level: an unrecognized field anywhere is a
     schema change AlphaLab has not verified, and must fail loudly rather
     than being silently dropped.
+
+    Every field below except `run_date`/`macro_report_date`/`dominant_regime`/
+    `scenario_weights`/`tiers` is Optional: this model accepts both the
+    original confirmed payload shape and the current (2026-09-14+) live
+    shape (see the schema-revision note above the class definitions in this
+    module) under one schema, because previously persisted rows are
+    re-validated against this exact model on every read
+    (`ExternalCalibrationService.get_current_calibration`/`get_history`) --
+    a row written under either shape must keep parsing after this file
+    changes. A field being `None` here means the source did not report it
+    under whichever shape produced this observation; it is never inferred
+    from the other shape's equivalent field.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     run_date: date
-    run_time: str
+    # Present only in the original confirmed schema; absent from the current
+    # live payload. No seconds/timezone even when present -- kept as the raw
+    # string, never assigned one.
+    run_time: str | None = None
     macro_report_date: date
     supersedes: str | None = None
     dominant_regime: str
-    confidence: str
+    # Present only in the original confirmed schema.
+    confidence: str | None = None
     scenario_weights: dict[str, float]
-    defensiveness: float
-    top_drivers: list[DonatienTopDriver]
-    key_changes: list[str]
-    trend_contrarian_split: dict[str, str]
+    # Present only in the original confirmed schema.
+    defensiveness: float | None = None
+    # Present only in the original confirmed schema.
+    top_drivers: list[DonatienTopDriver] | None = None
+    # Present only in the original confirmed schema.
+    key_changes: list[str] | None = None
+    # Present only in the original confirmed schema; superseded in the
+    # current live schema by per-tier `trend_pct`/`contrarian_pct` above.
+    trend_contrarian_split: dict[str, str] | None = None
     tiers: dict[str, DonatienTier]
+    # Present only in the current (2026-09-14+) live schema: a report
+    # filename reference and free-text note, both previously absent.
+    macro_report: str | None = None
+    note: str | None = None
 
 
 def parse_donatien_payload(raw_payload: dict[str, Any]) -> DonatienCalibration:

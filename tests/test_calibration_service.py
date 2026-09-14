@@ -6,10 +6,11 @@ from datetime import UTC, datetime
 import json
 
 import pytest
+from sqlalchemy.orm import Session
 
 from alpha_lab.calibration.service import DEFAULT_CALIBRATION_SOURCE, ExternalCalibrationService
 from alpha_lab.database import create_schema, make_engine
-from alpha_lab.database.models import ExternalCalibrationSnapshot
+from alpha_lab.database.models import CurrentExternalCalibration, ExternalCalibrationSnapshot
 from alpha_lab.providers.donatien import (
     DonatienFetchResult,
     compute_content_hash,
@@ -171,6 +172,71 @@ def test_get_current_and_get_history_return_none_or_empty_before_any_refresh(eng
     assert service.get_current() is None
     assert service.get_current_calibration() is None
     assert service.get_history() == []
+
+
+def test_a_row_persisted_under_the_original_schema_remains_readable_after_the_schema_revision(
+    engine,
+):
+    """The core Phase 2G regression: get_current_calibration()/get_history()
+    re-validate `normalized_payload` against DonatienCalibration on every
+    read, not just at write time (see ExternalCalibrationService's module
+    docstring and DonatienCalibration's own docstring). A row written back
+    when every field below was required must still parse after those fields
+    became Optional -- this writes the DB row directly, simulating a row
+    persisted before the schema revision, rather than going through
+    refresh() with today's provider."""
+    with Session(engine) as session:
+        session.add(
+            CurrentExternalCalibration(
+                source=DEFAULT_CALIBRATION_SOURCE,
+                content_hash=compute_content_hash(PAYLOAD),
+                source_run_date=None,
+                source_run_time_raw=PAYLOAD["run_time"],
+                retrieved_at=datetime.now(UTC),
+                schema_version="donatien-calibration-v1",
+                source_url="https://donatien.ca/fake",
+                raw_payload=PAYLOAD,
+                normalized_payload=PAYLOAD,
+            )
+        )
+        session.add(
+            ExternalCalibrationSnapshot(
+                snapshot_id="pre-revision-snapshot",
+                source=DEFAULT_CALIBRATION_SOURCE,
+                content_hash=compute_content_hash(PAYLOAD),
+                retrieved_at=datetime.now(UTC),
+                schema_version="donatien-calibration-v1",
+                source_url="https://donatien.ca/fake",
+                raw_payload=PAYLOAD,
+                normalized_payload=PAYLOAD,
+            )
+        )
+        session.commit()
+
+    service = ExternalCalibrationService(engine)
+    calibration = service.get_current_calibration()
+    assert calibration is not None
+    assert calibration.dominant_regime == PAYLOAD["dominant_regime"]
+    assert calibration.confidence == "Medium"
+    assert calibration.run_time == "20:15"
+    assert calibration.macro_report is None  # a field this old row never had
+
+    history = service.get_history()
+    assert len(history) == 1
+
+
+def test_refresh_succeeds_with_the_current_live_schema_payload(engine):
+    """The full service.refresh() path against the current (2026-09-14+)
+    Donatien payload shape, exercised the same way a real refresh would be."""
+    from tests.test_donatien_calibration import LIVE_PAYLOAD_2026_09_14
+
+    service = ExternalCalibrationService(engine)
+    current = service.refresh(_FakeProvider(LIVE_PAYLOAD_2026_09_14))
+    assert current.normalized_payload["dominant_regime"] == LIVE_PAYLOAD_2026_09_14["dominant_regime"]
+
+    calibration = service.get_current_calibration()
+    assert calibration.tiers["Aggressive"].contrarian_pct == 20
+    assert calibration.confidence is None  # this shape never had it
 
 
 def test_snapshot_id_is_stable_across_identical_source_and_hash(engine):

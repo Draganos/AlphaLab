@@ -9,15 +9,16 @@ zero, an empty frame, or a fabricated value.
 
 from datetime import UTC, date, datetime
 from typing import Any
+import calendar
 import math
 import pandas as pd
 
 from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.providers.errors import call_with_classification
-from alpha_lab.providers.interfaces import ResearchNewsProvider
+from alpha_lab.providers.interfaces import EstimateProvider, ResearchNewsProvider
 
 
-class YFinanceProvider(MarketDataProvider, ResearchNewsProvider):
+class YFinanceProvider(MarketDataProvider, ResearchNewsProvider, EstimateProvider):
     def _ticker(self, symbol: str):
         import yfinance as yf
 
@@ -165,6 +166,84 @@ class YFinanceProvider(MarketDataProvider, ResearchNewsProvider):
         }
 
 
+    def get_estimates(self, ticker: str, observation_date: date) -> list[dict[str, Any]]:
+        """Current consensus EPS/revenue estimates for `ticker`, as observed
+        on `observation_date` (always AlphaLab's own retrieval date, exactly
+        like ``get_analyst_consensus``'s ``as_of`` -- never a historical
+        reconstruction). Returns one dict per fiscal period yfinance reports
+        a usable estimate for; genuinely no analyst estimate coverage for
+        this ticker (confirmed live for ETFs: yfinance returns an empty
+        frame, not an error) returns an empty list, never fabricated rows.
+
+        Callers persist each call's result via
+        ``alpha_lab.ingestion.estimates.snapshot_estimates``, which content-
+        hash-dedupes so re-running this on an unchanged consensus is a
+        no-op -- revision history only ever accumulates from genuinely
+        distinct future calls, never backfilled from today's data.
+
+        yfinance exposes four relative periods ("0q"/"+1q" current/next
+        quarter, "0y"/"+1y" current/next fiscal year) but never an exact
+        fiscal-period-end date for the quarterly ones. Only "0y"/"+1y" are
+        captured here: "0y" uses this company's own ``nextFiscalYearEnd``
+        (from ``get_info()``) directly, and "+1y" is exactly 12 months
+        after it -- both precise, since a fiscal year is unambiguously 12
+        months and adding exactly 12 months never crosses into a
+        differently-sized month. The quarterly labels were deliberately
+        investigated and dropped: deriving their end date would mean adding
+        3/6 months to the last-reported-quarter-end, and for a company whose
+        quarters end on a calendar month boundary (e.g. Dec 31) while an
+        intermediate quarter ends on a shorter month (e.g. Jun 30), naive
+        month-arithmetic can land one day off the true quarter-end --
+        confirmed against real AAL/MA data during Phase 2H's investigation.
+        Rather than persist a `fiscal_period` that could be a fabricated
+        day off from the truth, the quarterly estimates are not captured at
+        all until a source of their exact date exists.
+        """
+        ticker_obj = self._ticker(ticker)
+        eps_frame = call_with_classification(
+            lambda: ticker_obj.get_earnings_estimate(), provider=self.provider_name
+        )
+        if eps_frame is None or eps_frame.empty:
+            return []
+        revenue_frame = call_with_classification(
+            lambda: ticker_obj.get_revenue_estimate(), provider=self.provider_name
+        )
+        info = call_with_classification(
+            lambda: ticker_obj.get_info(), provider=self.provider_name
+        )
+        anchors = _fiscal_anchors(info)
+
+        observations: list[dict[str, Any]] = []
+        for period_label, row in eps_frame.iterrows():
+            fiscal_period = _fiscal_period_for(str(period_label), anchors)
+            if fiscal_period is None:
+                continue
+            consensus_eps = _number(row.get("avg"))
+            if consensus_eps is None:
+                continue
+            consensus_revenue = None
+            if (
+                revenue_frame is not None
+                and not revenue_frame.empty
+                and period_label in revenue_frame.index
+            ):
+                consensus_revenue = _number(revenue_frame.loc[period_label].get("avg"))
+            low = _number(row.get("low"))
+            high = _number(row.get("high"))
+            analyst_count = row.get("numberOfAnalysts")
+            observations.append(
+                {
+                    "fiscal_period": fiscal_period,
+                    "consensus_eps": consensus_eps,
+                    "consensus_revenue": consensus_revenue,
+                    "analyst_count": int(analyst_count) if pd.notna(analyst_count) else None,
+                    "estimate_dispersion": (
+                        high - low if low is not None and high is not None else None
+                    ),
+                }
+            )
+        return observations
+
     def get_news(self, ticker: str, since: date | None = None) -> list[dict[str, Any]]:
         """Recent news items for `ticker`, best-effort normalized to
         `{title, url, publisher, summary, published_at, raw}`.
@@ -291,3 +370,47 @@ def _number(value: Any, *, positive: bool = False) -> float | None:
     if not math.isfinite(number) or (positive and number <= 0):
         return None
     return number
+
+
+def _epoch_to_date(value: Any) -> date | None:
+    """A yfinance ``get_info()`` unix-timestamp field (e.g. ``mostRecentQuarter``),
+    or None -- never a guessed date -- if absent or unparseable."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=UTC).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _fiscal_anchors(info: dict[str, Any]) -> dict[str, date | None]:
+    """Real, provider-given anchor date this ticker's year-relative
+    consensus-estimate periods are derived from -- never guessed."""
+    return {"next_fiscal_year_end": _epoch_to_date(info.get("nextFiscalYearEnd"))}
+
+
+def _add_months(value: date, months: int) -> date:
+    total_month_index = value.month - 1 + months
+    year = value.year + total_month_index // 12
+    month = total_month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _fiscal_period_for(period_label: str, anchors: dict[str, date | None]) -> date | None:
+    """Derive the fiscal-period-end date for one of yfinance's relative
+    consensus-estimate period labels. Only "0y" (this company's own
+    ``next_fiscal_year_end``, used directly) and "+1y" (exactly 12 months
+    after it) are supported -- both precise. "0q"/"+1q" are deliberately
+    unsupported (return None, never a fabricated date): see
+    ``YFinanceProvider.get_estimates``'s docstring for why their end date
+    cannot be derived precisely from what ``get_info()`` reports.
+    """
+    next_fiscal_year_end = anchors.get("next_fiscal_year_end")
+    if next_fiscal_year_end is None:
+        return None
+    if period_label == "0y":
+        return next_fiscal_year_end
+    if period_label == "+1y":
+        return _add_months(next_fiscal_year_end, 12)
+    return None
