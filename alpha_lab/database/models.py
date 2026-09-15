@@ -122,6 +122,91 @@ class Estimate(Base):
     )
 
 
+class AnalystRatingChange(Base):
+    """One immutable analyst rating-change event (upgrade/downgrade/init/
+    reiteration), append-only. Distinct from `Estimate`/`EstimateRevisionTrend`:
+    this is a discrete graded event with its own real historical
+    `grade_date` (as reported by the source), not a periodic consensus
+    snapshot. Distinct from `CurrentAnalystConsensus`: this is never
+    upserted or summarized into a single "current" row -- see
+    `alpha_lab.research.analyst_events`'s module docstring for the full
+    three-layer distinction (Consensus / Rating Changes / Revision Trend).
+
+    A provider refresh backfills full history in one call (yfinance's
+    upgradeDowngradeHistory returns the entire event log, not only new
+    events since the last run); `content_hash` makes re-persisting that
+    same history idempotent rather than duplicating rows.
+    """
+
+    __tablename__ = "analyst_rating_changes"
+    __table_args__ = (
+        UniqueConstraint("content_hash", name="uq_analyst_rating_changes_content_hash"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    grade_date: Mapped[datetime] = mapped_column(DateTime, index=True)
+    firm: Mapped[str | None] = mapped_column(String(255))
+    to_grade: Mapped[str | None] = mapped_column(String(64))
+    from_grade: Mapped[str | None] = mapped_column(String(64))
+    action: Mapped[str | None] = mapped_column(String(32))
+    price_target_action: Mapped[str | None] = mapped_column(String(32))
+    current_price_target: Mapped[float | None] = mapped_column(Float)
+    prior_price_target: Mapped[float | None] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str | None] = mapped_column(String(512))
+    retrieved_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class EstimateRevisionTrend(Base):
+    """A point-in-time snapshot of the source's OWN reported EPS-estimate
+    trend and revision-count history for one fiscal period, as of
+    `observation_date`. Distinct from `Estimate`: `Estimate` stores
+    AlphaLab's own repeated-observation history of a single consensus
+    value (`consensus_eps`), from which `alpha_lab.ratings.estimates.
+    calculate_revision_factors` DERIVES a revision signal only after
+    multiple AlphaLab observations accumulate over real elapsed time.
+    This table instead stores the source's own already-computed
+    current/7-day-ago/30-day-ago/60-day-ago/90-day-ago EPS trend and
+    analysts-revising-up/down counts, available from a SINGLE live call
+    (yfinance's earningsTrend module) -- genuine revision evidence with
+    no accumulation delay. Never feeds `alpha_lab.screener.service`'s
+    `analyst_revisions` scoring category or any other scoring input; see
+    `alpha_lab.research.analyst_events`'s module docstring.
+
+    `fiscal_period` reuses the same precise annual-only anchor as
+    `Estimate.fiscal_period` (see `YFinanceProvider.get_estimates`'s
+    docstring on why quarterly periods are never captured) -- both tables
+    derive it from the same `_fiscal_period_for`/`_fiscal_anchors` helpers,
+    so a period recorded here always matches the corresponding `Estimate`
+    row's period exactly.
+    """
+
+    __tablename__ = "estimate_revision_trends"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
+    observation_date: Mapped[date] = mapped_column(Date, index=True)
+    fiscal_period: Mapped[date] = mapped_column(Date)
+    eps_trend_current: Mapped[float | None] = mapped_column(Float)
+    eps_trend_7d_ago: Mapped[float | None] = mapped_column(Float)
+    eps_trend_30d_ago: Mapped[float | None] = mapped_column(Float)
+    eps_trend_60d_ago: Mapped[float | None] = mapped_column(Float)
+    eps_trend_90d_ago: Mapped[float | None] = mapped_column(Float)
+    revisions_up_last_7d: Mapped[int | None] = mapped_column(Integer)
+    revisions_up_last_30d: Mapped[int | None] = mapped_column(Integer)
+    revisions_down_last_7d: Mapped[int | None] = mapped_column(Integer)
+    revisions_down_last_30d: Mapped[int | None] = mapped_column(Integer)
+    currency: Mapped[str | None] = mapped_column(String(8))
+    provider: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str | None] = mapped_column(String(512))
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+    observation_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+
+
 class CompanyDocument(Base):
     __tablename__ = "company_documents"
     id: Mapped[int] = mapped_column(primary_key=True)

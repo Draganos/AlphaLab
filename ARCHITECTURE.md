@@ -812,3 +812,88 @@ text from each linked external filing page would be exactly the
 forbid; estimate revision history for any of the five tickers (requires a
 second refresh at a later date, not something this phase can produce by
 construction).
+
+## 22. Analyst rating changes & estimate revision trend (Phase 2I)
+
+Two further, deliberately separate analyst-evidence layers, alongside the
+two that already existed: Analyst Consensus (§ `analyst_consensus.py`,
+"what analysts currently think", one upserted row per ticker) and the
+pre-existing `analyst_revisions` **scoring category**
+(`alpha_lab.ratings.estimates.calculate_revision_factors`, derived from
+accumulated `Estimate` observations, feeding `StockResearch.overall_score`).
+Neither new layer touches the scoring category, `Estimate`, or
+`StockResearch.overall_score` — both are supplemental research evidence
+only, exactly like Analyst Consensus / Technical Summary / AI Research
+Rating. See `alpha_lab.research.analyst_events`'s module docstring for the
+full four-layer map.
+
+**Investigation** (live probe against NVDA/MA/AAL/FTEC/GDX,
+`YF_DISABLE_CURL_CFFI=1`): confirmed `yf.Ticker.get_upgrades_downgrades()`
+returns a ticker's ENTIRE rating-change history in one call (real
+historical `GradeDate` per row — 986/515/409 rows for NVDA/MA/AAL), and
+`get_eps_trend()`/`get_eps_revisions()` return the source's own already-
+computed EPS-consensus trend (current/7/30/60/90-days-ago) and analyst
+up/down revision counts per fiscal period from a single call — genuine
+revision evidence with no multi-run accumulation delay, unlike
+`calculate_revision_factors`. `TechnicalSummary.overall_rating`/
+`moving_average_rating`/`oscillator_rating` were confirmed (code and UI:
+`_render_technical_summary_panel`) to already exist and already render —
+no technical-code changes were made this phase.
+
+**Analyst Rating Changes**: `AnalystRatingChange` — append-only, no
+`Current*` counterpart (mirrors `NewsArticleRecord`: a discrete graded
+event with its own real historical date, not a periodic snapshot).
+`YFinanceProvider.get_analyst_rating_changes` (new `AnalystEventProvider`
+interface); `alpha_lab.ingestion.analyst_events.snapshot_analyst_rating_changes`
+content-hash-dedupes, so re-persisting the same full history on every
+refresh (the source always returns everything, not deltas) is idempotent.
+A price target of exactly `0` (yfinance's placeholder when an initiation
+has no prior target) is normalized to `None` — never presented as a real
+$0 target.
+
+**Estimate Revision Trend**: `EstimateRevisionTrend` — a point-in-time
+snapshot of the source's own trend/revision-count reading, keyed by the
+same precise annual-only (`"0y"`/`"+1y"`) `fiscal_period` anchor as
+`Estimate` (the identical quarterly-date-precision exclusion from Phase
+2H applies here — the same `_fiscal_anchors`/`_fiscal_period_for` helpers
+are reused). `alpha_lab.ingestion.estimate_revisions.snapshot_estimate_revisions`
+content-hash-dedupes per observation.
+
+**Read/orchestration**: `alpha_lab.research.analyst_events.AnalystEventsService`
+— pure DB reads (`get_rating_changes`, `get_latest_revision_trend`, the
+latter returning only the newest observation per fiscal period, never a
+mix of stale and current) plus explicit refresh methods; `refresh_all`
+attempts both layers independently so one domain's `ProviderError` never
+blocks or is masked by the other.
+
+**UI**: Company Research page, new "Analyst Rating Changes & Estimate
+Revision Trend" section between the existing supplemental-research refresh
+button and the snapshot-save section — two tables plus one refresh button,
+explicitly captioned as non-scoring evidence distinct from both Analyst
+Consensus above and the Analyst Revisions category further below.
+
+**AI Research Rating integration — deliberately not wired in this phase**:
+`AIEvidenceCoverage.analyst_coverage` is a fixed formula over
+`AnalystConsensus`'s nine documented fields, and
+`DeterministicAIRatingProvider`'s dimension-banding logic
+(`_dimension_value_for_evidence`) only knows how to band a single scalar
+value per evidence item. Turning multi-row rating-change/revision-trend
+data into one scalar (e.g. "net upgrades in the last 90 days") is a real
+methodology decision with genuine interpretive judgment calls, not a
+natural fit — left for explicit future approval rather than forced in,
+mirroring this phase's Part E precedent of stating "not needed" rather
+than changing code that doesn't need it.
+
+**Measured effect** (real 5-ticker universe, NVDA/MA/AAL/FTEC/GDX,
+verified via direct DB query, not just script output): `AnalystRatingChange`
+rows went from 0 to 1,910 (NVDA 986, MA 515, AAL 409; FTEC/GDX genuinely
+0 — no analyst coverage, confirmed via a handled 404, not a failure).
+`EstimateRevisionTrend` rows went from 0 to 6 (NVDA/MA/AAL × 2 fiscal
+periods each; FTEC/GDX genuinely 0). Both refreshes are confirmed
+idempotent: an immediate re-run against the same real data stored 0 new
+rows for every ticker. Neither change altered any scoring output — the
+three established smoke tests (`scripts/smoke_test.py`,
+`scripts/smoke_test_phase2.py`, `scripts/smoke_test_phase3.py`) produce
+identical scores/ratings/coverage to their pre-Phase-2I values, and
+`git diff` on every scoring-path file (`alpha_lab/screener/service.py`,
+`alpha_lab/ratings/estimates.py`, `alpha_lab/strategy/`) is empty.

@@ -44,3 +44,13 @@ class ResearchNewsProvider(ABC):
     def get_news(
         self, ticker: str, since: date | None = None
     ) -> list[dict[str, Any]]: ...
+
+
+class AnalystEventProvider(ABC):
+    @abstractmethod
+    def get_analyst_rating_changes(self, ticker: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def get_estimate_revision_trend(
+        self, ticker: str, observation_date: date
+    ) -> list[dict[str, Any]]: ...

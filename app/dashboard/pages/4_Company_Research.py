@@ -14,6 +14,7 @@ from alpha_lab.providers import YFinanceProvider
 from alpha_lab.providers.errors import ProviderError
 from alpha_lab.research import CATEGORY_LABELS, CATEGORY_ORDER, ResearchService
 from alpha_lab.research.ai_rating import DIMENSION_NAMES
+from alpha_lab.research.analyst_events import AnalystEventsService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 from alpha_lab.research.technical import IndicatorCategory
 
@@ -405,6 +406,100 @@ def _render_stock_research(research, *, quote=None) -> None:
     )
 
 
+_ACTION_LABELS = {
+    "main": "Reiteration",
+    "init": "Initiation",
+    "up": "Upgrade",
+    "down": "Downgrade",
+    "reit": "Reiteration",
+}
+
+
+def _rating_change_action_label(action: str | None) -> str:
+    if action is None:
+        return "—"
+    return _ACTION_LABELS.get(action, action.title())
+
+
+def _render_rating_changes_table(ticker: str, events_service: AnalystEventsService) -> None:
+    st.markdown("**Analyst Rating Changes**")
+    st.caption(
+        "Discrete upgrade/downgrade/initiation/reiteration events, each "
+        "with its own real historical date — the evidence behind the "
+        "Analyst Consensus rating above, not a new score. Not a scoring "
+        "input anywhere in AlphaLab."
+    )
+    events = events_service.get_rating_changes(ticker, limit=20)
+    if not events:
+        st.info(
+            "No analyst rating-change history has been refreshed yet for "
+            "this ticker, or this instrument has no analyst coverage "
+            "(e.g. most ETFs)."
+        )
+        return
+    st.dataframe(
+        [
+            {
+                "Date": event.grade_date,
+                "Firm": _dash(event.firm),
+                "Action": _rating_change_action_label(event.action),
+                "To": _dash(event.to_grade),
+                "From": _dash(event.from_grade),
+                "Price target": _dash(
+                    None
+                    if event.current_price_target is None
+                    else f"${event.current_price_target:,.2f}"
+                ),
+                "Prior target": _dash(
+                    None
+                    if event.prior_price_target is None
+                    else f"${event.prior_price_target:,.2f}"
+                ),
+            }
+            for event in events
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_revision_trend_table(ticker: str, events_service: AnalystEventsService) -> None:
+    st.markdown("**Estimate Revision Trend**")
+    st.caption(
+        "The source's own already-computed EPS-consensus trend and "
+        "analyst up/down revision counts, by fiscal period — distinct "
+        "from the Analyst Revisions category further below on this page "
+        "(which is a scored fundamental-research input derived "
+        "differently, from AlphaLab's own accumulated estimate history). "
+        "This trend evidence is never a scoring input."
+    )
+    trend_rows = events_service.get_latest_revision_trend(ticker)
+    if not trend_rows:
+        st.info(
+            "No estimate revision trend has been refreshed yet for this "
+            "ticker, or this instrument has no analyst estimate coverage."
+        )
+        return
+    st.dataframe(
+        [
+            {
+                "Fiscal period": row.fiscal_period,
+                "Current EPS est.": _dash(row.eps_trend_current),
+                "7d ago": _dash(row.eps_trend_7d_ago),
+                "30d ago": _dash(row.eps_trend_30d_ago),
+                "60d ago": _dash(row.eps_trend_60d_ago),
+                "90d ago": _dash(row.eps_trend_90d_ago),
+                "Analysts revising up (7d/30d)": f"{_dash(row.revisions_up_last_7d)} / {_dash(row.revisions_up_last_30d)}",
+                "Analysts revising down (7d/30d)": f"{_dash(row.revisions_down_last_7d)} / {_dash(row.revisions_down_last_30d)}",
+                "As of": row.observation_date,
+            }
+            for row in trend_rows
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def _render_history_list(history) -> None:
     """Shows both dates deliberately: `evaluation_date` is the date the
     underlying evidence applies to (set once per screener rebuild, so two
@@ -641,6 +736,41 @@ try:
                 "AI Research Rating (if any) is unchanged."
             )
         st.success("Refresh complete — reload the page to see the updated panels above.")
+
+    st.divider()
+    st.subheader("Analyst Rating Changes & Estimate Revision Trend")
+    st.caption(
+        "Two further evidence layers behind the Analyst Consensus panel "
+        "above: the discrete rating-change events analysts actually "
+        "issued, and the source's own reported estimate-revision trend. "
+        "Neither is a new score, neither is collapsed into Analyst "
+        "Consensus, and neither is a scoring input to the AlphaLab "
+        "Fundamental Score or the existing Analyst Revisions category "
+        "below. Opening this page or changing the ticker never calls a "
+        "provider — only the explicit refresh below does."
+    )
+    events_service = AnalystEventsService(engine)
+    rating_left, revision_right = st.columns(2)
+    with rating_left:
+        _render_rating_changes_table(ticker, events_service)
+    with revision_right:
+        _render_revision_trend_table(ticker, events_service)
+    if st.button("🔄 Refresh rating changes & revision trend", key="refresh_analyst_events"):
+        with st.spinner(f"Refreshing analyst events for {ticker}..."):
+            outcome = events_service.refresh_all(ticker, YFinanceProvider())
+        if outcome.rating_changes_error is not None:
+            error = outcome.rating_changes_error
+            st.warning(f"Rating changes not refreshed: {error.kind.value} — {error.reason}")
+        else:
+            st.success(f"Rating changes: {outcome.rating_changes_stored} new event(s) stored.")
+        if outcome.revision_trend_error is not None:
+            error = outcome.revision_trend_error
+            st.warning(f"Revision trend not refreshed: {error.kind.value} — {error.reason}")
+        else:
+            st.success(
+                f"Revision trend: {outcome.revision_trend_stored} new observation(s) stored."
+            )
+        st.info("Reload the page to see the updated tables above.")
 
     st.divider()
     st.subheader("Save this research as a historical snapshot")

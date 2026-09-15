@@ -15,10 +15,16 @@ import pandas as pd
 
 from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.providers.errors import call_with_classification
-from alpha_lab.providers.interfaces import EstimateProvider, ResearchNewsProvider
+from alpha_lab.providers.interfaces import (
+    AnalystEventProvider,
+    EstimateProvider,
+    ResearchNewsProvider,
+)
 
 
-class YFinanceProvider(MarketDataProvider, ResearchNewsProvider, EstimateProvider):
+class YFinanceProvider(
+    MarketDataProvider, ResearchNewsProvider, EstimateProvider, AnalystEventProvider
+):
     def _ticker(self, symbol: str):
         import yfinance as yf
 
@@ -282,6 +288,137 @@ class YFinanceProvider(MarketDataProvider, ResearchNewsProvider, EstimateProvide
                 normalized.append(record)
         return normalized
 
+    def get_analyst_rating_changes(self, ticker: str) -> list[dict[str, Any]]:
+        """Full analyst rating-change history (upgrades/downgrades/
+        initiations/reiterations) for `ticker`, each a discrete graded
+        event with the source's own historical timestamp.
+
+        yfinance's ``upgradeDowngradeHistory`` module returns the ENTIRE
+        history in one call, not only events since the last refresh --
+        confirmed live (Phase 2I investigation): MA/AAL each returned
+        several hundred rows spanning years. Callers persist via
+        ``alpha_lab.ingestion.analyst_events.snapshot_analyst_rating_changes``,
+        which content-hash-dedupes, so repeatedly re-fetching this same
+        full history is idempotent rather than duplicating rows -- there is
+        no need to track "since last refresh" here.
+
+        Genuinely no analyst coverage for this instrument type (confirmed
+        live for ETFs: yfinance returns an empty frame via a handled 404,
+        not an exception -- the same pattern as ``get_estimates``) returns
+        an empty list, never fabricated rows.
+
+        A price target of exactly 0 (yfinance's placeholder when an
+        initiation has no "prior" target to report) is normalized to None
+        via ``_number(..., positive=True)`` -- a stock's price target is
+        never genuinely $0, so 0 here means "not applicable", not "zero".
+        """
+        frame = call_with_classification(
+            lambda: self._ticker(ticker).get_upgrades_downgrades(),
+            provider=self.provider_name,
+        )
+        if frame is None or frame.empty:
+            return []
+        events: list[dict[str, Any]] = []
+        for grade_date, row in frame.iterrows():
+            grade_date_value = _parse_timestamp_like(grade_date)
+            if grade_date_value is None:
+                continue
+            events.append(
+                {
+                    "grade_date": grade_date_value,
+                    "firm": _text(row.get("Firm")),
+                    "to_grade": _text(row.get("ToGrade")),
+                    "from_grade": _text(row.get("FromGrade")),
+                    "action": _text(row.get("Action")),
+                    "price_target_action": _text(row.get("priceTargetAction")),
+                    "current_price_target": _number(
+                        row.get("currentPriceTarget"), positive=True
+                    ),
+                    "prior_price_target": _number(
+                        row.get("priorPriceTarget"), positive=True
+                    ),
+                }
+            )
+        return events
+
+    def get_estimate_revision_trend(
+        self, ticker: str, observation_date: date
+    ) -> list[dict[str, Any]]:
+        """The source's own already-computed EPS-estimate trend (current,
+        7/30/60/90 days ago) and analyst up/down revision counts, for
+        `ticker` as observed on `observation_date` -- genuine revision
+        evidence available from a single live call, unlike
+        ``alpha_lab.ratings.estimates.calculate_revision_factors``, which
+        can only derive a revision signal after multiple ``Estimate``
+        observations accumulate over real elapsed time.
+
+        Only "0y"/"+1y" fiscal periods are captured, using the exact same
+        precise annual-only anchors as ``get_estimates`` (the quarterly
+        labels this source also reports are dropped here for the identical
+        date-precision reason documented on ``get_estimates``) -- so a
+        period recorded here always matches the corresponding ``Estimate``
+        row's ``fiscal_period`` exactly.
+
+        Genuinely no coverage (confirmed live for ETFs) returns an empty
+        list. This data is never wired into
+        ``alpha_lab.screener.service``'s ``analyst_revisions`` scoring
+        category or any other scoring input -- see
+        ``alpha_lab.database.models.EstimateRevisionTrend``'s docstring.
+        """
+        ticker_obj = self._ticker(ticker)
+        trend_frame = call_with_classification(
+            lambda: ticker_obj.get_eps_trend(), provider=self.provider_name
+        )
+        if trend_frame is None or trend_frame.empty:
+            return []
+        revisions_frame = call_with_classification(
+            lambda: ticker_obj.get_eps_revisions(), provider=self.provider_name
+        )
+        info = call_with_classification(
+            lambda: ticker_obj.get_info(), provider=self.provider_name
+        )
+        anchors = _fiscal_anchors(info)
+
+        observations: list[dict[str, Any]] = []
+        for period_label, row in trend_frame.iterrows():
+            fiscal_period = _fiscal_period_for(str(period_label), anchors)
+            if fiscal_period is None:
+                continue
+            eps_trend_current = _number(row.get("current"))
+            if eps_trend_current is None:
+                continue
+            revisions_row = (
+                revisions_frame.loc[period_label]
+                if revisions_frame is not None
+                and not revisions_frame.empty
+                and period_label in revisions_frame.index
+                else None
+            )
+            observations.append(
+                {
+                    "fiscal_period": fiscal_period,
+                    "eps_trend_current": eps_trend_current,
+                    "eps_trend_7d_ago": _number(row.get("7daysAgo")),
+                    "eps_trend_30d_ago": _number(row.get("30daysAgo")),
+                    "eps_trend_60d_ago": _number(row.get("60daysAgo")),
+                    "eps_trend_90d_ago": _number(row.get("90daysAgo")),
+                    "revisions_up_last_7d": _int_or_none(
+                        revisions_row.get("upLast7days") if revisions_row is not None else None
+                    ),
+                    "revisions_up_last_30d": _int_or_none(
+                        revisions_row.get("upLast30days") if revisions_row is not None else None
+                    ),
+                    "revisions_down_last_7d": _int_or_none(
+                        revisions_row.get("downLast7Days") if revisions_row is not None else None
+                    ),
+                    "revisions_down_last_30d": _int_or_none(
+                        revisions_row.get("downLast30days") if revisions_row is not None else None
+                    ),
+                    "currency": _text(row.get("currency")),
+                }
+            )
+        return observations
+
 
 def _normalize_news_item(item: dict[str, Any]) -> dict[str, Any] | None:
     """Best-effort extraction across the two known yfinance news shapes.
@@ -370,6 +507,41 @@ def _number(value: Any, *, positive: bool = False) -> float | None:
     if not math.isfinite(number) or (positive and number <= 0):
         return None
     return number
+
+
+def _text(value: Any) -> str | None:
+    """A pandas cell as a plain string, or None -- never the literal string
+    'nan' that `str(float('nan'))` would otherwise produce."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_timestamp_like(value: Any) -> datetime | None:
+    """A pandas Timestamp/datetime index value (yfinance's `GradeDate`
+    index) as a naive UTC-ish datetime, or None if it isn't a real
+    timestamp -- never a guessed date."""
+    if value is None or pd.isna(value):
+        return None
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp):
+        return None
+    return timestamp.to_pydatetime().replace(tzinfo=None)
 
 
 def _epoch_to_date(value: Any) -> date | None:
