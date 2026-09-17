@@ -973,3 +973,59 @@ exactly as Phase 2H/2I left them, and (confirmed via a real re-refresh 3
 days after the first) still correctly read 0% coverage today because the
 7/30/90-day revision windows need more elapsed time between AlphaLab
 refreshes than has passed so far, not because of any defect.
+
+## 24. Technical indicator agreement/disagreement (PR #27)
+
+Technical coverage was already ~100% on the real 5-ticker universe before
+this PR, and `TechnicalSummary.overall_rating`/`moving_average_rating`/
+`oscillator_rating` already existed, coverage-gated and REVIEW-honest, in
+both code and UI (confirmed in Phase 2I's Part E audit) -- so this PR adds
+no new indicators and does not re-slice the existing moving-average/
+oscillator grouping into new trend/momentum/volatility buckets, per the
+roadmap's own "do not add indicators simply to increase a coverage
+percentage" and "if a technical interpretation already exists and is
+adequate, preserve it" rules.
+
+**The one genuine gap**: `overall_rating` reflects the *average* direction
+of available indicators, not how *unanimous* they are. Two tickers can
+share the same rating while one is near-unanimous and the other is a
+coin flip that happened to average to the same band -- `overall_rating`
+alone hides that difference, and nothing surfaced it: a viewer had to
+manually read the per-indicator expander and count Buy/Sell/Neutral
+themselves.
+
+**`IndicatorAgreement`** (new enum: `STRONG_AGREEMENT`/`MODERATE_AGREEMENT`/
+`MIXED`/`REVIEW`) plus `buy_signal_count`/`sell_signal_count`/
+`neutral_signal_count` on `TechnicalSummary` -- computed in
+`build_technical_summary` from the exact same 15 indicator signals already
+computed, via a `Counter` over `ma_signals + osc_signals`. Purely additive
+evidence: `overall_score`/`overall_rating`/`moving_average_*`/
+`oscillator_*` are computed identically to before, byte-for-byte (verified
+by the existing, unmodified test suite passing unchanged). The new fields
+are `Optional` (default `None`) specifically so a `TechnicalSummary`
+already persisted before this PR (in `CurrentTechnicalSummary.payload` or
+embedded in a historical `ResearchSnapshot.payload`) still re-validates on
+read -- mirrors the exact Optional-field backward-compatibility pattern
+established for Donatien's schema revision (§20).
+
+**Bug caught before merge**: the agreement threshold used `>=`, so an
+exact tie between exactly two non-zero categories (e.g. 5 Buy / 5 Sell / 0
+Neutral -- the single clearest possible disagreement) always lands
+`dominant_fraction` on precisely 0.5, which incorrectly cleared the
+`MODERATE_AGREEMENT` threshold. Fixed to strict `>`; a regression test
+(`test_exact_even_buy_sell_split_is_mixed_not_moderate_agreement`) proves
+a 5/5/0 and 6/6/0 split both read `MIXED`.
+
+**UI**: Company Research's Technical Summary panel gained one caption line
+-- "Indicator agreement: <label> — N Buy · N Sell · N Neutral (of N
+available)" -- directly below the existing coverage/timeframe/as-of line.
+
+**Measured effect** (real 5-ticker universe, via
+`SupplementalResearchService.refresh_technical_summary`): NVDA (5/5/5
+split) and MA (7/6/2) both carry a `NEUTRAL` overall rating that turns out
+to be genuine `MIXED` disagreement, not a mild-but-unanimous reading --
+exactly the distinction this evidence exists to surface. AAL and FTEC show
+`MODERATE_AGREEMENT` behind their `STRONG_SELL`/`BUY` ratings respectively
+(a real majority, not unanimous). Full test suite and all three
+established smoke tests pass with scores identical to before this change;
+every scoring-path file diff is empty.

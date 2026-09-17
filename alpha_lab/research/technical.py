@@ -24,6 +24,7 @@ result so a future intraday timeframe is an additive enum value, not a
 redesign -- see ``Timeframe``.
 """
 
+from collections import Counter
 from datetime import date
 from enum import StrEnum
 import math
@@ -67,6 +68,47 @@ class IndicatorCategory(StrEnum):
     OSCILLATOR = "OSCILLATOR"
 
 
+class IndicatorAgreement(StrEnum):
+    """How much the available indicators agree with each other -- distinct
+    from `overall_rating`, which reflects their average direction, not how
+    unanimous they are. Two tickers can share the same BUY overall_rating
+    while one has near-unanimous indicators and the other is a coin flip
+    between Buy and Sell that happened to average out to a slight positive
+    -- overall_rating alone hides that difference; this doesn't."""
+
+    STRONG_AGREEMENT = "STRONG_AGREEMENT"
+    MODERATE_AGREEMENT = "MODERATE_AGREEMENT"
+    MIXED = "MIXED"
+    # Zero indicators available -- never guessed.
+    REVIEW = "REVIEW"
+
+
+# Fraction of available signals held by the single most common signal
+# value (Buy, Sell, or Neutral). Versioned independently of
+# _RATING_THRESHOLDS_V1 -- this measures unanimity, not direction, and the
+# two are free to evolve separately. Strict `>` (not `>=`) is deliberate:
+# with only two non-zero categories, an exact tie (e.g. 5 Buy / 5 Sell / 0
+# Neutral) always lands dominant_fraction on exactly 0.5 -- a `>=` compare
+# there would misclassify the clearest possible disagreement (a dead-even
+# split between opposite directions) as "Moderate Agreement".
+_AGREEMENT_THRESHOLDS_V1: tuple[tuple[float, IndicatorAgreement], ...] = (
+    (0.75, IndicatorAgreement.STRONG_AGREEMENT),
+    (0.5, IndicatorAgreement.MODERATE_AGREEMENT),
+)
+_AGREEMENT_FLOOR = IndicatorAgreement.MIXED
+
+
+def _indicator_agreement(buy: int, sell: int, neutral: int) -> IndicatorAgreement:
+    total = buy + sell + neutral
+    if total == 0:
+        return IndicatorAgreement.REVIEW
+    dominant_fraction = max(buy, sell, neutral) / total
+    for threshold, agreement in _AGREEMENT_THRESHOLDS_V1:
+        if dominant_fraction > threshold:
+            return agreement
+    return _AGREEMENT_FLOOR
+
+
 class IndicatorEvidence(BaseModel):
     name: str
     category: IndicatorCategory
@@ -100,6 +142,20 @@ class TechnicalSummary(BaseModel):
     as_of: date
     source: str
     methodology_version: str = TECHNICAL_METHODOLOGY_VERSION
+    # PR #27: how much the available indicators agree with each other,
+    # across BOTH groups combined -- see IndicatorAgreement's docstring.
+    # Purely additive evidence: never affects overall_score/overall_rating/
+    # moving_average_*/oscillator_* above, and never a scoring input.
+    # Optional (default None), not a fresh-computation-only guarantee: a
+    # StockResearch/TechnicalSummary persisted before this field existed
+    # (in ResearchSnapshot.payload or CurrentTechnicalSummary.payload) must
+    # still re-validate on read -- None there means "not computed under
+    # this row's methodology", distinct from a freshly built summary, which
+    # always populates real values.
+    buy_signal_count: int | None = None
+    sell_signal_count: int | None = None
+    neutral_signal_count: int | None = None
+    indicator_agreement: IndicatorAgreement | None = None
 
 
 # --- versioned score->rating thresholds -----------------------------------
@@ -367,6 +423,12 @@ def build_technical_summary(
 
     confidence = coverage if overall_rating != TechnicalRating.REVIEW else coverage * 0.5
 
+    signal_counts = Counter(ma_signals + osc_signals)
+    buy_count = signal_counts[1]
+    sell_count = signal_counts[-1]
+    neutral_count = signal_counts[0]
+    agreement = _indicator_agreement(buy_count, sell_count, neutral_count)
+
     return TechnicalSummary(
         ticker=ticker.upper(),
         overall_score=overall_score,
@@ -385,4 +447,8 @@ def build_technical_summary(
         timeframe=Timeframe.DAILY,
         as_of=as_of,
         source=source,
+        buy_signal_count=buy_count,
+        sell_signal_count=sell_count,
+        neutral_signal_count=neutral_count,
+        indicator_agreement=agreement,
     )

@@ -11,10 +11,13 @@ import pandas as pd
 import pytest
 
 from alpha_lab.research.technical import (
+    IndicatorAgreement,
     IndicatorCategory,
     TECHNICAL_METHODOLOGY_VERSION,
     TechnicalRating,
+    TechnicalSummary,
     Timeframe,
+    _indicator_agreement,
     build_technical_summary,
 )
 
@@ -175,3 +178,76 @@ def test_empty_price_history_is_handled_without_crashing():
     summary = build_technical_summary("EMPTY", pd.DataFrame(), as_of=date.today(), source="x")
     assert summary.overall_rating == TechnicalRating.REVIEW
     assert summary.coverage == 0.0
+
+
+# --- PR #27: indicator agreement/disagreement ------------------------------
+
+
+@pytest.mark.parametrize(
+    "buy,sell,neutral,expected",
+    [
+        (15, 0, 0, IndicatorAgreement.STRONG_AGREEMENT),  # 15/15 = 1.0
+        (12, 2, 1, IndicatorAgreement.STRONG_AGREEMENT),  # 12/15 = 0.8
+        (8, 5, 2, IndicatorAgreement.MODERATE_AGREEMENT),  # 8/15 ~= 0.53
+        (6, 6, 3, IndicatorAgreement.MIXED),  # dominant 6/15 = 0.4
+        (0, 0, 0, IndicatorAgreement.REVIEW),  # no indicators available at all
+    ],
+)
+def test_indicator_agreement_thresholds(buy, sell, neutral, expected):
+    assert _indicator_agreement(buy, sell, neutral) == expected
+
+
+def test_exact_even_buy_sell_split_is_mixed_not_moderate_agreement():
+    """Regression: with only two non-zero categories, an exact tie always
+    lands dominant_fraction on precisely the 0.5 threshold. This is the
+    clearest possible disagreement (a dead-even split between opposite
+    directions) and must read as MIXED, never MODERATE_AGREEMENT."""
+    assert _indicator_agreement(5, 5, 0) == IndicatorAgreement.MIXED
+    assert _indicator_agreement(6, 6, 0) == IndicatorAgreement.MIXED
+
+
+def test_build_technical_summary_populates_agreement_counts_and_label():
+    summary = build_technical_summary("TEST", _uptrend(), as_of=date.today(), source="x")
+    available = summary.moving_average_available + summary.oscillator_available
+    assert summary.buy_signal_count + summary.sell_signal_count + summary.neutral_signal_count == available
+    assert summary.indicator_agreement is not None
+
+
+def test_agreement_is_review_and_counts_are_zero_when_no_indicators_available():
+    summary = build_technical_summary(
+        "SHORT", _price_frame([100, 101, 102, 103, 104]), as_of=date.today(), source="x"
+    )
+    assert summary.indicator_agreement == IndicatorAgreement.REVIEW
+    assert summary.buy_signal_count == 0
+    assert summary.sell_signal_count == 0
+    assert summary.neutral_signal_count == 0
+
+
+def test_agreement_never_affects_overall_score_or_rating():
+    """Purely additive evidence -- adding it must not change any existing
+    scoring output for the exact same input."""
+    summary = build_technical_summary("TEST", _uptrend(), as_of=date.today(), source="x")
+    assert summary.overall_score == pytest.approx(
+        (summary.moving_average_score + summary.oscillator_score) / 2
+    )
+    assert summary.overall_rating == TechnicalRating.STRONG_BUY
+
+
+def test_technical_summary_persisted_before_pr27_still_validates():
+    """A TechnicalSummary serialized before these fields existed (e.g. in
+    an already-persisted ResearchSnapshot/CurrentTechnicalSummary payload)
+    must still re-validate -- the new fields default to None, distinct
+    from a freshly built summary, which always populates real values."""
+    old_shape_payload = build_technical_summary(
+        "TEST", _uptrend(), as_of=date.today(), source="x"
+    ).model_dump(mode="json")
+    for field in ("buy_signal_count", "sell_signal_count", "neutral_signal_count", "indicator_agreement"):
+        del old_shape_payload[field]
+
+    reloaded = TechnicalSummary.model_validate(old_shape_payload)
+    assert reloaded.buy_signal_count is None
+    assert reloaded.sell_signal_count is None
+    assert reloaded.neutral_signal_count is None
+    assert reloaded.indicator_agreement is None
+    # Everything that existed before PR #27 is untouched.
+    assert reloaded.overall_rating == TechnicalRating.STRONG_BUY
