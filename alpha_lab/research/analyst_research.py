@@ -175,8 +175,15 @@ def build_analyst_research_summary(
 
     coverage = (0.5 if rating_changes else 0.0) + (0.5 if revision_trend else 0.0)
 
+    # Every row that actually contributed to something in this summary --
+    # the displayed `recent_rating_changes` slice AND every row in the
+    # (possibly larger) 90-day window that fed `rating_change_counts_90d` --
+    # not just the displayed slice, which would otherwise silently omit the
+    # IDs of rows a ticker's 90-day tally counted but didn't show.
+    cited_changes = {change.id: change for change in rating_changes[:recent_changes_limit]}
+    cited_changes.update({change.id: change for change in windowed})
     evidence_ids = [
-        f"analyst_rating_change:{change.id}" for change in rating_changes[:recent_changes_limit]
+        f"analyst_rating_change:{change_id}" for change_id in sorted(cited_changes)
     ] + [f"estimate_revision_trend:{period.id}" for period in revision_trend]
 
     return AnalystResearchSummary(

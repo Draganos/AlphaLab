@@ -152,3 +152,20 @@ def test_evidence_ids_trace_back_to_underlying_rows():
     )
     assert "analyst_rating_change:42" in summary.evidence_ids
     assert "estimate_revision_trend:7" in summary.evidence_ids
+
+
+def test_evidence_ids_include_windowed_rows_beyond_the_displayed_recent_slice():
+    """Regression: rating_change_counts_90d is computed from every row in
+    the 90-day window, not just the displayed recent_rating_changes slice
+    -- evidence_ids must cite all of them, or a row that genuinely
+    contributed to the tally would have no traceable evidence ID at all."""
+    changes = [_FakeChange(i, datetime(2026, 9, 1), "up") for i in range(15)]
+    summary = build_analyst_research_summary(
+        "NVDA", changes, [], as_of=date(2026, 9, 17), recent_changes_limit=10
+    )
+    assert len(summary.recent_rating_changes) == 10  # only 10 displayed
+    assert summary.rating_change_counts_90d["upgrades"] == 15  # but all 15 counted
+    # every one of the 15 contributing rows must still have a traceable ID,
+    # not just the 10 that happen to be displayed
+    for i in range(15):
+        assert f"analyst_rating_change:{i}" in summary.evidence_ids
