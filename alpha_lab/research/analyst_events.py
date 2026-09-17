@@ -101,18 +101,29 @@ class AnalystEventsService:
         return [latest_by_period[period] for period in sorted(latest_by_period)]
 
     def get_research_summary(
-        self, ticker: str, *, as_of: date | None = None
+        self, ticker: str, *, as_of: date | None = None, recent_changes_limit: int = 20
     ) -> AnalystResearchSummary | None:
         """The canonical, cross-layer Analyst Research summary (PR #26) for
         one ticker -- pure DB read plus deterministic computation, no
         provider call. Returns None when neither rating-change history nor
-        revision trend data exists yet for this ticker."""
+        revision trend data exists yet for this ticker.
+
+        `recent_changes_limit` defaults to 20 to match the Company Research
+        UI's prior display count (pre-PR #26, when it called
+        `get_rating_changes(ticker, limit=20)` directly) -- pass it through
+        explicitly rather than relying on `build_analyst_research_summary`'s
+        own (smaller) default, which is tuned for other, more compact
+        callers of that function."""
         rating_changes = self.get_rating_changes(
             ticker, limit=_SUMMARY_RATING_CHANGES_FETCH_LIMIT
         )
         revision_trend = self.get_latest_revision_trend(ticker)
         return build_analyst_research_summary(
-            ticker, rating_changes, revision_trend, as_of=as_of or date.today()
+            ticker,
+            rating_changes,
+            revision_trend,
+            as_of=as_of or date.today(),
+            recent_changes_limit=recent_changes_limit,
         )
 
     # --- refreshes: explicit, provider calls happen before any DB write ---
