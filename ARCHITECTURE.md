@@ -897,3 +897,79 @@ three established smoke tests (`scripts/smoke_test.py`,
 identical scores/ratings/coverage to their pre-Phase-2I values, and
 `git diff` on every scoring-path file (`alpha_lab/screener/service.py`,
 `alpha_lab/ratings/estimates.py`, `alpha_lab/strategy/`) is empty.
+
+## 23. Canonical Analyst Research summary + AI integration (PR #26)
+
+Turns the two Phase 2I evidence tables into a fourth canonical research
+field and, for the first time, lets the AI Research Rating consume analyst
+event/revision evidence -- while keeping every existing gate, coverage
+formula, and scoring category exactly as it was.
+
+**`alpha_lab.research.analyst_research`** (new, pure/deterministic module):
+`AnalystResearchSummary` composes `AnalystRatingChange` +
+`EstimateRevisionTrend` rows (already-fetched ORM rows in, no provider
+call, no DB access) into: the 10 most recent rating-change events, a
+trailing-90-day upgrade/downgrade/initiation/reiteration tally (`None`,
+never a fabricated zero, when the ticker has no rating-change history at
+all -- a real `{"upgrades": 0, ...}` once history exists but nothing
+happened in the window), and a per-fiscal-period revision trend with an
+honest `RevisionDirection` (`IMPROVING`/`DETERIORATING`/`STABLE`/`REVIEW`
+-- `REVIEW`, never a guess, when the current or 30-day-ago EPS trend value
+is missing). `coverage` is domain-aware across the two sub-domains present
+(rating changes, revision trend), mirroring `AIEvidenceCoverage`'s
+never-excluded-from-the-denominator pattern. Exposed as
+`StockResearch.analyst_research` (via `AnalystEventsService.
+get_research_summary`, wired into `ResearchService.get_stock_research`
+exactly like `analyst_consensus`/`technical_summary`/
+`ai_research_assessment` before it) -- same "`None` means not computed for
+this research state" convention, verified to never leak into an
+already-persisted historical snapshot.
+
+**Company Research UI**: the rating-changes/revision-trend tables now read
+from `research.analyst_research` (the canonical field) instead of calling
+`AnalystEventsService` directly for display -- aligning with how the
+Analyst Consensus/Technical Summary panels already work. The refresh
+button still calls `AnalystEventsService.refresh_all` directly (writes go
+through the service; only reads go through the canonical model). Added a
+90-day tally caption and a "Direction" column.
+
+**AI Research Rating integration** (`AI_RATING_METHODOLOGY_VERSION` bumped
+`v2` -> `v3`; old persisted assessments keep interpreting under their own
+version): `build_evidence_payload` gained an `analyst_research` parameter
+producing two new evidence items, each omitted entirely (never banded to
+NEUTRAL) when the underlying data was insufficient to compute it --
+`analyst_events:net_rating_changes_90d` (only when
+`rating_change_counts_90d` is not `None`) feeds `business_outlook`
+alongside the existing `analyst:rating`, and `estimate_revision:
+trend_direction` (only when the nearest period's direction isn't
+`REVIEW`) feeds `growth_prospects` alongside `fundamental:earnings_growth`.
+Both are genuine, deterministic derived facts (a real event count, a real
+EPS-trend comparison) -- never fabricated, never inferred beyond what the
+stored evidence actually shows. Explicitly NOT changed: `AIEvidenceCoverage`
+(still fundamental/analyst/technical only), `AI_MINIMUM_ASSESSABLE_
+DIMENSIONS`/`AI_MINIMUM_EVIDENCE_COVERAGE`, and every other AI gate --
+this is new evidence citable within the existing gate, not a weaker gate.
+`SupplementalResearchService.refresh_all` supplies `analyst_research` via
+a pure DB read (`AnalystEventsService.get_research_summary`) -- refreshing
+that evidence from a provider remains its own separate explicit action,
+never triggered implicitly by an AI refresh.
+
+**Measured effect** (real 5-ticker universe, verified via direct
+`ResearchService`/`SupplementalResearchService` calls, not just script
+output): NVDA and MA's revision trend read `IMPROVING` (real EPS-estimate
+increases over the trailing 30 days); AAL's reads `DETERIORATING` (real
+EPS-estimate decline) -- refreshing the AI Research Rating for AAL with
+this evidence moved its rating from what fundamentals/consensus alone
+would suggest to `NEUTRAL`, an honest reflection of genuinely softening
+analyst sentiment, not a defect. FTEC/GDX's `analyst_research` remains
+`None` (confirmed genuine no-coverage, unchanged from Phase 2I). All three
+equities' AI assessments now genuinely cite both new evidence IDs. The
+three established smoke tests and the full test suite remain unchanged in
+outcome; every scoring-path file diff is empty.
+
+**Not implemented in this step**: no change to `calculate_revision_factors`,
+`Estimate`, or the `analyst_revisions` scoring category -- those remain
+exactly as Phase 2H/2I left them, and (confirmed via a real re-refresh 3
+days after the first) still correctly read 0% coverage today because the
+7/30/90-day revision windows need more elapsed time between AlphaLab
+refreshes than has passed so far, not because of any defect.

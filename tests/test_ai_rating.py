@@ -606,6 +606,114 @@ def test_deterministic_provider_all_domains_available_produces_a_valid_synthesis
     assert assessment.confidence > 0.5
 
 
+# --- PR #26: Analyst Research (rating changes + revision trend) evidence ---
+
+
+def _analyst_research(*, counts=None, trend_periods=()):
+    from alpha_lab.research.analyst_research import AnalystResearchSummary
+
+    return AnalystResearchSummary(
+        ticker="NVDA",
+        recent_rating_changes=[],
+        rating_change_counts_90d=counts,
+        revision_trend=list(trend_periods),
+        coverage=1.0,
+        as_of=date.today(),
+        evidence_ids=[],
+    )
+
+
+def _trend_period(*, current, prior_30d, fiscal_period=None):
+    from alpha_lab.research.analyst_research import RevisionDirection, RevisionTrendPeriod
+
+    if current is None or prior_30d is None:
+        direction = RevisionDirection.REVIEW
+    elif current > prior_30d:
+        direction = RevisionDirection.IMPROVING
+    elif current < prior_30d:
+        direction = RevisionDirection.DETERIORATING
+    else:
+        direction = RevisionDirection.STABLE
+    return RevisionTrendPeriod(
+        fiscal_period=fiscal_period or date(2027, 1, 25),
+        eps_trend_current=current,
+        eps_trend_7d_ago=current,
+        eps_trend_30d_ago=prior_30d,
+        eps_trend_60d_ago=prior_30d,
+        eps_trend_90d_ago=prior_30d,
+        revisions_up_last_7d=None,
+        revisions_up_last_30d=None,
+        revisions_down_last_7d=None,
+        revisions_down_last_30d=None,
+        direction=direction,
+        observation_date=date.today(),
+    )
+
+
+def test_build_evidence_payload_cites_net_rating_changes_when_history_exists():
+    analyst_research = _analyst_research(
+        counts={"upgrades": 3, "downgrades": 1, "initiations": 0, "reiterations": 5}
+    )
+    evidence = build_evidence_payload(categories={}, analyst_research=analyst_research)
+    item = next(i for i in evidence if i.evidence_id == "analyst_events:net_rating_changes_90d")
+    assert item.value == 2.0
+    assert "3 upgrades" in item.description and "1 downgrades" in item.description
+
+
+def test_build_evidence_payload_omits_net_rating_changes_when_no_history_at_all():
+    """counts=None (never a fabricated zero) when the ticker has no
+    rating-change history -- must never be cited as "0 net changes"."""
+    analyst_research = _analyst_research(counts=None)
+    evidence = build_evidence_payload(categories={}, analyst_research=analyst_research)
+    assert not any(i.evidence_id.startswith("analyst_events:") for i in evidence)
+
+
+def test_build_evidence_payload_cites_revision_trend_direction_when_computable():
+    analyst_research = _analyst_research(trend_periods=[_trend_period(current=10.0, prior_30d=9.0)])
+    evidence = build_evidence_payload(categories={}, analyst_research=analyst_research)
+    item = next(i for i in evidence if i.evidence_id == "estimate_revision:trend_direction")
+    assert item.value == "IMPROVING"
+
+
+def test_build_evidence_payload_omits_revision_trend_direction_when_review():
+    """A REVIEW direction (insufficient underlying data) must never be
+    cited as if it were a real signal."""
+    analyst_research = _analyst_research(trend_periods=[_trend_period(current=None, prior_30d=9.0)])
+    evidence = build_evidence_payload(categories={}, analyst_research=analyst_research)
+    assert not any(i.evidence_id.startswith("estimate_revision:") for i in evidence)
+
+
+def test_deterministic_provider_bands_net_rating_changes_into_business_outlook():
+    analyst_research = _analyst_research(
+        counts={"upgrades": 4, "downgrades": 0, "initiations": 0, "reiterations": 0}
+    )
+    evidence = build_evidence_payload(categories={}, analyst_research=analyst_research)
+    raw = DeterministicAIRatingProvider().assess("NVDA", evidence)
+    assert raw.business_outlook.value == AIDimensionValue.VERY_POSITIVE
+    assert "analyst_events:net_rating_changes_90d" in raw.business_outlook.supporting_evidence_ids
+
+
+def test_deterministic_provider_bands_revision_direction_into_growth_prospects():
+    analyst_research = _analyst_research(trend_periods=[_trend_period(current=8.0, prior_30d=10.0)])
+    evidence = build_evidence_payload(categories={}, analyst_research=analyst_research)
+    raw = DeterministicAIRatingProvider().assess("NVDA", evidence)
+    assert raw.growth_prospects.value == AIDimensionValue.NEGATIVE
+    assert "estimate_revision:trend_direction" in raw.growth_prospects.supporting_evidence_ids
+
+
+def test_deterministic_provider_never_uses_analyst_research_when_none_was_supplied():
+    categories = {"business_quality": _FakeCategory("Business Quality", 80.0, 1.0, "AVAILABLE")}
+    evidence = build_evidence_payload(categories=categories)  # no analyst_research argument
+    assert not any(
+        item.evidence_id.startswith(("analyst_events:", "estimate_revision:")) for item in evidence
+    )
+    raw = DeterministicAIRatingProvider().assess("NVDA", evidence)
+    assert not any(
+        eid.startswith(("analyst_events:", "estimate_revision:"))
+        for eid in raw.business_outlook.supporting_evidence_ids + raw.growth_prospects.supporting_evidence_ids
+    )
+
+
 # --- AI-on-AI circularity: the legacy ai_research category is never evidence ---
 
 

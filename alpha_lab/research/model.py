@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from alpha_lab.research.ai_rating import AIResearchAssessment
 from alpha_lab.research.analyst_consensus import AnalystConsensus
+from alpha_lab.research.analyst_research import AnalystResearchSummary
 from alpha_lab.research.technical import TechnicalSummary
 
 CATEGORY_LABELS: dict[str, str] = {
@@ -186,6 +187,13 @@ class StockResearch(BaseModel):
     analyst_consensus: AnalystConsensus | None = None
     technical_summary: TechnicalSummary | None = None
     ai_research_assessment: AIResearchAssessment | None = None
+    # PR #26: recent analyst rating-change events and estimate revision
+    # trend, distinct from `analyst_consensus` above (current opinion) and
+    # from the `analyst_revisions` fundamental-score category (derived from
+    # accumulated Estimate snapshots) -- see
+    # alpha_lab.research.analyst_research's module docstring. Same None
+    # convention as the three fields above.
+    analyst_research: AnalystResearchSummary | None = None
 
 
 class ResearchSnapshotSummary(BaseModel):
