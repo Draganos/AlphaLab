@@ -100,6 +100,47 @@ def test_get_stock_research_returns_canonical_stock_research_via_build_stock_res
     assert research.ticker == "AAPL"
 
 
+def test_get_stock_research_analyst_research_is_none_when_nothing_refreshed(research_service):
+    """Matches analyst_consensus/technical_summary's convention: None means
+    not computed for this ticker, never an empty-but-present object."""
+    service, engine = research_service
+    with Session(engine) as session:
+        session.add(Security(ticker="AAPL"))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_record("AAPL")])
+
+    assert service.get_stock_research("AAPL").analyst_research is None
+
+
+def test_get_stock_research_attaches_analyst_research_once_rating_changes_exist(
+    research_service,
+):
+    from datetime import datetime as dt
+
+    from alpha_lab.ingestion.analyst_events import snapshot_analyst_rating_changes
+
+    service, engine = research_service
+    with Session(engine) as session:
+        session.add(Security(ticker="AAPL"))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_record("AAPL")])
+
+    snapshot_analyst_rating_changes(
+        engine,
+        "AAPL",
+        [{
+            "grade_date": dt(2026, 9, 1), "firm": "Test Firm", "to_grade": "Buy",
+            "from_grade": "Hold", "action": "up", "price_target_action": "Raises",
+            "current_price_target": 100.0, "prior_price_target": 90.0,
+        }],
+        provider="FakeProvider",
+    )
+
+    research = service.get_stock_research("AAPL")
+    assert research.analyst_research is not None
+    assert research.analyst_research.recent_rating_changes[0].firm == "Test Firm"
+
+
 def test_get_stock_research_preserves_existing_score_and_coverage_unchanged(
     research_service,
 ):
@@ -334,11 +375,12 @@ def test_historical_snapshot_never_gains_supplemental_data_computed_after_it_was
     must never leak into an already-persisted historical snapshot. Only
     the *current* view (get_stock_research) may reflect newly-refreshed
     supplemental data."""
-    from datetime import timedelta
+    from datetime import datetime as dt, timedelta
 
     import pandas as pd
 
     from alpha_lab.database.models import Price
+    from alpha_lab.ingestion.analyst_events import snapshot_analyst_rating_changes
     from alpha_lab.providers.base import MarketDataProvider
     from alpha_lab.research.supplemental_service import SupplementalResearchService
 
@@ -350,6 +392,7 @@ def test_historical_snapshot_never_gains_supplemental_data_computed_after_it_was
     assert pre_refresh_research.analyst_consensus is None
     assert pre_refresh_research.technical_summary is None
     assert pre_refresh_research.ai_research_assessment is None
+    assert pre_refresh_research.analyst_research is None
     saved = service.persist_snapshot(pre_refresh_research)
 
     # Now populate "current" supplemental state for the same ticker.
@@ -384,11 +427,22 @@ def test_historical_snapshot_never_gains_supplemental_data_computed_after_it_was
     supplemental = SupplementalResearchService(engine)
     supplemental.refresh_analyst_consensus("AAPL", _FakeProvider())
     supplemental.refresh_technical_summary("AAPL")
+    snapshot_analyst_rating_changes(
+        engine,
+        "AAPL",
+        [{
+            "grade_date": dt(2026, 9, 1), "firm": "Test Firm", "to_grade": "Buy",
+            "from_grade": "Hold", "action": "up", "price_target_action": "Raises",
+            "current_price_target": 100.0, "prior_price_target": 90.0,
+        }],
+        provider="FakeProvider",
+    )
 
     # The CURRENT view now reflects the freshly-refreshed data...
     post_refresh_research = service.get_stock_research("AAPL")
     assert post_refresh_research.analyst_consensus is not None
     assert post_refresh_research.technical_summary is not None
+    assert post_refresh_research.analyst_research is not None
 
     # ...but the ALREADY-PERSISTED historical snapshot must not have
     # retroactively gained it.
@@ -396,7 +450,9 @@ def test_historical_snapshot_never_gains_supplemental_data_computed_after_it_was
     assert reloaded_snapshot.analyst_consensus is None
     assert reloaded_snapshot.technical_summary is None
     assert reloaded_snapshot.ai_research_assessment is None
+    assert reloaded_snapshot.analyst_research is None
 
     latest = service.get_latest_snapshot("AAPL")
     assert latest.analyst_consensus is None
     assert latest.technical_summary is None
+    assert latest.analyst_research is None

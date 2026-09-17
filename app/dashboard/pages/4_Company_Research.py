@@ -421,7 +421,15 @@ def _rating_change_action_label(action: str | None) -> str:
     return _ACTION_LABELS.get(action, action.title())
 
 
-def _render_rating_changes_table(ticker: str, events_service: AnalystEventsService) -> None:
+_DIRECTION_LABELS = {
+    "IMPROVING": "Improving",
+    "DETERIORATING": "Deteriorating",
+    "STABLE": "Stable",
+    "REVIEW": "Review (insufficient data)",
+}
+
+
+def _render_rating_changes_table(analyst_research) -> None:
     st.markdown("**Analyst Rating Changes**")
     st.caption(
         "Discrete upgrade/downgrade/initiation/reiteration events, each "
@@ -429,14 +437,20 @@ def _render_rating_changes_table(ticker: str, events_service: AnalystEventsServi
         "Analyst Consensus rating above, not a new score. Not a scoring "
         "input anywhere in AlphaLab."
     )
-    events = events_service.get_rating_changes(ticker, limit=20)
-    if not events:
+    if analyst_research is None or not analyst_research.recent_rating_changes:
         st.info(
             "No analyst rating-change history has been refreshed yet for "
             "this ticker, or this instrument has no analyst coverage "
             "(e.g. most ETFs)."
         )
         return
+    counts = analyst_research.rating_change_counts_90d
+    if counts is not None:
+        st.caption(
+            f"Last 90 days: {counts['upgrades']} upgrade(s), "
+            f"{counts['downgrades']} downgrade(s), {counts['initiations']} "
+            f"initiation(s), {counts['reiterations']} reiteration(s)."
+        )
     st.dataframe(
         [
             {
@@ -456,14 +470,14 @@ def _render_rating_changes_table(ticker: str, events_service: AnalystEventsServi
                     else f"${event.prior_price_target:,.2f}"
                 ),
             }
-            for event in events
+            for event in analyst_research.recent_rating_changes
         ],
         width="stretch",
         hide_index=True,
     )
 
 
-def _render_revision_trend_table(ticker: str, events_service: AnalystEventsService) -> None:
+def _render_revision_trend_table(analyst_research) -> None:
     st.markdown("**Estimate Revision Trend**")
     st.caption(
         "The source's own already-computed EPS-consensus trend and "
@@ -473,8 +487,7 @@ def _render_revision_trend_table(ticker: str, events_service: AnalystEventsServi
         "differently, from AlphaLab's own accumulated estimate history). "
         "This trend evidence is never a scoring input."
     )
-    trend_rows = events_service.get_latest_revision_trend(ticker)
-    if not trend_rows:
+    if analyst_research is None or not analyst_research.revision_trend:
         st.info(
             "No estimate revision trend has been refreshed yet for this "
             "ticker, or this instrument has no analyst estimate coverage."
@@ -489,11 +502,14 @@ def _render_revision_trend_table(ticker: str, events_service: AnalystEventsServi
                 "30d ago": _dash(row.eps_trend_30d_ago),
                 "60d ago": _dash(row.eps_trend_60d_ago),
                 "90d ago": _dash(row.eps_trend_90d_ago),
+                "Direction (vs. 30d ago)": _DIRECTION_LABELS.get(
+                    row.direction.value, row.direction.value
+                ),
                 "Analysts revising up (7d/30d)": f"{_dash(row.revisions_up_last_7d)} / {_dash(row.revisions_up_last_30d)}",
                 "Analysts revising down (7d/30d)": f"{_dash(row.revisions_down_last_7d)} / {_dash(row.revisions_down_last_30d)}",
                 "As of": row.observation_date,
             }
-            for row in trend_rows
+            for row in analyst_research.revision_trend
         ],
         width="stretch",
         hide_index=True,
@@ -749,13 +765,13 @@ try:
         "below. Opening this page or changing the ticker never calls a "
         "provider — only the explicit refresh below does."
     )
-    events_service = AnalystEventsService(engine)
     rating_left, revision_right = st.columns(2)
     with rating_left:
-        _render_rating_changes_table(ticker, events_service)
+        _render_rating_changes_table(research.analyst_research)
     with revision_right:
-        _render_revision_trend_table(ticker, events_service)
+        _render_revision_trend_table(research.analyst_research)
     if st.button("🔄 Refresh rating changes & revision trend", key="refresh_analyst_events"):
+        events_service = AnalystEventsService(engine)
         with st.spinner(f"Refreshing analyst events for {ticker}..."):
             outcome = events_service.refresh_all(ticker, YFinanceProvider())
         if outcome.rating_changes_error is not None:

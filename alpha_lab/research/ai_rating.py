@@ -36,7 +36,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
-AI_RATING_METHODOLOGY_VERSION = "ai-research-rating-v2"
+AI_RATING_METHODOLOGY_VERSION = "ai-research-rating-v3"
 AI_RATING_PROMPT_VERSION = "ai-research-rating-prompt-v1"
 
 # Minimum evidence required before the OVERALL rating may be anything but
@@ -211,15 +211,19 @@ def build_evidence_payload(
     categories: dict[str, "object"],
     analyst_consensus: "object | None" = None,
     technical_summary: "object | None" = None,
+    analyst_research: "object | None" = None,
 ) -> list[AIEvidenceItem]:
     """Extract the bounded, explicit evidence set a provider is allowed to
     see. `categories` is `StockResearch.categories`; kept loosely typed
     here (duck-typed) to avoid a circular import with `alpha_lab.research.model`.
+    `analyst_research` is an `alpha_lab.research.analyst_research.
+    AnalystResearchSummary` (also duck-typed for the same reason).
 
     Deliberately excludes `_EXCLUDED_CATEGORIES` (the existing AI-derived
     `ai_research` category) -- this AI Research Rating synthesizes
-    fundamental/Analyst Consensus/Technical Summary evidence, never an
-    already-AI-derived score, however it was itself computed.
+    fundamental/Analyst Consensus/Technical Summary/Analyst Research
+    evidence, never an already-AI-derived score, however it was itself
+    computed.
     """
     items: list[AIEvidenceItem] = []
     for name, category in categories.items():
@@ -296,6 +300,40 @@ def build_evidence_payload(
                 source="Technical Summary",
             )
         )
+    if analyst_research is not None:
+        counts = analyst_research.rating_change_counts_90d
+        # Only cited when real rating-change history exists (`counts` is
+        # None otherwise) -- a ticker with zero coverage never gets a
+        # fabricated "0 net changes" evidence item; see
+        # AnalystResearchSummary.rating_change_counts_90d's docstring.
+        if counts is not None:
+            net = counts["upgrades"] - counts["downgrades"]
+            items.append(
+                AIEvidenceItem(
+                    evidence_id="analyst_events:net_rating_changes_90d",
+                    description=(
+                        f"Net analyst rating changes (last 90 days) = {net:+d} "
+                        f"({counts['upgrades']} upgrades, {counts['downgrades']} downgrades)"
+                    ),
+                    source="Analyst Rating Changes",
+                    value=float(net),
+                )
+            )
+        if analyst_research.revision_trend:
+            nearest = analyst_research.revision_trend[0]
+            if nearest.direction.value != "REVIEW":
+                items.append(
+                    AIEvidenceItem(
+                        evidence_id="estimate_revision:trend_direction",
+                        description=(
+                            f"EPS estimate revision trend ({nearest.fiscal_period}) = "
+                            f"{nearest.direction.value} (current {nearest.eps_trend_current}, "
+                            f"30d ago {nearest.eps_trend_30d_ago})"
+                        ),
+                        source="Estimate Revision Trend",
+                        value=nearest.direction.value,
+                    )
+                )
     return items
 
 
@@ -508,6 +546,28 @@ _BLENDED_SIGNAL_THRESHOLDS_V1: tuple[tuple[float, AIDimensionValue], ...] = (
 )
 _BLENDED_SIGNAL_FLOOR = AIDimensionValue.VERY_NEGATIVE
 
+# Net analyst upgrades minus downgrades over the trailing 90 days (see
+# AnalystResearchSummary.rating_change_counts_90d). Thresholds are whole
+# analyst-event counts, not a fraction/percentage -- versioned alongside
+# AI_RATING_METHODOLOGY_VERSION, independent of every other threshold set
+# here.
+_NET_RATING_CHANGE_THRESHOLDS_V1: tuple[tuple[float, AIDimensionValue], ...] = (
+    (3, AIDimensionValue.VERY_POSITIVE),
+    (1, AIDimensionValue.POSITIVE),
+    (-1, AIDimensionValue.NEUTRAL),
+    (-3, AIDimensionValue.NEGATIVE),
+)
+_NET_RATING_CHANGE_FLOOR = AIDimensionValue.VERY_NEGATIVE
+
+# RevisionDirection.REVIEW never reaches this mapping -- build_evidence_payload
+# only cites the estimate_revision:trend_direction evidence item when the
+# source data was sufficient to compute a real direction.
+_REVISION_DIRECTION_TO_DIMENSION_VALUE: dict[str, AIDimensionValue] = {
+    "IMPROVING": AIDimensionValue.POSITIVE,
+    "STABLE": AIDimensionValue.NEUTRAL,
+    "DETERIORATING": AIDimensionValue.NEGATIVE,
+}
+
 
 def _band(value: float, thresholds: tuple[tuple[float, AIDimensionValue], ...], floor: AIDimensionValue) -> AIDimensionValue:
     for threshold, banded in thresholds:
@@ -531,6 +591,10 @@ def _dimension_value_for_evidence(evidence_id: str, value: float | str) -> AIDim
     if evidence_id in ("analyst:rating", "technical:overall_rating") and isinstance(value, str):
         banded = _RATING_WORD_TO_DIMENSION_VALUE.get(value)
         return None if banded == AIDimensionValue.REVIEW else banded
+    if evidence_id == "analyst_events:net_rating_changes_90d" and isinstance(value, (int, float)):
+        return _band(value, _NET_RATING_CHANGE_THRESHOLDS_V1, _NET_RATING_CHANGE_FLOOR)
+    if evidence_id == "estimate_revision:trend_direction" and isinstance(value, str):
+        return _REVISION_DIRECTION_TO_DIMENSION_VALUE.get(value)
     return None
 
 
@@ -558,14 +622,32 @@ class DeterministicAIRatingProvider(AIRatingProvider):
     fundamental momentum category, as market/technical context. When two
     sources are blended and their signs disagree, a note is added to
     `contradictions` rather than silently averaging them away.
+
+    PR #26 additions: net analyst rating changes (trailing 90 days) feed
+    `business_outlook` alongside `analyst:rating` -- a recent wave of
+    upgrades/downgrades is further evidence about professional sentiment,
+    the same domain `analyst:rating` already contributes to. EPS estimate
+    revision trend direction feeds `growth_prospects` alongside
+    `fundamental:earnings_growth` -- analysts revising their forward EPS
+    estimate is direct evidence about the growth outlook, not a valuation,
+    technical, or risk signal. Both are omitted entirely (not banded to
+    NEUTRAL) when the underlying evidence was insufficient to compute them;
+    see `build_evidence_payload`.
     """
 
     # dimension -> the evidence_ids it may be derived from, in the order
     # they are cited (not a priority order -- all present ones are blended
     # with equal weight).
     _DIMENSION_SOURCES: dict[str, tuple[str, ...]] = {
-        "business_outlook": ("fundamental:business_quality", "analyst:rating"),
-        "growth_prospects": ("fundamental:earnings_growth",),
+        "business_outlook": (
+            "fundamental:business_quality",
+            "analyst:rating",
+            "analyst_events:net_rating_changes_90d",
+        ),
+        "growth_prospects": (
+            "fundamental:earnings_growth",
+            "estimate_revision:trend_direction",
+        ),
         "competitive_position": ("fundamental:business_quality",),
         "valuation_context": ("fundamental:valuation", "analyst:upside_to_mean"),
         "risk_profile": ("fundamental:financial_strength",),

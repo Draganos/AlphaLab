@@ -29,6 +29,7 @@ Callers never need to know a database or repository is involved.
 from sqlalchemy import Engine
 
 from alpha_lab.config import Settings
+from alpha_lab.research.analyst_events import AnalystEventsService
 from alpha_lab.research.build import build_stock_research
 from alpha_lab.research.comparison import ResearchComparison, compare_stock_research
 from alpha_lab.research.model import ResearchSnapshotSummary, StockResearch
@@ -42,6 +43,7 @@ class ResearchService:
         self._screener = MarketScreenerService(engine, settings)
         self._snapshots = ResearchSnapshotRepository(engine)
         self._supplemental = SupplementalResearchService(engine)
+        self._analyst_events = AnalystEventsService(engine)
 
     # --- Current research (live, not persisted history) -------------------
 
@@ -67,12 +69,13 @@ class ResearchService:
         simply missing). This never touches historical snapshot storage.
 
         Enriched with the current Analyst Consensus / Technical Summary /
-        AI Research Rating, if any have been computed for this ticker — a
-        pure database read of each (see ``SupplementalResearchService``),
-        never a provider call and never a recomputation. Any of the three
-        can be ``None`` independently; that never affects the fundamental
-        score/categories/coverage above, which are computed and read
-        entirely separately.
+        AI Research Rating / Analyst Research (rating changes + revision
+        trend), if any have been computed for this ticker — a pure database
+        read of each (see ``SupplementalResearchService``/
+        ``AnalystEventsService``), never a provider call and never a
+        recomputation. Any of the four can be ``None`` independently; that
+        never affects the fundamental score/categories/coverage above,
+        which are computed and read entirely separately.
         """
         record = self._find_record(ticker)
         if record is None:
@@ -83,6 +86,7 @@ class ResearchService:
                 "analyst_consensus": self._supplemental.get_analyst_consensus(ticker),
                 "technical_summary": self._supplemental.get_technical_summary(ticker),
                 "ai_research_assessment": self._supplemental.get_ai_research_assessment(ticker),
+                "analyst_research": self._analyst_events.get_research_summary(ticker),
             }
         )
 

@@ -121,6 +121,21 @@ def test_get_latest_revision_trend_returns_only_the_newest_observation_per_perio
     assert rows[0].observation_date == date(2026, 9, 14)
 
 
+def test_get_research_summary_shows_up_to_20_recent_changes_by_default(engine):
+    """Regression: get_research_summary must match the Company Research
+    UI's pre-existing display count (get_rating_changes(ticker, limit=20)),
+    not silently fall back to build_analyst_research_summary's own smaller
+    default (10), which would drop real events from view with no
+    indication anything was hidden."""
+    events = [
+        {**_EVENT, "grade_date": datetime(2026, 1, day)} for day in range(1, 16)
+    ]  # 15 distinct events -- more than the smaller default, fewer than 20
+    snapshot_analyst_rating_changes(engine, "NVDA", events, provider="FakeProvider")
+    service = AnalystEventsService(engine)
+    summary = service.get_research_summary("NVDA", as_of=date(2026, 9, 14))
+    assert len(summary.recent_rating_changes) == 15
+
+
 # --- AnalystEventsService.refresh_all: independent per-domain failure ------
 
 

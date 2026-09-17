@@ -220,6 +220,36 @@ def test_ai_assessment_uses_the_explicitly_passed_analyst_and_technical_evidence
     assert assessment.dimensions["business_outlook"].value != AIDimensionValue.REVIEW
 
 
+def test_refresh_all_feeds_analyst_research_evidence_into_ai_assessment_when_it_exists(engine):
+    """refresh_all reads whatever Analyst Research evidence (rating
+    changes/revision trend) is already stored -- a pure DB read, no
+    provider call for that domain -- and passes it into the AI assessment,
+    where it can be cited under its own namespaced evidence IDs."""
+    from alpha_lab.ingestion.analyst_events import snapshot_analyst_rating_changes
+
+    _seed_security_with_prices(engine)
+    snapshot_analyst_rating_changes(
+        engine,
+        "NVDA",
+        [
+            {
+                "grade_date": pd.Timestamp("2026-09-01").to_pydatetime(), "firm": "Test Firm",
+                "to_grade": "Buy", "from_grade": "Hold", "action": "up",
+                "price_target_action": "Raises", "current_price_target": 100.0,
+                "prior_price_target": 90.0,
+            },
+        ],
+        provider="FakeProvider",
+    )
+    service = SupplementalResearchService(engine)
+    research = _stub_research(overall_coverage=1.0)
+
+    result = service.refresh_all("NVDA", _FakeAnalystProvider(_raw_consensus()), research)
+
+    assert result.ai_research_assessment is not None
+    assert "analyst_events:net_rating_changes_90d" in result.ai_research_assessment.supporting_evidence
+
+
 def test_ai_assessment_round_trips_through_persistence(engine):
     _seed_security_with_prices(engine)
     service = SupplementalResearchService(engine)

@@ -41,6 +41,8 @@ from alpha_lab.research.ai_rating import (
     configured_ai_rating_provider,
 )
 from alpha_lab.research.analyst_consensus import AnalystConsensus, build_analyst_consensus
+from alpha_lab.research.analyst_events import AnalystEventsService
+from alpha_lab.research.analyst_research import AnalystResearchSummary
 from alpha_lab.research.model import StockResearch
 from alpha_lab.research.technical import TechnicalSummary, build_technical_summary
 
@@ -62,6 +64,7 @@ class SupplementalRefreshResult:
 class SupplementalResearchService:
     def __init__(self, engine: Engine):
         self.engine = engine
+        self._analyst_events = AnalystEventsService(engine)
 
     # --- reads: pure DB, no network, no computation ------------------------
 
@@ -145,18 +148,20 @@ class SupplementalResearchService:
         *,
         analyst_consensus: AnalystConsensus | None = None,
         technical_summary: TechnicalSummary | None = None,
+        analyst_research: AnalystResearchSummary | None = None,
     ) -> AIResearchAssessment:
         """Synthesize already-computed evidence. `research` must be the
         base StockResearch (fundamental evidence only); pass the current
-        analyst_consensus/technical_summary explicitly so this never has to
-        read them back itself. Raises EvidenceViolation if the configured
-        provider cites evidence outside what was supplied -- never silently
-        corrected."""
+        analyst_consensus/technical_summary/analyst_research explicitly so
+        this never has to read them back itself. Raises EvidenceViolation if
+        the configured provider cites evidence outside what was supplied --
+        never silently corrected."""
         symbol = ticker.strip().upper()
         evidence = build_evidence_payload(
             categories=research.categories,
             analyst_consensus=analyst_consensus,
             technical_summary=technical_summary,
+            analyst_research=analyst_research,
         )
         # Domain-aware: a missing Analyst Consensus or Technical Summary
         # counts as 0 coverage for that domain, never as "not applicable"
@@ -206,8 +211,18 @@ class SupplementalResearchService:
         technical = self.refresh_technical_summary(ticker)
         ai_assessment: AIResearchAssessment | None = None
         if analyst_error is None:
+            # Pure DB read (no provider call) of whatever Analyst Research
+            # evidence (rating changes / revision trend) is already stored
+            # -- refreshing that evidence is its own separate explicit
+            # action (AnalystEventsService.refresh_all), never triggered
+            # implicitly by an AI refresh.
+            analyst_research = self._analyst_events.get_research_summary(ticker)
             ai_assessment = self.refresh_ai_research_assessment(
-                ticker, research, analyst_consensus=analyst, technical_summary=technical
+                ticker,
+                research,
+                analyst_consensus=analyst,
+                technical_summary=technical,
+                analyst_research=analyst_research,
             )
         return SupplementalRefreshResult(
             analyst_consensus=analyst,
