@@ -726,6 +726,19 @@ def test_etf_not_applicable_category_metrics_are_marked_not_applicable():
     assert all(m.status == MetricStatus.UNAVAILABLE for m in momentum.metrics)
 
 
+def test_not_applicable_metrics_are_never_listed_as_unavailable_metrics():
+    """Regression: unavailable_metrics means 'expected but missing' -- a
+    NOT_APPLICABLE metric must never appear in it, or Company Research's
+    'Unavailable — no evidence available: ...' caption (and
+    alpha_lab.evidence_coverage's 'N metric(s) unavailable' reason) would
+    render a structurally-inapplicable metric as though it were a genuine
+    gap, directly under a status line that already says NOT_APPLICABLE."""
+    research = build_stock_research(_etf_record())
+    assert research.categories["valuation"].unavailable_metrics == []
+    # A genuinely-missing metric on an applicable category is unaffected.
+    assert research.categories["momentum"].unavailable_metrics
+
+
 def test_equity_categories_are_never_not_applicable():
     """Regression: EQUITY (the default fixture asset_type) must classify
     zero-coverage categories as UNAVAILABLE exactly as before this PR --

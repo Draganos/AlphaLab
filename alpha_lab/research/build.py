@@ -139,7 +139,12 @@ def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
         provenance = metric_provenance.get(metric_name) or {}
         available = value is not None
         percentile = record.percentile_metrics.get(metric_name) if available else None
-        if not available:
+        if not available and applicable:
+            # A NOT_APPLICABLE metric (see `status` below) is never listed
+            # as "unavailable" -- that list means "expected but missing",
+            # and downstream consumers (Company Research's expander,
+            # alpha_lab.evidence_coverage's PARTIAL reason) render it as a
+            # genuine gap, which a structurally-inapplicable metric is not.
             unavailable.append(metric_name)
         metrics.append(
             MetricEvidence(
