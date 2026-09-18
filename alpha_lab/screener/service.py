@@ -34,6 +34,12 @@ from alpha_lab.strategy import HistoricalScoringService, coverage_interpretation
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.themes import derive_themes
 
+# Imported lazily (inside `_applicable_rating_weights`, not at module level):
+# `alpha_lab.research` (and its __init__) imports `alpha_lab.research.build`,
+# which imports CATEGORY_EVIDENCE_METRICS/LiveResearchRecord from *this*
+# module -- a top-level import here would be circular whenever this module
+# is the first of the two to be imported. See that function's docstring.
+
 CATEGORY_PROVENANCE = {
     "earnings_growth": "fundamental",
     "analyst_revisions": "estimate",
@@ -409,7 +415,7 @@ class MarketScreenerService:
         )
         coverage = calculate_coverage(
             category_coverage,
-            self.settings.rating_weights,
+            _applicable_rating_weights(self.settings.rating_weights, data["security"].asset_type),
             ai_available=data["ai_attributable"],
             historical_available_weight=base.coverage if base else 0,
         )
@@ -676,6 +682,56 @@ def _category_evidence_coverage(
         expected = sum(weights.values())
         coverage[category] = available / expected if expected else 0.0
     return coverage
+
+
+def _applicable_rating_weights(
+    rating_weights: dict[str, float], asset_type: str | None
+) -> dict[str, float]:
+    """PR #29: exclude categories that are structurally not applicable to
+    this security's type (e.g. `valuation` for an ETF) from the weights
+    `calculate_coverage` averages over, and renormalize the remainder back
+    to sum to 1.0 -- so `overall_live_coverage`/`quantitative_coverage`
+    reflect coverage of what's applicable, never diluted by categories
+    that were never expected to have evidence. See
+    `alpha_lab.research.security_type`'s module docstring for the full
+    per-category rationale.
+
+    For EQUITY (and any security type with nothing excluded), this returns
+    `rating_weights` unchanged in content (same keys, same values, since
+    `settings.rating_weights` is validated to already sum to 1.0) -- the
+    live equity coverage pipeline is untouched by this function.
+
+    Imported lazily to avoid a circular import: `alpha_lab.research`
+    (triggered by importing `alpha_lab.research.security_type`) imports
+    `alpha_lab.research.build`, which imports `CATEGORY_EVIDENCE_METRICS`/
+    `LiveResearchRecord` from this module -- a module-level import here
+    would fail whenever this module is the first of the two ever imported.
+    """
+    from alpha_lab.research.security_type import is_category_applicable, normalize_security_type
+
+    security_type = normalize_security_type(asset_type)
+    applicable_weights = {
+        name: weight
+        for name, weight in rating_weights.items()
+        if is_category_applicable(name, security_type)
+    }
+    if len(applicable_weights) == len(rating_weights):
+        return rating_weights
+    if not applicable_weights:
+        # Pathological: nothing at all is applicable to this security type
+        # (shouldn't happen -- OTHER/EQUITY exclude nothing, and every
+        # defined SecurityType leaves at least one category applicable).
+        # Falling back to the unfiltered weights is safer than returning an
+        # empty dict, which would break calculate_coverage's iteration.
+        return rating_weights
+    total = sum(applicable_weights.values())
+    if not total:
+        # Categories were genuinely excluded, but the remainder happens to
+        # be all zero-weighted -- return them as-is (still correctly
+        # excluding the inapplicable ones) rather than falling back to the
+        # unfiltered weights, which would silently reintroduce them.
+        return applicable_weights
+    return {name: weight / total for name, weight in applicable_weights.items()}
 
 
 def _merge_live_raw(

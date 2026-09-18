@@ -1196,3 +1196,104 @@ three established smoke tests pass; every scoring-path file diff is empty
 -- this PR adds a new read-only package and one new dashboard page, and
 touches no file under `alpha_lab.research`/`.screener`/`.strategy`/
 `.backtest`/`.portfolio`/`.ratings`/`.factors`.
+
+## 26. Security-Type Capability Model (PR #29)
+
+AlphaLab's eight fundamental scoring categories were designed for an
+operating company with its own income statement and balance sheet. Before
+this PR, every category was treated as equally applicable to every
+security, so an ETF's `business_quality`/`earnings_growth`/
+`financial_strength`/`valuation`/`analyst_revisions`/`shareholder_return`
+categories all read `UNAVAILABLE` -- indistinguishable from an equity
+whose fundamentals fetch genuinely failed. Confirmed on the real universe
+before this PR: FTEC/GDX's `overall_live_coverage` was 15% and confidence
+2.8/10, diluted by six categories that were never expected to have any
+evidence, not six genuine gaps.
+
+**`alpha_lab.research.security_type`** (new, pure, zero dependencies):
+`SecurityType` (`EQUITY`/`ETF`/`OTHER`, extensible), `normalize_security_
+type` (maps the yfinance-sourced `asset_type`/`quoteType` string,
+case-insensitively; anything unrecognized -- indices, futures,
+currencies, mutual funds, a future type nobody has reviewed yet -- maps
+to `OTHER`), and `NOT_APPLICABLE_CATEGORIES`, which excludes exactly six
+categories for `ETF` (the ones that need a company's own income
+statement, balance sheet, EPS estimates, or share buybacks -- see the
+module's docstring for the category-by-category rationale) and nothing
+for `EQUITY`/`OTHER`. `momentum` (pure price history) and `ai_research`
+(independently gated by document attributability) stay applicable to
+ETFs.
+
+**Wiring, in three places, each the smallest change that could carry the
+distinction through to where it's read:**
+
+1. `alpha_lab.research.model.CategoryStatus`/`MetricStatus` gain
+   `NOT_APPLICABLE` (the latter was already reserved for exactly this,
+   unused, since Phase 3). `alpha_lab.research.build._build_category` sets
+   it for a category/metric that's both genuinely empty (`coverage <= 0`)
+   *and* classified not-applicable for the security's type -- real
+   evidence that happens to exist despite the classification is never
+   suppressed (see `test_genuine_evidence_in_a_not_applicable_category_is_
+   never_suppressed`).
+2. `_confidence_factors`' `category_breadth` (20% of `confidence`) now
+   averages only over categories whose status isn't `NOT_APPLICABLE`, so
+   it no longer divides by 8 when only 2 categories could ever apply.
+3. `alpha_lab.screener.service._applicable_rating_weights` filters
+   `rating_weights` to applicable categories and renormalizes to sum to
+   1.0 before `calculate_coverage` runs, so `overall_live_coverage`/
+   `quantitative_coverage` (50%/other of `confidence`) reflect coverage of
+   what's applicable, never diluted by what isn't. For `EQUITY` this
+   returns the identical `rating_weights` object, not just an equal one.
+
+**Deliberately NOT touched**: `alpha_lab.ratings.coverage.calculate_
+coverage` itself (unchanged signature and logic -- it already iterates
+only over whatever `weights` dict it's given), and `_category_score`/
+`overall_score` (already excluded `None`-score categories from its own
+weighted average via `available_weight`, so an ETF's `overall_score` was
+never diluted by inapplicable categories in the first place -- this PR
+touches only the separate coverage/confidence honesty metrics).
+Historical scoring/backtesting (`alpha_lab.strategy.historical`,
+`alpha_lab.factors`) shares no code with the live screener path touched
+here, confirmed by grep -- untouched, as required.
+
+**`alpha_lab.evidence_coverage`** (PR #28's dashboard) gained matching
+`CoverageStatus.NOT_APPLICABLE` handling: `_fundamental_row` reports it
+distinctly (never as `NO_EVIDENCE`), and `summarize_universe_breakdown`
+masks `NOT_APPLICABLE` rows out of `avg_coverage` the same way -- a
+`NOT_APPLICABLE` row's `coverage` is a real `0.0`, unlike `NOT_COMPUTED`'s
+`None`/NaN, so it needed its own exclusion. A group whose every row is
+`NOT_APPLICABLE` (e.g. "Valuation" grouped over an all-ETF universe) sorts
+last (with `FULL`), not first like a genuinely empty group.
+
+**Bugs caught in self-review before opening the PR**: (1)
+`_applicable_rating_weights` fell back to the *unfiltered* weights
+whenever the applicable remainder summed to zero weight, silently
+reintroducing the excluded categories in that edge case -- fixed to
+return the correctly-excluded-but-unrenormalized dict instead, only
+falling back when literally nothing is applicable. (2)
+`summarize_universe_breakdown` treated an all-`NOT_APPLICABLE` group's
+`NaN` `avg_coverage` identically to an all-`NOT_COMPUTED` group's,
+sorting both first -- fixed with an explicit `all_not_applicable` check
+that pushes the former to sort last instead. Regression tests:
+`test_applicable_rating_weights_still_excludes_when_remainder_is_all_
+zero_weighted`, `test_summarize_universe_breakdown_sorts_all_not_
+applicable_groups_last_not_first`.
+
+**Real-data validation** (rebuilt current research for the live 11-
+security universe, `scripts/rebuild_research.py`, DB backed up first):
+NVDA/MA/AAL's `overall_score`, `overall_live_coverage`, `confidence`, and
+every category's `coverage`/`status` are byte-identical before and after
+this PR. FTEC/GDX: `overall_live_coverage` 15% -> 60%, confidence 2.8/10
+-> 4.2/10, and `business_quality`/`earnings_growth`/`financial_strength`/
+`valuation`/`analyst_revisions`/`shareholder_return` all read
+`NOT_APPLICABLE` (never `NO_EVIDENCE`); `momentum` stays `PARTIAL` (real
+evidence) and `ai_research` stays `UNAVAILABLE` (genuinely no attributable
+documents, not reclassified). Verified live in both Company Research and
+Evidence Coverage dashboards via a headless browser -- no page errors, the
+`NOT_APPLICABLE` legend/rows render distinctly from `UNAVAILABLE`, and the
+Universe Breakdown's new `not_applicable` column and corrected
+`avg_coverage` both show correctly for a mixed equity/ETF universe.
+
+Full test suite (`tests/test_stock_research_model.py` +6,
+`tests/test_security_type.py` new (7 tests), `tests/test_live_screener_
+safety_phase3.py` +6, `tests/test_coverage_summary.py` +3) and all three
+established smoke tests pass.

@@ -29,6 +29,7 @@ from alpha_lab.research.model import (
     MetricStatus,
     StockResearch,
 )
+from alpha_lab.research.security_type import is_category_applicable, normalize_security_type
 from alpha_lab.screener.service import CATEGORY_EVIDENCE_METRICS, LiveResearchRecord
 
 # A category is AVAILABLE only once every documented metric for it is
@@ -128,6 +129,8 @@ def build_stock_research(
 def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
     metric_names = CATEGORY_EVIDENCE_METRICS[name]
     metric_provenance = record.provenance.get("metrics", {})
+    security_type = normalize_security_type(record.asset_type)
+    applicable = is_category_applicable(name, security_type)
     metrics: list[MetricEvidence] = []
     evidence: list[str] = []
     unavailable: list[str] = []
@@ -152,7 +155,13 @@ def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
                 is_calculated=metric_name not in DIRECTLY_SOURCED_METRICS,
                 formula=FORMULAS.get(metric_name),
                 inputs=_known_inputs(metric_name, record),
-                status=MetricStatus.AVAILABLE if available else MetricStatus.UNAVAILABLE,
+                status=(
+                    MetricStatus.AVAILABLE
+                    if available
+                    else MetricStatus.NOT_APPLICABLE
+                    if not applicable
+                    else MetricStatus.UNAVAILABLE
+                ),
             )
         )
         if available:
@@ -166,7 +175,12 @@ def _build_category(name: str, record: LiveResearchRecord) -> CategoryResult:
     score = record.category_scores.get(name)
     coverage = record.category_coverage.get(name, 0.0)
     if coverage <= 0:
-        status = CategoryStatus.UNAVAILABLE
+        # Genuinely no evidence: distinguish "not applicable to this
+        # security type" (e.g. valuation for an ETF) from "expected but
+        # missing" (UNAVAILABLE). Real evidence that somehow exists despite
+        # the classification is never suppressed -- see the coverage > 0
+        # branches below, which apply regardless of `applicable`.
+        status = CategoryStatus.NOT_APPLICABLE if not applicable else CategoryStatus.UNAVAILABLE
     elif score is not None and coverage >= _FULL_COVERAGE:
         status = CategoryStatus.AVAILABLE
     else:
@@ -252,9 +266,20 @@ def _confidence_factors(
     "no evidence".
     """
     overall_coverage = _clip01(record.overall_live_coverage)
-    category_breadth = sum(
-        category.coverage for category in categories.values()
-    ) / len(CATEGORY_ORDER)
+    # PR #29: a NOT_APPLICABLE category (e.g. valuation for an ETF) is
+    # excluded from both the sum and the denominator -- it must not count
+    # against breadth as though it were missing evidence. For EQUITY (and
+    # any security type with nothing excluded), applicable_categories is
+    # every category, so this is identical to averaging over CATEGORY_ORDER.
+    applicable_categories = [
+        category for category in categories.values()
+        if category.status != CategoryStatus.NOT_APPLICABLE
+    ]
+    category_breadth = (
+        sum(category.coverage for category in applicable_categories) / len(applicable_categories)
+        if applicable_categories
+        else 0.0
+    )
     freshness_factor = _freshness_factor(record.evaluation_date, categories)
     source_quality_factor = _source_quality_factor(categories)
     penalty_applied = record.data_quality_status != "valid"

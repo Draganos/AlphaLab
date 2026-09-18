@@ -11,10 +11,16 @@ availability and a deterministic, documented confidence score.
 
 Design notes / deliberate scope limits:
 
-* ``MetricStatus.NOT_APPLICABLE`` exists so security-type-aware applicability
-  (banks, REITs, ETFs, ...) has somewhere to plug in later; this module does
-  not yet classify any metric as not applicable — see AlphaLab project brief
-  section 13. Every metric considered here defaults to AVAILABLE/UNAVAILABLE.
+* ``MetricStatus.NOT_APPLICABLE``/``CategoryStatus.NOT_APPLICABLE``: as of
+  PR #29, ``alpha_lab.research.build._build_category`` sets these for a
+  category/metric that ``alpha_lab.research.security_type`` classifies as
+  structurally not applicable to the security's type (e.g. ``valuation``
+  for an ETF) and which genuinely has no evidence -- never merely because a
+  metric is missing for an equity, and never overriding real evidence that
+  happens to be present despite the classification. See
+  ``alpha_lab.research.security_type``'s module docstring for the full
+  per-category rationale and the deliberate EQUITY/OTHER-exclude-nothing
+  default (extensible to other security types beyond EQUITY/ETF later).
 * ``MetricStatus.INVALID`` is reserved and currently unused. Verified against
   the live pipeline: ``alpha_lab.data_quality.assess_field``/``assess_freshness``
   (the module's only INVALID-adjacent machinery, using ``QualityStatus``) is
@@ -91,6 +97,12 @@ class CategoryStatus(StrEnum):
     # Zero evidence (coverage <= 0). Never used merely because a score is
     # absent; see PARTIAL for a category with some evidence but no score.
     UNAVAILABLE = "UNAVAILABLE"
+    # PR #29: this category is structurally not applicable to this
+    # security's type (e.g. business_quality for an ETF) -- distinct from
+    # UNAVAILABLE, which means evidence was expected but is missing. Never
+    # counted as missing evidence against coverage/confidence; see
+    # alpha_lab.research.security_type's module docstring.
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class MetricEvidence(BaseModel):

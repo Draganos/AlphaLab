@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+import pytest
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
@@ -8,6 +9,7 @@ from alpha_lab.database.models import Estimate, Fundamental, Price, Security
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.screener.service import (
     CATEGORY_PROVENANCE,
+    _applicable_rating_weights,
     _live_data_quality_reason,
     _live_percentiles,
     _merge_live_raw,
@@ -21,6 +23,61 @@ def test_category_provenance_mapping_is_semantically_correct():
     assert CATEGORY_PROVENANCE["valuation"] == "fundamental"
     assert CATEGORY_PROVENANCE["business_quality"] == "fundamental"
     assert CATEGORY_PROVENANCE["ai_research"] == "ai"
+
+
+# --- PR #29: security-type-aware coverage weighting ------------------------
+
+_EIGHT_CATEGORY_WEIGHTS = {
+    "business_quality": 0.2, "earnings_growth": 0.15, "financial_strength": 0.15,
+    "valuation": 0.15, "momentum": 0.15, "analyst_revisions": 0.1,
+    "ai_research": 0.05, "shareholder_return": 0.05,
+}
+
+
+def test_applicable_rating_weights_returns_the_same_object_for_equity():
+    """No security type excludes anything for EQUITY -- the live equity
+    coverage pipeline must be untouched, down to returning the identical
+    dict object rather than merely an equal one."""
+    result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, "EQUITY")
+    assert result is _EIGHT_CATEGORY_WEIGHTS
+
+
+def test_applicable_rating_weights_returns_the_same_object_for_unrecognized_type():
+    result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, "INDEX")
+    assert result is _EIGHT_CATEGORY_WEIGHTS
+
+
+def test_applicable_rating_weights_returns_the_same_object_for_none():
+    result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, None)
+    assert result is _EIGHT_CATEGORY_WEIGHTS
+
+
+def test_applicable_rating_weights_excludes_and_renormalizes_for_etf():
+    result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, "ETF")
+    assert set(result) == {"momentum", "ai_research"}
+    assert sum(result.values()) == pytest.approx(1.0)
+    # Original relative proportion (0.15 : 0.05 = 3 : 1) is preserved.
+    assert result["momentum"] == pytest.approx(0.75)
+    assert result["ai_research"] == pytest.approx(0.25)
+
+
+def test_applicable_rating_weights_is_case_insensitive():
+    result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, "etf")
+    assert set(result) == {"momentum", "ai_research"}
+
+
+def test_applicable_rating_weights_still_excludes_when_remainder_is_all_zero_weighted():
+    """Regression: if the only applicable categories happen to be
+    zero-weighted, the inapplicable ones must still be excluded from the
+    returned dict -- never silently reintroduced via an unfiltered
+    fallback just because the remainder can't be renormalized."""
+    weights = {**_EIGHT_CATEGORY_WEIGHTS, "momentum": 0.0, "ai_research": 0.0}
+    # Rebalance so the dict still sums to 1.0 overall (not required by the
+    # function itself, but keeps this fixture realistic).
+    weights["business_quality"] = weights["business_quality"] + 0.2
+    result = _applicable_rating_weights(weights, "ETF")
+    assert set(result) == {"momentum", "ai_research"}
+    assert result == {"momentum": 0.0, "ai_research": 0.0}
 
 
 def test_invalid_price_rows_do_not_satisfy_live_history():

@@ -49,7 +49,7 @@ from alpha_lab.research.ai_rating import (
 )
 from alpha_lab.research.analyst_consensus import AnalystConsensus
 from alpha_lab.research.analyst_research import AnalystResearchSummary
-from alpha_lab.research.model import StockResearch
+from alpha_lab.research.model import CategoryStatus, StockResearch
 from alpha_lab.research.technical import (
     MIN_COVERAGE_THRESHOLD,
     TOTAL_INDICATOR_COUNT,
@@ -69,6 +69,12 @@ class CoverageStatus(StrEnum):
     # The underlying research object itself is None -- never computed for
     # this research state, distinct from "computed and found empty".
     NOT_COMPUTED = "NOT_COMPUTED"
+    # PR #29: this category is structurally not applicable to this
+    # security's type (e.g. business_quality for an ETF) -- never counted
+    # against coverage as though it were missing evidence. Distinct from
+    # NO_EVIDENCE (expected but absent) and NOT_COMPUTED (not yet computed
+    # at all); see alpha_lab.research.security_type's module docstring.
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 def _status_for(coverage: float | None) -> CoverageStatus:
@@ -107,6 +113,20 @@ def _fundamental_row(name: str, research: StockResearch) -> CoverageRow:
     category = research.categories[name]
     available_metrics = [m for m in category.metrics if m.status.value == "AVAILABLE"]
     retrieved_at_values = [m.retrieved_at for m in available_metrics if m.retrieved_at is not None]
+    if category.status == CategoryStatus.NOT_APPLICABLE:
+        # Structurally not applicable to this security's type -- never
+        # rendered as though it were a coverage gap. See
+        # alpha_lab.research.security_type's module docstring.
+        return CoverageRow(
+            category=name,
+            label=category.label,
+            coverage=category.coverage,
+            status=CoverageStatus.NOT_APPLICABLE,
+            evidence_count=len(available_metrics),
+            freshness=max(retrieved_at_values) if retrieved_at_values else None,
+            providers=sorted(set(category.sources)),
+            limitation_reason="not applicable to this security type",
+        )
     status = _status_for(category.coverage)
     reason = None
     if status is CoverageStatus.NO_EVIDENCE:
@@ -416,6 +436,10 @@ def summarize_universe_breakdown(flat_rows: list[dict], group_by: str) -> list[d
     Security Detail tab already orders `NOT_COMPUTED` ahead of `PARTIAL`/
     `FULL` (see `_STATUS_ORDER` in the dashboard page): the weakest
     evidence state leads either view, not just the lowest numeric value.
+    The opposite NaN case -- every row in the group is `NOT_APPLICABLE`
+    (e.g. "Valuation" grouped over a universe of nothing but ETFs) -- sorts
+    last instead, alongside `FULL`: it is not evidence that's missing, and
+    must never present as though it were the weakest group in the view.
     """
     if group_by not in _BREAKDOWN_GROUP_COLUMNS:
         raise ValueError(f"Unknown breakdown dimension: {group_by!r}")
@@ -423,16 +447,33 @@ def summarize_universe_breakdown(flat_rows: list[dict], group_by: str) -> list[d
     if frame.empty:
         return []
     source = frame if group_by == "provider" else frame.drop_duplicates(subset=["ticker", "category"])
+    # PR #29: a NOT_APPLICABLE row's `coverage` is a real 0.0, not NaN like
+    # NOT_COMPUTED's -- masked here so `avg_coverage` never counts a
+    # structurally-inapplicable category against a group's average, the
+    # same "not applicable != missing evidence" rule build.py already
+    # applies to category_breadth/confidence.
+    coverage_for_average = source["coverage"].where(
+        source["status"] != CoverageStatus.NOT_APPLICABLE.value
+    )
     grouped = (
-        source.groupby(group_by, dropna=False)
+        source.assign(_coverage_for_average=coverage_for_average)
+        .groupby(group_by, dropna=False)
         .agg(
             rows=("category", "count"),
-            avg_coverage=("coverage", "mean"),
+            avg_coverage=("_coverage_for_average", "mean"),
             full_coverage=("status", lambda s: (s == CoverageStatus.FULL.value).sum()),
             no_evidence=("status", lambda s: (s == CoverageStatus.NO_EVIDENCE.value).sum()),
             not_computed=("status", lambda s: (s == CoverageStatus.NOT_COMPUTED.value).sum()),
+            not_applicable=("status", lambda s: (s == CoverageStatus.NOT_APPLICABLE.value).sum()),
         )
         .reset_index()
-        .sort_values("avg_coverage", ascending=True, na_position="first")
     )
-    return grouped.to_dict("records")
+    # A group whose every row is NOT_APPLICABLE has avg_coverage == NaN for
+    # the same reason a NOT_COMPUTED-only group does, but the two must sort
+    # oppositely -- push the former to +inf (sorts last, with FULL) instead
+    # of leaving it NaN (which na_position="first" would float to the top).
+    all_not_applicable = grouped["not_applicable"] == grouped["rows"]
+    sort_key = grouped["avg_coverage"].mask(all_not_applicable, float("inf"))
+    return grouped.assign(_sort_key=sort_key).sort_values(
+        "_sort_key", ascending=True, na_position="first"
+    ).drop(columns=["_sort_key"]).to_dict("records")
