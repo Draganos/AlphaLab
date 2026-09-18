@@ -1154,6 +1154,28 @@ one provider today), confirmed by an unchanged Universe Breakdown table
 before/after the fix in the live UI -- but wrong as soon as a category
 gains a second provider.
 
+**Bugs caught in a third bug-check pass** (self-review): `_ai_evidence_row`
+and `_technical_row` both left `limitation_reason` as `None` for a
+`PARTIAL` row that already cleared every applicable gate/threshold --
+every other row builder in this module explains any non-`FULL` status,
+but these two only explained the below-gate case. Confirmed actually
+happening on the real 5-ticker universe: NVDA/MA/AAL's AI Evidence rows
+(87-92% coverage, necessarily `PARTIAL`) rendered "no further detail
+available" in the UI despite being visibly not fully covered. Fixed by
+adding a generic `"{available}/{total} ... assessable/available"` reason
+for that PARTIAL-but-above-gate case in both row builders, matching the
+style already used by the fundamental-category and Analyst Consensus
+rows. Regression tests:
+`test_technical_row_still_explains_partial_coverage_above_the_gate`,
+`test_ai_evidence_row_still_explains_partial_coverage_that_clears_both_gates`.
+A third, more minor finding (`summarize_universe_breakdown`'s
+`na_position="first"` sort intentionally differs from the pre-refactor
+inline groupby's pandas default) was confirmed correct-as-is -- it matches
+the Security Detail tab's existing "`NOT_COMPUTED` sorts first" convention
+-- and only needed a docstring note plus a regression test
+(`test_summarize_universe_breakdown_sorts_all_not_computed_groups_first`),
+no behavior change.
+
 **Real-data validation** (real 5-ticker universe plus the full persisted
 universe including macro-proxy instruments): NVDA/MA/AAL correctly show
 `FULL` Analyst Consensus/History/Revisions; FTEC/GDX correctly show
@@ -1169,7 +1191,7 @@ fabricated penalty. A universe-wide Provider breakdown correctly separates
 contributions. Verified live in the Streamlit UI (both tabs, all five
 breakdown dimensions) via a headless browser, not just by script.
 
-Full test suite (`tests/test_coverage_summary.py`, 19 new tests) and all
+Full test suite (`tests/test_coverage_summary.py`, 22 new tests) and all
 three established smoke tests pass; every scoring-path file diff is empty
 -- this PR adds a new read-only package and one new dashboard page, and
 touches no file under `alpha_lab.research`/`.screener`/`.strategy`/

@@ -216,6 +216,26 @@ def test_technical_row_flags_below_minimum_coverage_gate():
     assert "minimum indicator coverage gate" in row.limitation_reason
 
 
+def test_technical_row_still_explains_partial_coverage_above_the_gate():
+    """Regression: a PARTIAL row that already clears MIN_COVERAGE_THRESHOLD
+    must still carry a reason -- every other row builder in this module
+    explains any non-FULL status, and this one silently left reason=None
+    whenever coverage was PARTIAL-but-above-gate."""
+    technical = TechnicalSummary(
+        ticker="NVDA", overall_score=0.2, overall_rating=TechnicalRating.NEUTRAL,
+        moving_average_score=0.2, moving_average_rating=TechnicalRating.NEUTRAL,
+        oscillator_score=0.2, oscillator_rating=TechnicalRating.NEUTRAL,
+        indicators=[], moving_average_available=5, moving_average_total=8,
+        oscillator_available=4, oscillator_total=7, coverage=9 / 15, confidence=0.6,
+        timeframe=Timeframe.DAILY, as_of=date(2026, 9, 17), source="yfinance",
+    )
+    research = _stock_research(technical_summary=technical)
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "technical")
+    assert row.status == CoverageStatus.PARTIAL
+    assert row.limitation_reason == "9/15 indicators available"
+
+
 def test_ai_evidence_row_reason_distinguishes_gate_from_dimension_shortfall():
     dimensions = {name: AIDimensionAssessment(value=AIDimensionValue.REVIEW, confidence=0.0) for name in DIMENSION_NAMES}
     dimensions["business_outlook"] = AIDimensionAssessment(value=AIDimensionValue.POSITIVE, confidence=0.5)
@@ -286,6 +306,33 @@ def test_ai_evidence_row_never_carries_a_reason_when_status_is_full():
     row = next(r for r in summary.rows if r.category == "ai_evidence")
     assert row.status == CoverageStatus.FULL
     assert row.limitation_reason is None
+
+
+def test_ai_evidence_row_still_explains_partial_coverage_that_clears_both_gates():
+    """Regression: a PARTIAL row that already clears both
+    AI_MINIMUM_EVIDENCE_COVERAGE and AI_MINIMUM_ASSESSABLE_DIMENSIONS must
+    still carry a reason -- this is exactly the real 5-ticker validation
+    case (NVDA/MA/AAL at 87-92% coverage), where the row previously fell
+    through both gate checks and silently left reason=None."""
+    dimensions = {name: AIDimensionAssessment(value=AIDimensionValue.POSITIVE, confidence=0.5) for name in DIMENSION_NAMES}
+    dimensions["risk_profile"] = AIDimensionAssessment(value=AIDimensionValue.REVIEW, confidence=0.0)
+    assessment = AIResearchAssessment(
+        ticker="NVDA", score=70.0, rating=AIDimensionValue.POSITIVE, confidence=0.8,
+        dimensions=dimensions,
+        evidence_coverage=AIEvidenceCoverage(
+            fundamental_coverage=1.0, analyst_coverage=1.0, technical_coverage=0.75,
+            overall_ai_evidence_coverage=0.92,
+        ),
+        positives=[], risks=[], catalysts=[], contradictions=[], evidence_gaps=[],
+        supporting_evidence=["business_quality_score"], prompt_version="v1",
+        model="deterministic", model_fingerprint=None, research_schema_version="v1",
+        generated_at=datetime(2026, 9, 17, 12, 0), as_of=date(2026, 9, 17), source="deterministic",
+    )
+    research = _stock_research(ai_research_assessment=assessment)
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "ai_evidence")
+    assert row.status == CoverageStatus.PARTIAL
+    assert row.limitation_reason == "5/6 AI dimensions assessable"
 
 
 def test_news_row_distinguishes_not_queried_from_confirmed_zero():
@@ -415,6 +462,26 @@ def test_summarize_universe_breakdown_by_provider_counts_each_provider_once():
 
 def test_summarize_universe_breakdown_returns_empty_list_for_no_rows():
     assert summarize_universe_breakdown([], "category") == []
+
+
+def test_summarize_universe_breakdown_sorts_all_not_computed_groups_first():
+    """A group with zero computed coverage (avg_coverage is NaN) must sort
+    first, not last -- consistent with how NOT_COMPUTED already sorts
+    ahead of PARTIAL/FULL on the Security Detail tab (_STATUS_ORDER): the
+    weakest evidence state leads either view."""
+    not_computed_summary = build_security_coverage_summary(
+        _stock_research(ticker="GDX", categories={})
+    )
+    partial_category = _category(
+        "business_quality", "Business Quality", coverage=0.5,
+        metrics=[_metric("roe", available=True)], sources=["yfinance"],
+    )
+    partial_summary = build_security_coverage_summary(
+        _stock_research(ticker="NVDA", categories={"business_quality": partial_category})
+    )
+    flat = flatten_coverage_rows([not_computed_summary, partial_summary])
+    grouped = summarize_universe_breakdown(flat, "ticker")
+    assert [row["ticker"] for row in grouped][0] == "GDX"
 
 
 def test_never_produces_a_second_overall_or_composite_score():

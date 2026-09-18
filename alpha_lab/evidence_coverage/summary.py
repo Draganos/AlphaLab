@@ -50,7 +50,11 @@ from alpha_lab.research.ai_rating import (
 from alpha_lab.research.analyst_consensus import AnalystConsensus
 from alpha_lab.research.analyst_research import AnalystResearchSummary
 from alpha_lab.research.model import StockResearch
-from alpha_lab.research.technical import MIN_COVERAGE_THRESHOLD, TechnicalSummary
+from alpha_lab.research.technical import (
+    MIN_COVERAGE_THRESHOLD,
+    TOTAL_INDICATOR_COUNT,
+    TechnicalSummary,
+)
 
 COVERAGE_SUMMARY_METHODOLOGY_VERSION = "coverage-summary-v1"
 
@@ -199,6 +203,11 @@ def _revisions_row(analyst_research: AnalystResearchSummary | None) -> CoverageR
 def _technical_row(technical_summary: TechnicalSummary | None) -> CoverageRow:
     coverage = None if technical_summary is None else technical_summary.coverage
     status = _status_for(coverage)
+    evidence_count = (
+        None
+        if technical_summary is None
+        else technical_summary.moving_average_available + technical_summary.oscillator_available
+    )
     reason = None
     if status is CoverageStatus.NOT_COMPUTED:
         reason = "not computed for this research state"
@@ -206,16 +215,14 @@ def _technical_row(technical_summary: TechnicalSummary | None) -> CoverageRow:
         reason = "no indicators computable (insufficient price history)"
     elif status is CoverageStatus.PARTIAL and coverage < MIN_COVERAGE_THRESHOLD:
         reason = f"below the {MIN_COVERAGE_THRESHOLD:.0%} minimum indicator coverage gate"
+    elif status is CoverageStatus.PARTIAL:
+        reason = f"{evidence_count}/{TOTAL_INDICATOR_COUNT} indicators available"
     return CoverageRow(
         category="technical",
         label="Technical",
         coverage=coverage,
         status=status,
-        evidence_count=(
-            None
-            if technical_summary is None
-            else technical_summary.moving_average_available + technical_summary.oscillator_available
-        ),
+        evidence_count=evidence_count,
         freshness=None if technical_summary is None else technical_summary.as_of,
         providers=[] if technical_summary is None else [technical_summary.source],
         limitation_reason=reason,
@@ -245,6 +252,8 @@ def _ai_evidence_row(ai_research_assessment: AIResearchAssessment | None) -> Cov
                 f"only {assessable}/{AI_MINIMUM_ASSESSABLE_DIMENSIONS} required "
                 "dimensions assessable"
             )
+        else:
+            reason = f"{assessable}/{len(ai_research_assessment.dimensions)} AI dimensions assessable"
     return CoverageRow(
         category="ai_evidence",
         label="AI Evidence",
@@ -400,6 +409,13 @@ def summarize_universe_breakdown(flat_rows: list[dict], group_by: str) -> list[d
     grouping by anything other than `provider`, so `avg_coverage` and the
     status counts always reflect exactly one observation per security x
     category regardless of how many providers it cites.
+
+    Sorted by `avg_coverage` ascending, weakest group first -- a group with
+    no computed coverage at all (every row `NOT_COMPUTED`, `avg_coverage`
+    is `NaN`) sorts first rather than last, consistent with how the
+    Security Detail tab already orders `NOT_COMPUTED` ahead of `PARTIAL`/
+    `FULL` (see `_STATUS_ORDER` in the dashboard page): the weakest
+    evidence state leads either view, not just the lowest numeric value.
     """
     if group_by not in _BREAKDOWN_GROUP_COLUMNS:
         raise ValueError(f"Unknown breakdown dimension: {group_by!r}")
