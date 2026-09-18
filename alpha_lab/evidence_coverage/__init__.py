@@ -17,6 +17,7 @@ from alpha_lab.evidence_coverage.summary import (
     SecurityCoverageSummary,
     build_security_coverage_summary,
     flatten_coverage_rows,
+    summarize_universe_breakdown,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "SecurityCoverageSummary",
     "build_security_coverage_summary",
     "flatten_coverage_rows",
+    "summarize_universe_breakdown",
 ]

@@ -36,6 +36,7 @@ is knowable.
 from datetime import date, datetime
 from enum import StrEnum
 
+import pandas as pd
 from pydantic import BaseModel, Field
 
 from alpha_lab.database.models import NewsArticleRecord
@@ -301,16 +302,16 @@ def _macro_row(macro_assessment: MacroAssessment | None) -> CoverageRow:
             limitation_reason="not queried for this view",
         )
     status = _status_for(macro_assessment.coverage)
+    available = sum(1 for i in macro_assessment.indicators if i.signal is not None)
     reason = None
     if status is not CoverageStatus.FULL:
-        available = sum(1 for i in macro_assessment.indicators if i.signal is not None)
         reason = f"shared market-wide assessment; {available}/{len(macro_assessment.indicators)} indicators available"
     return CoverageRow(
         category="macro",
         label="Macro Regime (market-wide)",
         coverage=macro_assessment.coverage,
         status=status,
-        evidence_count=sum(1 for i in macro_assessment.indicators if i.signal is not None),
+        evidence_count=available,
         freshness=macro_assessment.as_of,
         providers=[macro_assessment.source],
         limitation_reason=reason,
@@ -379,3 +380,43 @@ def flatten_coverage_rows(summaries: list[SecurityCoverageSummary]) -> list[dict
                     }
                 )
     return flat
+
+
+_BREAKDOWN_GROUP_COLUMNS = frozenset({"category", "ticker", "security_type", "sector", "provider"})
+
+
+def summarize_universe_breakdown(flat_rows: list[dict], group_by: str) -> list[dict]:
+    """Aggregate `flatten_coverage_rows`' output by `group_by` (one of
+    "category", "ticker", "security_type", "sector", "provider"): row
+    count, mean coverage, and full/no-evidence/not-computed counts per
+    group.
+
+    `flatten_coverage_rows` deliberately explodes one `CoverageRow` into
+    one flat dict per provider it cites -- correct input for a `provider`
+    breakdown (each contributing provider counted once), but grouping by
+    anything else directly on that same exploded data would double-count
+    any (security, category) pair that happens to cite more than one
+    provider. This function de-duplicates on (ticker, category) before
+    grouping by anything other than `provider`, so `avg_coverage` and the
+    status counts always reflect exactly one observation per security x
+    category regardless of how many providers it cites.
+    """
+    if group_by not in _BREAKDOWN_GROUP_COLUMNS:
+        raise ValueError(f"Unknown breakdown dimension: {group_by!r}")
+    frame = pd.DataFrame(flat_rows)
+    if frame.empty:
+        return []
+    source = frame if group_by == "provider" else frame.drop_duplicates(subset=["ticker", "category"])
+    grouped = (
+        source.groupby(group_by, dropna=False)
+        .agg(
+            rows=("category", "count"),
+            avg_coverage=("coverage", "mean"),
+            full_coverage=("status", lambda s: (s == CoverageStatus.FULL.value).sum()),
+            no_evidence=("status", lambda s: (s == CoverageStatus.NO_EVIDENCE.value).sum()),
+            not_computed=("status", lambda s: (s == CoverageStatus.NOT_COMPUTED.value).sum()),
+        )
+        .reset_index()
+        .sort_values("avg_coverage", ascending=True, na_position="first")
+    )
+    return grouped.to_dict("records")

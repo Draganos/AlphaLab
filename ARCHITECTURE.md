@@ -1133,6 +1133,27 @@ minority of dimensions. Fixed by skipping the reason entirely once
 module. Regression test:
 `test_ai_evidence_row_never_carries_a_reason_when_status_is_full`.
 
+**Bug caught in a second bug-check pass after opening the PR** (self-review):
+the Universe Breakdown tab's `pandas.groupby` ran directly on
+`flatten_coverage_rows`' output, which deliberately explodes one
+`CoverageRow` into one flat dict per provider it cites. Grouping that
+exploded data by anything other than `provider` silently double-counted
+any (security, category) pair citing more than one provider -- e.g. a
+category sourced from two providers would be weighted 2x in every
+Category/Security/Security type/Sector breakdown's `avg_coverage` and
+status counts, none of which is true of a `provider`-grouped view (each
+contributing provider is correctly counted there). Extracted the grouping
+itself out of the Streamlit page into a new pure, tested function,
+`summarize_universe_breakdown(flat_rows, group_by)`, which de-duplicates
+on (ticker, category) before grouping by anything other than `provider`.
+Regression tests:
+`test_summarize_universe_breakdown_does_not_double_count_multi_provider_categories`,
+`test_summarize_universe_breakdown_by_provider_counts_each_provider_once`.
+Harmless on the current real dataset (no category in it cites more than
+one provider today), confirmed by an unchanged Universe Breakdown table
+before/after the fix in the live UI -- but wrong as soon as a category
+gains a second provider.
+
 **Real-data validation** (real 5-ticker universe plus the full persisted
 universe including macro-proxy instruments): NVDA/MA/AAL correctly show
 `FULL` Analyst Consensus/History/Revisions; FTEC/GDX correctly show
@@ -1148,7 +1169,7 @@ fabricated penalty. A universe-wide Provider breakdown correctly separates
 contributions. Verified live in the Streamlit UI (both tabs, all five
 breakdown dimensions) via a headless browser, not just by script.
 
-Full test suite (`tests/test_coverage_summary.py`, 16 new tests) and all
+Full test suite (`tests/test_coverage_summary.py`, 19 new tests) and all
 three established smoke tests pass; every scoring-path file diff is empty
 -- this PR adds a new read-only package and one new dashboard page, and
 touches no file under `alpha_lab.research`/`.screener`/`.strategy`/

@@ -23,6 +23,7 @@ from alpha_lab.evidence_coverage.summary import (
     CoverageStatus,
     build_security_coverage_summary,
     flatten_coverage_rows,
+    summarize_universe_breakdown,
 )
 from alpha_lab.research.model import (
     CategoryResult,
@@ -356,6 +357,64 @@ def test_flatten_coverage_rows_explodes_multiple_providers_into_separate_rows():
     flat = flatten_coverage_rows([summary])
     providers = {row["provider"] for row in flat if row["category"] == "business_quality"}
     assert providers == {"yfinance", "sec_edgar"}
+
+
+def test_summarize_universe_breakdown_does_not_double_count_multi_provider_categories():
+    """Regression: flatten_coverage_rows explodes one row per provider, so
+    grouping directly on that exploded data by anything other than
+    'provider' would double-count a (security, category) pair that cites
+    more than one provider -- summarize_universe_breakdown must
+    de-duplicate on (ticker, category) first for every non-provider
+    breakdown."""
+    multi_provider_category = _category(
+        "business_quality", "Business Quality", coverage=1.0,
+        metrics=[_metric("roe", available=True)], sources=["yfinance", "sec_edgar"],
+    )
+    single_provider_category = _category(
+        "business_quality", "Business Quality", coverage=0.0, metrics=[], sources=["yfinance"],
+    )
+    nvda = build_security_coverage_summary(
+        _stock_research(ticker="NVDA", categories={"business_quality": multi_provider_category})
+    )
+    aal = build_security_coverage_summary(
+        _stock_research(ticker="AAL", categories={"business_quality": single_provider_category})
+    )
+    flat = flatten_coverage_rows([nvda, aal])
+
+    by_category = {row["category"]: row for row in summarize_universe_breakdown(flat, "category")}
+    row = by_category["business_quality"]
+    assert row["rows"] == 2  # one per security, not one per (security, provider) pair
+    assert row["avg_coverage"] == 0.5  # unweighted average of 1.0 (NVDA) and 0.0 (AAL)
+    assert row["full_coverage"] == 1
+    assert row["no_evidence"] == 1
+
+    by_ticker = {row["ticker"]: row for row in summarize_universe_breakdown(flat, "ticker")}
+    # Both securities carry the same number of category rows (one per
+    # SecurityCoverageSummary row) regardless of NVDA's business_quality
+    # category citing two providers -- never inflated by the explosion.
+    assert by_ticker["NVDA"]["rows"] == len(nvda.rows) == by_ticker["AAL"]["rows"] == len(aal.rows)
+
+
+def test_summarize_universe_breakdown_by_provider_counts_each_provider_once():
+    """The one breakdown where the exploded (per-provider) rows are the
+    correct input -- each contributing provider must be counted, not
+    collapsed away by the (ticker, category) de-duplication used for every
+    other breakdown."""
+    category = _category(
+        "business_quality", "Business Quality", coverage=1.0,
+        metrics=[_metric("roe", available=True)], sources=["yfinance", "sec_edgar"],
+    )
+    research = _stock_research(categories={"business_quality": category})
+    summary = build_security_coverage_summary(research)
+    flat = flatten_coverage_rows([summary])
+
+    by_provider = {row["provider"]: row for row in summarize_universe_breakdown(flat, "provider")}
+    assert by_provider["yfinance"]["rows"] >= 1
+    assert by_provider["sec_edgar"]["rows"] == 1
+
+
+def test_summarize_universe_breakdown_returns_empty_list_for_no_rows():
+    assert summarize_universe_breakdown([], "category") == []
 
 
 def test_never_produces_a_second_overall_or_composite_score():

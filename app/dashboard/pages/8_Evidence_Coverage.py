@@ -22,6 +22,7 @@ from alpha_lab.evidence_coverage import (
     CoverageStatus,
     build_security_coverage_summary,
     flatten_coverage_rows,
+    summarize_universe_breakdown,
 )
 from alpha_lab.macro import MacroRegimeService
 from alpha_lab.news import NewsService
@@ -151,9 +152,10 @@ with security_tab:
 
 with universe_tab:
     st.caption(
-        "Computed across every security in the current research build. Each "
-        "provider a category cites contributes its own row, so a "
-        "provider-level breakdown counts contributions, not securities."
+        "Computed across every security in the current research build. Only "
+        "the Provider breakdown counts each contributing provider "
+        "separately -- every other breakdown counts one observation per "
+        "security x category, regardless of how many providers it cites."
     )
     flat_rows = _load_universe_coverage_rows(
         research_service, news_service, macro_assessment, tuple(quote.ticker for quote in quotes)
@@ -163,32 +165,24 @@ with universe_tab:
         st.info("No securities have computed research in the current build.")
         st.stop()
 
-    flat = pd.DataFrame(flat_rows)
-
     breakdown_by = st.selectbox(
         "Breakdown by", ["Category", "Security", "Security type", "Sector", "Provider"]
     )
     group_column = {
-        "Category": "label",
+        "Category": "category",
         "Security": "ticker",
         "Security type": "security_type",
         "Sector": "sector",
         "Provider": "provider",
     }[breakdown_by]
 
-    grouped = (
-        flat.groupby(group_column, dropna=False)
-        .agg(
-            rows=("category", "count"),
-            avg_coverage=("coverage", "mean"),
-            full_coverage=("status", lambda s: (s == CoverageStatus.FULL.value).sum()),
-            no_evidence=("status", lambda s: (s == CoverageStatus.NO_EVIDENCE.value).sum()),
-            not_computed=("status", lambda s: (s == CoverageStatus.NOT_COMPUTED.value).sum()),
-        )
-        .reset_index()
-        .rename(columns={group_column: breakdown_by})
-        .sort_values("avg_coverage", ascending=True)
-    )
+    grouped = pd.DataFrame(summarize_universe_breakdown(flat_rows, group_column))
+    if breakdown_by == "Category":
+        # Display the human label, not the raw category key -- built from
+        # the same flat rows, never a second source of truth for the name.
+        category_labels = {row["category"]: row["label"] for row in flat_rows}
+        grouped[group_column] = grouped[group_column].map(category_labels)
+    grouped = grouped.rename(columns={group_column: breakdown_by})
     grouped["avg_coverage"] = grouped["avg_coverage"].map(lambda v: f"{v:.0%}" if pd.notnull(v) else "—")
     grouped[breakdown_by] = grouped[breakdown_by].fillna("—")
     st.dataframe(grouped, width="stretch", hide_index=True)
