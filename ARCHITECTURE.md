@@ -1029,3 +1029,127 @@ exactly the distinction this evidence exists to surface. AAL and FTEC show
 (a real majority, not unanimous). Full test suite and all three
 established smoke tests pass with scores identical to before this change;
 every scoring-path file diff is empty.
+
+## 25. Research Evidence & Coverage Dashboard (PR #28)
+
+By PR #27, AlphaLab had eight fundamental-category coverage numbers plus
+four independently-computed evidence-domain coverage numbers (Analyst
+Consensus, Analyst Research's two sub-domains, Technical Summary, AI
+Research Rating) and two more outside `StockResearch` entirely (News,
+Macro Regime) -- but nothing brought them into one place. Answering "how
+much evidence do I actually have for NVDA" meant opening Company Research
+and reading five separate panels by eye; answering it for the whole
+universe meant nothing at all.
+
+**`alpha_lab.evidence_coverage`** (new top-level package, deliberately
+*not* under `alpha_lab.research`): a pure read-model layer combining every
+domain above into one `SecurityCoverageSummary` (a `CoverageRow` per
+category: `coverage`, `status`, `evidence_count`, `freshness`, `providers`,
+`limitation_reason`) plus `flatten_coverage_rows` for universe-wide
+breakdowns. It computes nothing new -- every figure is read verbatim off a
+value that already exists somewhere else in the codebase (`category.
+coverage`, `analyst_consensus.total_analysts`, `technical_summary.
+moving_average_available + oscillator_available`, `ai_research_assessment.
+evidence_coverage.overall_ai_evidence_coverage`, ...). No second
+composite/overall score is produced anywhere in this module (see
+`test_never_produces_a_second_overall_or_composite_score`).
+
+**Why its own top-level package, not `alpha_lab.research`**: `alpha_lab.
+news`/`alpha_lab.macro`'s own module docstrings declare that nothing in
+`alpha_lab.research`/`.screener`/`.strategy`/`.backtest`/`.portfolio`/
+`.ratings`/`.factors` may import them -- `tests/test_news_regression.py`/
+`test_macro_regression.py` enforce this by scanning those directories'
+source text for the substrings `alpha_lab.news`/`alpha_lab.macro`, which
+catches a docstring mention as readily as a real import. A layer that
+legitimately needs both `StockResearch` and News/Macro evidence has to sit
+outside that boundary, exactly like `alpha_lab.alignment` (Donatien <->
+Macro Regime) already does -- `alpha_lab.evidence_coverage` follows the
+same precedent and imports `alpha_lab.research`/`.news`/`.macro` types
+directly, in the one direction the guard rails allow.
+
+**Four honest `CoverageStatus` values**, no finer than the underlying data
+supports: `FULL` (coverage 1.0), `PARTIAL` (0 < coverage < 1.0),
+`NO_EVIDENCE` (computed, coverage 0), `NOT_COMPUTED` (the underlying
+object is `None` -- never computed for this research state at all, kept
+distinct from a confirmed zero). `limitation_reason` is populated only
+where the underlying model already distinguishes a cause (e.g. "below the
+50% minimum indicator coverage gate", "only 1/3 required dimensions
+assessable", "no analyst coverage confirmed for this security") --
+per-metric "insufficient history" vs "provider failure" vs "confirmed
+unavailable" is deliberately **not** invented here, since `alpha_lab.
+research.model`'s own docstring already documents that `MetricStatus.
+INVALID` is reserved but unwired and today's coercion helpers collapse
+every non-finite/missing fundamental input to the same `None` -- this
+module only ever reports what is already knowable upstream.
+
+**Analyst History / Revisions** are split out of the single blended
+`AnalystResearchSummary.coverage` (0/0.5/1.0 across the two sub-domains)
+into two separate rows, each independently `NOT_COMPUTED` (object is
+`None`) / `NO_EVIDENCE` (0.0, that sub-domain has no rows) / `FULL` (1.0,
+that sub-domain has rows) -- a coarser binary reading than the fundamental
+categories' fractional coverage, since that is genuinely all the
+underlying data supports; no fractional number is fabricated to look more
+precise.
+
+**News** has no pre-existing coverage baseline at all (`alpha_lab.news.
+service`'s own docstring: a refresh only ever captures news from the point
+it is run onward, never a historical archive), so its row uses
+presence-based coverage (1.0 if any article was retrieved, 0.0 if queried
+and confirmed empty) rather than a fabricated fractional percentage --
+`news_articles=None` (not queried) and `news_articles=[]` (queried, zero
+found) are kept distinct (`NOT_COMPUTED` vs `NO_EVIDENCE`).
+
+**Macro Regime** is market-wide, not security-specific (`alpha_lab.macro.
+regime`'s own docstring), so its row reads identically for every security
+evaluated at the same time; the row is explicitly labeled "Macro Regime
+(market-wide)" and its `limitation_reason` says so, so a universe-wide
+breakdown by security never implies a per-security macro reading that
+does not exist.
+
+**UI**: new `app/dashboard/pages/8_Evidence_Coverage.py`, two tabs.
+"Security Detail" renders one security's full `CoverageRow` table plus a
+weak/missing-category detail list. "Universe Breakdown" groups
+`flatten_coverage_rows` (one flat dict per security x category x provider,
+so a provider-level breakdown counts each contributing provider once
+rather than stringifying a list) by Category/Security/Security type/
+Sector/Provider via `pandas.groupby`, reporting `avg_coverage` plus
+full/no-evidence/not-computed counts per group. Opening the page performs
+no provider call and no scoring -- pure reads through the existing
+`ResearchService`/`NewsService`/`MacroRegimeService` read paths. The
+Universe Breakdown tab's initial fetch (`get_stock_research` +
+`NewsService.get_history` per security) is wrapped in `st.cache_data`
+(underscore-prefixed non-hashable arguments, TTL 300s) so switching the
+"Breakdown by" selector -- a pure client-side regroup of already-fetched
+rows -- never re-triggers the full 2N-read fetch.
+
+**Bug caught before opening the PR** (self-review): `_ai_evidence_row`
+could attach a gate/dimension-shortfall `limitation_reason` to a row whose
+`status` was already `FULL`, because `overall_ai_evidence_coverage` (a
+separate average of raw fundamental/analyst/technical coverage) and "how
+many of the 6 AI dimensions were assessable" are independent numbers -- a
+security can reach `coverage == 1.0` while the provider still rated only a
+minority of dimensions. Fixed by skipping the reason entirely once
+`status is CoverageStatus.FULL`, mirroring every other row builder in this
+module. Regression test:
+`test_ai_evidence_row_never_carries_a_reason_when_status_is_full`.
+
+**Real-data validation** (real 5-ticker universe plus the full persisted
+universe including macro-proxy instruments): NVDA/MA/AAL correctly show
+`FULL` Analyst Consensus/History/Revisions; FTEC/GDX correctly show
+`NO_EVIDENCE` for Analyst Consensus ("no analyst coverage confirmed for
+this security") and `NOT_COMPUTED` for Analyst History/Revisions (no
+`AnalystResearchSummary` at all), matching the project's already-verified
+"FTEC and GDX legitimately lack conventional equity analyst coverage"
+fact. AI Evidence coverage is visibly lower for the two ETFs (38%, "only
+1/3 required dimensions assessable") than for the three equities
+(87-92%), reflecting genuinely thinner upstream evidence, not a
+fabricated penalty. A universe-wide Provider breakdown correctly separates
+`YFinanceProvider`/`AlphaLabPriceHistory`/`deterministic-rule-based`
+contributions. Verified live in the Streamlit UI (both tabs, all five
+breakdown dimensions) via a headless browser, not just by script.
+
+Full test suite (`tests/test_coverage_summary.py`, 16 new tests) and all
+three established smoke tests pass; every scoring-path file diff is empty
+-- this PR adds a new read-only package and one new dashboard page, and
+touches no file under `alpha_lab.research`/`.screener`/`.strategy`/
+`.backtest`/`.portfolio`/`.ratings`/`.factors`.
