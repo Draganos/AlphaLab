@@ -206,6 +206,23 @@ def test_exact_even_buy_sell_split_is_mixed_not_moderate_agreement():
     assert _indicator_agreement(6, 6, 0) == IndicatorAgreement.MIXED
 
 
+def test_agreement_is_review_when_coverage_is_below_the_configured_minimum():
+    """Regression: even when the few available indicators are unanimous,
+    indicator_agreement must respect the same MIN_COVERAGE_THRESHOLD gate
+    as overall_rating -- never show confident-sounding agreement next to a
+    REVIEW overall rating for the identical reason (too little evidence).
+    On flat prices, 11/15 indicators are available and all Neutral (a
+    natural, unanimous 11/11 -- dominant_fraction=1.0), which would
+    otherwise read STRONG_AGREEMENT; with a stricter min_coverage=0.9 that
+    same 11/15 falls below threshold and both fields must show REVIEW."""
+    summary = build_technical_summary(
+        "FLAT", _flat(), as_of=date.today(), source="x", min_coverage=0.9
+    )
+    assert summary.coverage < 0.9
+    assert summary.overall_rating == TechnicalRating.REVIEW
+    assert summary.indicator_agreement == IndicatorAgreement.REVIEW
+
+
 def test_build_technical_summary_populates_agreement_counts_and_label():
     summary = build_technical_summary("TEST", _uptrend(), as_of=date.today(), source="x")
     available = summary.moving_average_available + summary.oscillator_available

@@ -427,7 +427,16 @@ def build_technical_summary(
     buy_count = signal_counts[1]
     sell_count = signal_counts[-1]
     neutral_count = signal_counts[0]
-    agreement = _indicator_agreement(buy_count, sell_count, neutral_count)
+    # Same MIN_COVERAGE_THRESHOLD gate as overall_rating above: a handful of
+    # available indicators being unanimous is not "Strong Agreement" if
+    # there isn't enough evidence overall to trust a rating at all -- never
+    # show confident-sounding agreement next to a REVIEW-for-low-coverage
+    # overall rating.
+    agreement = (
+        IndicatorAgreement.REVIEW
+        if coverage < min_coverage
+        else _indicator_agreement(buy_count, sell_count, neutral_count)
+    )
 
     return TechnicalSummary(
         ticker=ticker.upper(),
