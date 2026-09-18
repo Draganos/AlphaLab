@@ -1297,3 +1297,34 @@ Full test suite (`tests/test_stock_research_model.py` +6,
 `tests/test_security_type.py` new (7 tests), `tests/test_live_screener_
 safety_phase3.py` +6, `tests/test_coverage_summary.py` +3) and all three
 established smoke tests pass.
+
+**Two more bugs caught in a follow-up bug-check pass, both surfaced by
+manual testing of the Evidence Coverage dashboard after the PR was open:**
+
+1. `_build_category`'s `unavailable_metrics` list (meaning "expected but
+   missing") was populated for every metric with no value regardless of
+   `applicable`, so a `NOT_APPLICABLE` metric still appeared in it.
+   Company Research's "Unavailable — no evidence available: ..." caption
+   then rendered a structurally-inapplicable metric as a genuine gap,
+   directly under a status line that already said `NOT_APPLICABLE` for the
+   category. Fixed by gating the append on `applicable`. Regression test:
+   `test_not_applicable_metrics_are_never_listed_as_unavailable_metrics`.
+2. **Performance**: the Evidence Coverage page's Universe Breakdown tab
+   was slow to load. Root cause: `ResearchService.get_stock_research(
+   ticker)`'s own `_find_record` re-reads and re-deserializes *every*
+   persisted `LiveResearchRecord` (`list_current_research()` ->
+   `Phase3Repository.latest_current_payloads()`) just to find the one
+   matching ticker -- calling it once per ticker in a loop, as the
+   Universe Breakdown's cached loader did, costs O(n^2) database reads and
+   Pydantic re-validations in universe size, not O(n). Fixed by extracting
+   `get_stock_research`'s enrichment step into a new public method,
+   `build_research_for_record(record)`, and having the Universe Breakdown
+   loader call `list_current_research()` once and pass each already-
+   fetched record to it, instead of calling `get_stock_research(ticker)`
+   per ticker. `get_stock_research` itself is unchanged in behavior (now
+   delegates to the new method) and its docstring documents the O(n^2)
+   trap for any future caller that loops it. Measured on the real 11-
+   security universe: ~40% faster already, and the win grows with universe
+   size since the old path was quadratic. Output verified byte-identical
+   before/after. Regression test:
+   `test_build_research_for_record_matches_get_stock_research`.

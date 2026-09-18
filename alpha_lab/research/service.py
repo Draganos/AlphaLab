@@ -68,6 +68,26 @@ class ResearchService:
         categories/metrics are UNAVAILABLE (research exists; evidence is
         simply missing). This never touches historical snapshot storage.
 
+        Note for a caller iterating many tickers (e.g. a universe-wide
+        view): finding the one matching record still reads and
+        re-deserializes every persisted record via ``list_current_research``
+        (see ``_find_record``), so calling this once per ticker in a loop is
+        O(n²) in universe size. Call ``list_current_research()`` once and
+        pass each record to ``build_research_for_record`` instead — see
+        that method's docstring.
+        """
+        record = self._find_record(ticker)
+        if record is None:
+            return None
+        return self.build_research_for_record(record)
+
+    def build_research_for_record(self, record: LiveResearchRecord) -> StockResearch:
+        """The exact enrichment `get_stock_research` performs, for a caller
+        that already has the matching `LiveResearchRecord` (typically from
+        one `list_current_research()` call) and wants to build
+        `StockResearch` for many tickers without re-reading and
+        re-deserializing the whole persisted universe once per ticker.
+
         Enriched with the current Analyst Consensus / Technical Summary /
         AI Research Rating / Analyst Research (rating changes + revision
         trend), if any have been computed for this ticker — a pure database
@@ -77,9 +97,7 @@ class ResearchService:
         never affects the fundamental score/categories/coverage above,
         which are computed and read entirely separately.
         """
-        record = self._find_record(ticker)
-        if record is None:
-            return None
+        ticker = record.ticker
         research = build_stock_research(record)
         return research.model_copy(
             update={

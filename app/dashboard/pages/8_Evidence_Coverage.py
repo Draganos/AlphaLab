@@ -81,15 +81,27 @@ def _load_universe_coverage_rows(
 ) -> list[dict]:
     """Cached so switching the 'Breakdown by' selection (a pure client-side
     regroup of already-fetched rows) never re-triggers the underlying
-    2*len(tickers) database reads -- only a genuinely new universe
-    (different tickers) or the TTL expiring does. Leading-underscore
-    parameters are excluded from Streamlit's cache-key hashing since
-    ResearchService/NewsService/MacroAssessment are not hashable."""
+    database reads -- only a genuinely new universe (different tickers) or
+    the TTL expiring does. Leading-underscore parameters are excluded from
+    Streamlit's cache-key hashing since ResearchService/NewsService/
+    MacroAssessment are not hashable.
+
+    Fetches the current universe once (`list_current_research`) rather
+    than calling `get_stock_research(ticker)` per ticker: that method's own
+    docstring notes it re-reads and re-deserializes every persisted record
+    to find the one matching ticker, so looping it here would cost O(n^2)
+    in universe size instead of the O(n) this achieves via
+    `build_research_for_record`.
+    """
+    records_by_ticker = {
+        record.ticker: record for record in _research_service.list_current_research()
+    }
     summaries = []
     for ticker in tickers:
-        research = _research_service.get_stock_research(ticker)
-        if research is None:
+        record = records_by_ticker.get(ticker)
+        if record is None:
             continue
+        research = _research_service.build_research_for_record(record)
         news_articles = _news_service.get_history(ticker)
         summaries.append(
             build_security_coverage_summary(
