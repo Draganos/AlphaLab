@@ -330,8 +330,11 @@ def _render_stock_research(research, *, quote=None) -> None:
     st.subheader("Category overview")
     st.caption(
         "UNAVAILABLE = zero evidence · PARTIAL = some evidence, not full "
-        "coverage · AVAILABLE = full evidence and a score. Missing evidence "
-        "is never treated as a negative signal."
+        "coverage · AVAILABLE = full evidence and a score · NOT_APPLICABLE "
+        "= this category does not apply to this security's type (e.g. "
+        "valuation for an ETF). Missing evidence is never treated as a "
+        "negative signal, and neither is a category that was never "
+        "expected to apply."
     )
     overview_rows = [
         {

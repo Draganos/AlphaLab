@@ -50,6 +50,9 @@ _STATUS_ORDER = {
     CoverageStatus.NO_EVIDENCE: 1,
     CoverageStatus.PARTIAL: 2,
     CoverageStatus.FULL: 3,
+    # Not a weakness -- sorts alongside FULL, at the bottom, never among
+    # the genuine coverage gaps above it.
+    CoverageStatus.NOT_APPLICABLE: 3,
 }
 
 
@@ -78,15 +81,27 @@ def _load_universe_coverage_rows(
 ) -> list[dict]:
     """Cached so switching the 'Breakdown by' selection (a pure client-side
     regroup of already-fetched rows) never re-triggers the underlying
-    2*len(tickers) database reads -- only a genuinely new universe
-    (different tickers) or the TTL expiring does. Leading-underscore
-    parameters are excluded from Streamlit's cache-key hashing since
-    ResearchService/NewsService/MacroAssessment are not hashable."""
+    database reads -- only a genuinely new universe (different tickers) or
+    the TTL expiring does. Leading-underscore parameters are excluded from
+    Streamlit's cache-key hashing since ResearchService/NewsService/
+    MacroAssessment are not hashable.
+
+    Fetches the current universe once (`list_current_research`) rather
+    than calling `get_stock_research(ticker)` per ticker: that method's own
+    docstring notes it re-reads and re-deserializes every persisted record
+    to find the one matching ticker, so looping it here would cost O(n^2)
+    in universe size instead of the O(n) this achieves via
+    `build_research_for_record`.
+    """
+    records_by_ticker = {
+        record.ticker: record for record in _research_service.list_current_research()
+    }
     summaries = []
     for ticker in tickers:
-        research = _research_service.get_stock_research(ticker)
-        if research is None:
+        record = records_by_ticker.get(ticker)
+        if record is None:
             continue
+        research = _research_service.build_research_for_record(record)
         news_articles = _news_service.get_history(ticker)
         summaries.append(
             build_security_coverage_summary(
@@ -131,10 +146,21 @@ with security_tab:
         f"· as of {summary.evaluation_date}"
     )
 
-    weak_rows = [row for row in summary.rows if row.status != CoverageStatus.FULL]
+    not_applicable_rows = [row for row in summary.rows if row.status == CoverageStatus.NOT_APPLICABLE]
+    weak_rows = [
+        row
+        for row in summary.rows
+        if row.status not in (CoverageStatus.FULL, CoverageStatus.NOT_APPLICABLE)
+    ]
+    tracked = len(summary.rows) - len(not_applicable_rows)
     columns = st.columns(2)
-    columns[0].metric("Categories with full evidence", f"{len(summary.rows) - len(weak_rows)}/{len(summary.rows)}")
+    columns[0].metric("Categories with full evidence", f"{tracked - len(weak_rows)}/{tracked}")
     columns[1].metric("Weak or missing categories", str(len(weak_rows)))
+    if not_applicable_rows:
+        st.caption(
+            f"{len(not_applicable_rows)} categor{'y is' if len(not_applicable_rows) == 1 else 'ies are'} "
+            f"not applicable to this security type ({_dash(summary.security_type)}) and excluded above."
+        )
 
     table_rows = _summary_to_rows(summary)
     frame = pd.DataFrame(table_rows).sort_values("_status_order").drop(columns=["_status_order"])

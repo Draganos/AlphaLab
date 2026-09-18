@@ -57,9 +57,10 @@ def _metric(name: str, *, available: bool, retrieved_at: datetime | None = None)
 
 
 def _category(
-    name: str, label: str, *, coverage: float, metrics: list[MetricEvidence], sources: list[str]
+    name: str, label: str, *, coverage: float, metrics: list[MetricEvidence], sources: list[str],
+    status: CategoryStatus | None = None,
 ) -> CategoryResult:
-    status = (
+    status = status or (
         CategoryStatus.AVAILABLE
         if coverage >= 1.0
         else CategoryStatus.UNAVAILABLE
@@ -136,6 +137,23 @@ def test_fundamental_category_rows_reflect_the_categorys_own_coverage():
     assert rows["valuation"].coverage == 0.0
     assert rows["valuation"].status == CoverageStatus.NO_EVIDENCE
     assert rows["valuation"].limitation_reason == "no metrics available for this category"
+
+
+def test_not_applicable_fundamental_category_is_never_shown_as_a_coverage_gap():
+    """PR #29: a category alpha_lab.research.build classified NOT_APPLICABLE
+    (e.g. valuation for an ETF) must read as NOT_APPLICABLE here too, never
+    as NO_EVIDENCE -- the dashboard's whole point is to never present
+    inapplicable evidence as though it were missing."""
+    not_applicable_category = _category(
+        "valuation", "Valuation", coverage=0.0,
+        metrics=[_metric("pe", available=False)], sources=[],
+        status=CategoryStatus.NOT_APPLICABLE,
+    )
+    research = _stock_research(categories={"valuation": not_applicable_category})
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "valuation")
+    assert row.status == CoverageStatus.NOT_APPLICABLE
+    assert row.limitation_reason == "not applicable to this security type"
 
 
 def test_analyst_consensus_row_is_not_computed_when_none():
@@ -482,6 +500,64 @@ def test_summarize_universe_breakdown_sorts_all_not_computed_groups_first():
     flat = flatten_coverage_rows([not_computed_summary, partial_summary])
     grouped = summarize_universe_breakdown(flat, "ticker")
     assert [row["ticker"] for row in grouped][0] == "GDX"
+
+
+def test_summarize_universe_breakdown_excludes_not_applicable_rows_from_avg_coverage():
+    """PR #29: a NOT_APPLICABLE row's coverage is a real 0.0, unlike
+    NOT_COMPUTED's None/NaN -- it must still be excluded from avg_coverage,
+    or an ETF-heavy group would read as artificially low-coverage on
+    categories that were never applicable to it in the first place."""
+    not_applicable_category = _category(
+        "valuation", "Valuation", coverage=0.0, metrics=[], sources=[],
+        status=CategoryStatus.NOT_APPLICABLE,
+    )
+    etf_summary = build_security_coverage_summary(
+        _stock_research(ticker="GDX", categories={"valuation": not_applicable_category})
+    )
+    full_category = _category(
+        "valuation", "Valuation", coverage=1.0,
+        metrics=[_metric("pe", available=True)], sources=["yfinance"],
+    )
+    equity_summary = build_security_coverage_summary(
+        _stock_research(ticker="NVDA", categories={"valuation": full_category})
+    )
+    flat = flatten_coverage_rows([etf_summary, equity_summary])
+    by_category = {row["category"]: row for row in summarize_universe_breakdown(flat, "category")}
+    row = by_category["valuation"]
+    assert row["not_applicable"] == 1
+    # Averaged over NVDA's 1.0 alone -- GDX's NOT_APPLICABLE 0.0 excluded,
+    # not diluting the average to 0.5.
+    assert row["avg_coverage"] == 1.0
+
+
+def test_summarize_universe_breakdown_sorts_all_not_applicable_groups_last_not_first():
+    """Regression: a group whose every row is NOT_APPLICABLE (e.g.
+    'Valuation' grouped over a universe of nothing but ETFs) has
+    avg_coverage == NaN for the same reason an all-NOT_COMPUTED group
+    does, but must sort last (with FULL), never first as though it were
+    the weakest group in the view."""
+    not_applicable_category = _category(
+        "valuation", "Valuation", coverage=0.0, metrics=[], sources=[],
+        status=CategoryStatus.NOT_APPLICABLE,
+    )
+    # Both ETF summaries carry only a NOT_APPLICABLE "valuation" fundamental
+    # category, plus the default analyst_consensus=None -> a genuinely
+    # NOT_COMPUTED "analyst_consensus" row -- so the two category groups
+    # this produces are each homogeneous, for a clean sort comparison.
+    etf_summaries = [
+        build_security_coverage_summary(
+            _stock_research(ticker=ticker, categories={"valuation": not_applicable_category})
+        )
+        for ticker in ("FTEC", "GDX")
+    ]
+    flat = flatten_coverage_rows(etf_summaries)
+    grouped_by_category = summarize_universe_breakdown(flat, "category")
+    categories_in_order = [row["category"] for row in grouped_by_category]
+    # Every other category here is genuinely NOT_COMPUTED (analyst_research
+    # etc. were never supplied); valuation (entirely NOT_APPLICABLE) must
+    # sort last, never ahead of any of them.
+    assert categories_in_order[-1] == "valuation"
+    assert categories_in_order[0] != "valuation"
 
 
 def test_never_produces_a_second_overall_or_composite_score():

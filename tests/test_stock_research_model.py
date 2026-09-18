@@ -685,3 +685,107 @@ def test_confidence_breakdown_never_desyncs_from_confidence():
         raw = 0.5 * b.overall_coverage + 0.2 * b.category_breadth + 0.2 * b.freshness + 0.1 * b.source_quality
         recomputed = round(10 * penalty * max(0.0, min(1.0, raw)), 1)
         assert recomputed == pytest.approx(research.confidence)
+
+
+# --- PR #29: Security-Type Capability Model -------------------------------
+
+
+_ETF_NOT_APPLICABLE = frozenset(
+    {
+        "business_quality",
+        "earnings_growth",
+        "financial_strength",
+        "valuation",
+        "analyst_revisions",
+        "shareholder_return",
+    }
+)
+
+
+def _etf_record(**overrides) -> LiveResearchRecord:
+    overrides.setdefault("asset_type", "ETF")
+    return _record(**overrides)
+
+
+def test_etf_not_applicable_categories_are_distinguished_from_unavailable():
+    research = build_stock_research(_etf_record())
+    for name in CATEGORY_ORDER:
+        category = research.categories[name]
+        if name in _ETF_NOT_APPLICABLE:
+            assert category.status == CategoryStatus.NOT_APPLICABLE, name
+        else:
+            assert category.status == CategoryStatus.UNAVAILABLE, name
+
+
+def test_etf_not_applicable_category_metrics_are_marked_not_applicable():
+    research = build_stock_research(_etf_record())
+    valuation = research.categories["valuation"]
+    assert valuation.metrics  # has documented metric names to check
+    assert all(m.status == MetricStatus.NOT_APPLICABLE for m in valuation.metrics)
+    momentum = research.categories["momentum"]
+    assert all(m.status == MetricStatus.UNAVAILABLE for m in momentum.metrics)
+
+
+def test_not_applicable_metrics_are_never_listed_as_unavailable_metrics():
+    """Regression: unavailable_metrics means 'expected but missing' -- a
+    NOT_APPLICABLE metric must never appear in it, or Company Research's
+    'Unavailable — no evidence available: ...' caption (and
+    alpha_lab.evidence_coverage's 'N metric(s) unavailable' reason) would
+    render a structurally-inapplicable metric as though it were a genuine
+    gap, directly under a status line that already says NOT_APPLICABLE."""
+    research = build_stock_research(_etf_record())
+    assert research.categories["valuation"].unavailable_metrics == []
+    # A genuinely-missing metric on an applicable category is unaffected.
+    assert research.categories["momentum"].unavailable_metrics
+
+
+def test_equity_categories_are_never_not_applicable():
+    """Regression: EQUITY (the default fixture asset_type) must classify
+    zero-coverage categories as UNAVAILABLE exactly as before this PR --
+    NOT_APPLICABLE is an ETF-only (or explicitly-configured) distinction."""
+    research = build_stock_research(_record())
+    for name in CATEGORY_ORDER:
+        assert research.categories[name].status != CategoryStatus.NOT_APPLICABLE
+
+
+def test_genuine_evidence_in_a_not_applicable_category_is_never_suppressed():
+    """Contrived edge case: if a category classified not-applicable for
+    this security type somehow has real coverage > 0, that evidence must
+    never be hidden behind a forced NOT_APPLICABLE -- the classification
+    only ever applies to the genuinely-empty (coverage <= 0) case."""
+    category_scores = {name: None for name in CATEGORY_ORDER}
+    category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
+    category_scores["valuation"] = 60.0
+    category_coverage["valuation"] = 1.0
+    research = build_stock_research(
+        _etf_record(
+            category_scores=category_scores,
+            category_coverage=category_coverage,
+            raw_metrics={"pe": 20.0, "forward_pe": 18.0, "price_sales": 5.0, "ev_ebitda": 12.0, "price_fcf": 15.0},
+            percentile_metrics={"pe": 50.0},
+        )
+    )
+    assert research.categories["valuation"].status == CategoryStatus.AVAILABLE
+    assert research.categories["valuation"].score == 60.0
+
+
+def test_category_breadth_excludes_not_applicable_categories_for_etf():
+    """The confidence factor category_breadth must average only over
+    applicable categories for an ETF -- diluting it with six categories
+    that can never be filled would unfairly cap ETF confidence."""
+    category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
+    category_coverage["momentum"] = 1.0
+    research = build_stock_research(_etf_record(category_coverage=category_coverage))
+    # Only momentum and ai_research remain applicable for an ETF; momentum
+    # is fully covered and ai_research is not, so the mean is 0.5 -- not
+    # 1.0/8 = 0.125 as an applicability-blind average would compute.
+    assert research.confidence_breakdown.category_breadth == pytest.approx(0.5)
+
+
+def test_category_breadth_for_equity_is_unaffected_by_this_pr():
+    """Regression: an EQUITY record's category_breadth must still average
+    over all eight categories exactly as before."""
+    category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
+    category_coverage["momentum"] = 1.0
+    research = build_stock_research(_record(category_coverage=category_coverage))
+    assert research.confidence_breakdown.category_breadth == pytest.approx(1.0 / 8)

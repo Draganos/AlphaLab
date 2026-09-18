@@ -100,6 +100,27 @@ def test_get_stock_research_returns_canonical_stock_research_via_build_stock_res
     assert research.ticker == "AAPL"
 
 
+def test_build_research_for_record_matches_get_stock_research(research_service):
+    """A caller with an already-fetched LiveResearchRecord (e.g. from one
+    list_current_research() call, to avoid re-reading the whole universe
+    once per ticker in a loop -- see get_stock_research's docstring) must
+    get back exactly the same StockResearch as get_stock_research."""
+    service, engine = research_service
+    with Session(engine) as session:
+        session.add(Security(ticker="AAPL"))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_record("AAPL")])
+
+    [record] = service.list_current_research()
+    from_record = service.build_research_for_record(record)
+    from_ticker = service.get_stock_research("AAPL")
+    # generated_at is independently stamped `datetime.now(UTC)` on each
+    # call, so it alone may legitimately differ by microseconds.
+    assert from_record.model_copy(update={"generated_at": None}) == from_ticker.model_copy(
+        update={"generated_at": None}
+    )
+
+
 def test_get_stock_research_analyst_research_is_none_when_nothing_refreshed(research_service):
     """Matches analyst_consensus/technical_summary's convention: None means
     not computed for this ticker, never an empty-but-present object."""
