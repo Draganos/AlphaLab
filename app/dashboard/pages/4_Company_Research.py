@@ -125,6 +125,12 @@ def _render_technical_summary_panel(column, technical) -> None:
         f"Coverage {available}/{total} ({technical.coverage:.1%}) · "
         f"{technical.timeframe.value} · {technical.as_of}"
     )
+    if technical.indicator_agreement is not None:
+        column.caption(
+            f"Indicator agreement: {_rating_label(technical.indicator_agreement)} — "
+            f"{technical.buy_signal_count} Buy · {technical.sell_signal_count} Sell · "
+            f"{technical.neutral_signal_count} Neutral (of {available} available)"
+        )
     with column.expander("Indicators"):
         moving_averages = [
             indicator for indicator in technical.indicators
