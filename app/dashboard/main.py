@@ -15,7 +15,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database.models import Price
 from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
-from alpha_lab.refresh import is_universe_price_stale, run_core_refresh_guarded
+from alpha_lab.refresh import is_universe_price_stale, run_core_refresh_guarded, stale_universe_tickers
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.search import ScreenCriteria, ScreenRecord, apply_screen
 
@@ -114,13 +114,71 @@ right.write(f"Paper starting value setting: AED {settings.paper_trading['initial
 
 st.divider()
 _stale_price_days = settings.data_quality["stale_price_days"]
-if is_universe_price_stale(engine, _stale_price_days):
-    st.warning(
-        f"Some tracked securities have price data older than the configured "
-        f"{_stale_price_days}-day observation limit."
-    )
-else:
-    st.caption(f"Tracked universe's price data is within the configured {_stale_price_days}-day observation limit.")
+_staleness_banner = st.empty()
+
+
+def _render_staleness_banner() -> None:
+    # A placeholder rather than a plain st.warning/st.caption call so this
+    # can be re-rendered in place after a same-run Full Refresh below --
+    # otherwise this banner (computed before the button's own refresh runs)
+    # would keep showing "stale" even immediately after a refresh that just
+    # fixed it, contradicting the success message rendered further down in
+    # this exact same script run.
+    if is_universe_price_stale(engine, _stale_price_days):
+        _staleness_banner.warning(
+            f"Some tracked securities have price data older than the configured "
+            f"{_stale_price_days}-day observation limit."
+        )
+    else:
+        _staleness_banner.caption(f"Tracked universe's price data is within the configured {_stale_price_days}-day observation limit.")
+
+
+if not st.session_state.get("auto_stale_refresh_attempted"):
+    # Once per browser session, on first load: automatically ingest
+    # whichever already-tracked tickers are actually stale, so a user
+    # never has to notice the warning below and press Full Refresh
+    # themselves just to see current data. Deliberately scoped to only
+    # the stale subset (never the full universe) so this automatic
+    # trigger's cost stays proportional to what is actually stale rather
+    # than always paying for a full-universe refresh on every session
+    # start -- the Full Refresh button below still does the full universe
+    # for a deliberate, on-demand refresh. Guarded by session_state (set
+    # unconditionally below, whether or not anything was actually stale)
+    # so this never re-fires on a later rerun within the same session,
+    # even if a subsequent auto-refresh attempt failed.
+    st.session_state["auto_stale_refresh_attempted"] = True
+    _stale_tickers = stale_universe_tickers(engine, _stale_price_days)
+    if _stale_tickers:
+        with st.spinner(
+            f"Automatically refreshing {len(_stale_tickers)} stale ticker(s) "
+            f"(price/fundamental data), then rebuilding research..."
+        ):
+            try:
+                _auto_result = run_core_refresh_guarded(
+                    engine, settings, st.session_state, tickers=_stale_tickers
+                )
+            except Exception as _auto_error:  # noqa: BLE001 -- mirrors the Full Refresh
+                # button's own handling below: never let an unexpected automatic-
+                # refresh failure take the whole page down; existing research is
+                # unaffected either way (run_core_refresh never corrupts it).
+                st.warning(
+                    f"Automatic refresh of stale data failed unexpectedly "
+                    f"({_auto_error}); showing existing data."
+                )
+            else:
+                if _auto_result is not None and _auto_result.ok:
+                    st.caption(
+                        f"Automatically refreshed {len(_auto_result.tickers_succeeded)}/"
+                        f"{len(_auto_result.tickers_attempted)} stale ticker(s) on session start."
+                    )
+                    build_screener.clear()
+                elif _auto_result is not None and not _auto_result.ok:
+                    st.warning(
+                        f"Automatic refresh of stale data failed "
+                        f"({_auto_result.research_error}); showing existing data."
+                    )
+
+_render_staleness_banner()
 if st.button("🔄 Full Refresh (price + fundamental data + research)"):
     # Core only: price/fundamental ingestion + research rebuild -- never the
     # supplemental domains (Analyst Consensus/Technical/AI/News/Macro/
@@ -167,6 +225,7 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
     # re-emitted and Streamlit would silently drop it before the user
     # could read it.
     build_screener.clear()
+    _render_staleness_banner()
 
 st.header("Stock Screener")
 screen = build_screener()
@@ -179,7 +238,13 @@ else:
     sectors = sorted(screen["Sector"].dropna().unique())
     selected = st.multiselect("Sector", sectors)
     minimum = st.slider("Minimum overall rating", 0, 100, 0)
-    filtered = screen[(screen["Overall Rating"].fillna(-1) >= minimum)]
+    # pd.to_numeric first: when every row's Overall Rating is None (e.g. no
+    # security has a computed score yet), the raw column's dtype is object,
+    # and fillna(-1) on an object dtype triggers pandas' downcasting
+    # deprecation warning -- coercing to float64 up front means fillna
+    # never needs to change dtype, regardless of how many rows are None.
+    overall_rating = pd.to_numeric(screen["Overall Rating"], errors="coerce")
+    filtered = screen[overall_rating.fillna(-1) >= minimum]
     if selected:
         filtered = filtered[filtered["Sector"].isin(selected)]
     st.dataframe(filtered, width="stretch", hide_index=True, column_config={

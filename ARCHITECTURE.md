@@ -1920,3 +1920,85 @@ per-period-selection finding above; one pre-existing test's incidental
 `as_of` argument corrected since it was unrelated to what that test
 actually verifies) and all three established smoke tests pass.
 `git diff --check`: clean.
+
+## 31. Automatic On-Session-Start Refresh of Stale-Only Data
+
+§29's Full Refresh button required a manual click even when data was
+already known to be stale (the page already computes and displays that
+fact on every render). This closes that gap: on the first render of a
+browser session, if any already-tracked ticker's price data is stale, the
+dashboard now automatically refreshes exactly those stale tickers -- no
+click required -- before the page finishes that same render. The Full
+Refresh button is unchanged and still available for an on-demand refresh
+of the entire universe.
+
+**Deliberately scoped to the stale subset, not the whole universe.**
+Unlike the launch-time check (`scripts/launch.py`) and the Full Refresh
+button, both of which re-ingest the full configured universe, this
+automatic trigger only re-ingests tickers `stale_universe_tickers` (new;
+`is_universe_price_stale`'s boolean refactored to use it) actually
+reports as stale -- otherwise every single browser session's first page
+load would pay for a full-universe refresh merely because *one* ticker
+happened to be stale, an unbounded and unnecessary cost the user
+explicitly flagged when scoping this feature. `run_core_refresh`/
+`run_core_refresh_guarded` both gained an optional `tickers: list[str] |
+None` parameter for this; omitting it (every existing caller) is
+byte-for-byte the prior full-universe behavior -- purely additive, no
+existing test needed to change.
+
+**Guarded to fire at most once per browser session,** via a new
+`st.session_state["auto_stale_refresh_attempted"]` flag set unconditionally
+the first time this code runs (whether or not anything was actually
+stale, and whether or not the attempt succeeded) -- a later rerun
+triggered by any widget interaction must never re-attempt it, and a
+failed automatic attempt does not retry itself; the Full Refresh button
+remains available to retry manually. This is a distinct flag from
+`run_core_refresh_guarded`'s own `core_refresh_in_progress` guard, which
+only prevents two *overlapping* refreshes, not a second sequential one.
+
+**Bug found and fixed while testing this feature (via `streamlit.testing.
+v1.AppTest`, not just unit-testing `run_core_refresh` in isolation):** the
+existing staleness banner (added in §29) was computed and rendered
+*before* the Full Refresh button's own refresh logic ran later in that
+same script execution. A successful button click therefore still showed
+the "data is stale" warning immediately above its own "Ingested .../
+research rebuilt" success message in that identical page render --
+self-contradictory, even though the underlying staleness computation was
+always correct (a *subsequent* rerun always showed the fixed state; the
+bug was purely that the first render never got the chance to reflect a
+refresh that had just happened later in it). Confirmed by actually
+clicking the button via `AppTest` and inspecting the rendered elements --
+this class of bug is invisible to a plain `importlib` module exec (as
+`tests/test_dashboard_main_screener.py` uses), since `st.button()` always
+returns `False` outside a live `ScriptRunContext`. Fixed by rendering the
+banner into an `st.empty()` placeholder and re-rendering it in place after
+any refresh (automatic or button-triggered) completes within the same
+run, rather than only ever rendering it once at the top of the script.
+
+**Incidental fix, found via the same `AppTest` exploration, unrelated to
+either refresh path:** `screen["Overall Rating"].fillna(-1) >= minimum`
+(the Stock Screener's rating-threshold filter, pre-existing) raised a
+pandas `FutureWarning` whenever every row's `Overall Rating` was `None`
+(the column's dtype becomes `object` with nothing to promote it to
+`float64`, and `.fillna()` silently downcasting an object-dtype array is
+deprecated). The comparison's *result* was unaffected either way (`-1 >=
+minimum` is always `False` for any non-negative slider value, verified
+against pandas' `future.no_silent_downcasting` opt-in), so this was a
+forward-compatibility warning rather than a live correctness bug, but
+still real and reproducible. Fixed by coercing with `pd.to_numeric(...,
+errors="coerce")` before `.fillna(-1)`, so the column is already
+`float64` by the time `fillna` runs and never needs to downcast.
+
+**Real-data validation** (live database, read-only -- no network call
+made): `stale_universe_tickers`/`is_universe_price_stale` agree exactly
+(11/11 tracked tickers currently stale in this environment), and the
+stale set is confirmed a subset of the full configured universe.
+
+New test file `tests/test_dashboard_full_refresh_banner.py` (4 tests,
+using `AppTest` to actually run the page and click the button, not a
+plain module exec): the banner-ordering fix in isolation from the new
+automatic trigger; the automatic trigger fixing a stale ticker within its
+own first run and never firing twice; the automatic trigger touching only
+the stale subset when a fresh ticker sits alongside it in the universe;
+and a fully-fresh universe never triggering it at all. Full test suite
+and all three established smoke tests pass. `git diff --check`: clean.
