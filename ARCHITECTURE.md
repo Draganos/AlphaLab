@@ -1329,6 +1329,30 @@ manual testing of the Evidence Coverage dashboard after the PR was open:**
    before/after. Regression test:
    `test_build_research_for_record_matches_get_stock_research`.
 
+**A third bug-check pass (requested after PR #29 had already merged, folded
+into PR #30 since PR #29 itself cannot be reopened) found two more
+low-severity issues, both text/documentation-only -- no crash, no data
+corruption, no coverage-number change:**
+
+1. `_build_category`'s `unavailable` list is gated on `applicable`, so a
+   category classified `NOT_APPLICABLE` for this security type whose
+   `status` nonetheless reads `PARTIAL` (real evidence leaking through
+   despite the classification -- see finding 1 above; confirmed today to
+   never actually happen for any of the six ETF-excluded categories, whose
+   underlying metrics always fetch as uniformly empty, not partial, but
+   not something the code itself rules out) would report an empty
+   `unavailable_metrics` list. `_fundamental_row` then rendered "0
+   metric(s) unavailable" next to non-full coverage -- self-contradictory.
+   Fixed with an explicit branch: an empty `unavailable_metrics` at
+   `PARTIAL` now reports "remaining metrics not applicable to this
+   security type" instead. Regression test: `test_partial_not_applicable_
+   category_reports_a_non_contradictory_reason`.
+2. `_confidence_factors`'s docstring still described `category_breadth` as
+   "the mean of the eight categories'" coverage, unchanged since before
+   this PR's own `applicable_categories` filtering -- for an ETF the
+   denominator is 2 (momentum + ai_research), not 8. Fixed to describe the
+   actual (PR #29) behavior.
+
 ## 27. ETF Research Depth (PR #30)
 
 PR #29 stopped FTEC/GDX's six inapplicable fundamental categories from

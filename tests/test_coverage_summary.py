@@ -156,6 +156,27 @@ def test_not_applicable_fundamental_category_is_never_shown_as_a_coverage_gap():
     assert row.limitation_reason == "not applicable to this security type"
 
 
+def test_partial_not_applicable_category_reports_a_non_contradictory_reason():
+    """`_build_category` never suppresses real evidence that leaks through
+    despite a category being classified NOT_APPLICABLE for this security
+    type (see alpha_lab.research.security_type), so `category.status` can
+    still read PARTIAL with `unavailable_metrics` empty -- because those
+    remaining metrics are themselves not-applicable, never "expected but
+    missing". The old reason text ("0 metric(s) unavailable") read as
+    contradictory next to non-full coverage; it must instead name the
+    actual cause."""
+    partial_not_applicable = _category(
+        "shareholder_return", "Shareholder Return", coverage=0.5,
+        metrics=[_metric("dividend_yield", available=True)], sources=["yfinance"],
+        status=CategoryStatus.PARTIAL,
+    )
+    research = _stock_research(categories={"shareholder_return": partial_not_applicable})
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "shareholder_return")
+    assert row.status == CoverageStatus.PARTIAL
+    assert row.limitation_reason == "remaining metrics not applicable to this security type"
+
+
 def test_fund_evidence_row_is_not_applicable_for_an_equity():
     """fund_evidence is always None for an equity (never fetched) -- must
     read as NOT_APPLICABLE, matching _fundamental_row's own convention,

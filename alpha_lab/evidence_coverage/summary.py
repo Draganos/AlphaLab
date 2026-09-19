@@ -134,7 +134,17 @@ def _fundamental_row(name: str, research: StockResearch) -> CoverageRow:
     if status is CoverageStatus.NO_EVIDENCE:
         reason = "no metrics available for this category"
     elif status is CoverageStatus.PARTIAL:
-        reason = f"{len(category.unavailable_metrics)} metric(s) unavailable"
+        if category.unavailable_metrics:
+            reason = f"{len(category.unavailable_metrics)} metric(s) unavailable"
+        else:
+            # A NOT_APPLICABLE category can still land here at PARTIAL: real
+            # evidence that leaked through despite the classification (see
+            # `_build_category`) is never suppressed, but the metrics still
+            # missing are themselves not-applicable, so `unavailable_metrics`
+            # (which only ever counts "expected but missing" metrics) stays
+            # empty -- reporting "0 metric(s) unavailable" here would read as
+            # contradictory next to a non-full coverage number.
+            reason = "remaining metrics not applicable to this security type"
     return CoverageRow(
         category=name,
         label=category.label,

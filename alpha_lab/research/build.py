@@ -264,11 +264,13 @@ def _confidence_factors(
     Returns (overall_coverage, category_breadth, freshness_factor,
     source_quality_factor, data_quality_penalty_applied).
 
-    category_breadth is the mean of the eight categories' own (already
-    computed) `coverage` fractions — not whether each category cleared its
-    minimum-metric threshold for a score — so a category that has real but
-    insufficient evidence for a score still counts partially rather than as
-    "no evidence".
+    category_breadth is the mean of the applicable categories' own (already
+    computed) `coverage` fractions -- all eight for EQUITY/OTHER, fewer for
+    a security type with `NOT_APPLICABLE` categories excluded (PR #29; see
+    `alpha_lab.research.security_type`) -- not whether each category
+    cleared its minimum-metric threshold for a score, so a category that
+    has real but insufficient evidence for a score still counts partially
+    rather than as "no evidence".
     """
     overall_coverage = _clip01(record.overall_live_coverage)
     # PR #29: a NOT_APPLICABLE category (e.g. valuation for an ETF) is
