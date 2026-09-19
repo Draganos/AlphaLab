@@ -14,7 +14,11 @@ import math
 import pandas as pd
 
 from alpha_lab.providers.base import MarketDataProvider
-from alpha_lab.providers.errors import call_with_classification
+from alpha_lab.providers.errors import (
+    ProviderError,
+    ProviderErrorKind,
+    call_with_classification,
+)
 from alpha_lab.providers.interfaces import (
     AnalystEventProvider,
     EstimateProvider,
@@ -171,6 +175,99 @@ class YFinanceProvider(
             "source": self.provider_name,
         }
 
+    def get_fund_data(self, ticker: str) -> dict[str, Any] | None:
+        """Raw fund-specific evidence for `ticker` from yfinance's
+        dedicated ``Ticker.funds_data`` accessor: fund identity/category,
+        expense ratio/holdings turnover/total net assets (AUM), asset-class
+        mix, sector weights, top holdings, and equity-holdings valuation
+        averages (P/E, P/B, P/S, P/CF).
+
+        Returns ``None`` when `ticker` genuinely has no fund data --
+        yfinance raises ``YFDataException`` for a plain equity (e.g.
+        "NVDA: No Fund data found."), classified as ``ProviderErrorKind.
+        NO_DATA`` by ``classify_yfinance_error``, which is a legitimate
+        "not a fund" outcome here, never a provider failure. Any other
+        classification (rate limiting, network, unknown) still raises
+        ``ProviderError`` normally.
+
+        Deliberately excludes, verified live against the installed
+        yfinance version:
+
+        * ``bond_holdings``/``bond_ratings`` -- unreliable placeholders for
+          a pure-equity fund (FTEC/GDX each return a single degenerate
+          ``{"us_government": 0.0}`` bond-rating entry rather than an
+          absent field), and even a genuine bond fund's own
+          ``bond_holdings`` leaves ``Duration``/``Credit Quality``
+          unpopulated. AlphaLab's current universe has no bond funds, so
+          implementing these now would mean guessing at reliability rather
+          than confirming it.
+        * ``equity_holdings``' ``Median Market Cap``/``3 Year Earnings
+          Growth`` rows -- observed unpopulated (``<NA>``) for every fund
+          checked.
+        * ``info`` dict fields such as ``dividendYield``/``ytdReturn``
+          (distribution/performance evidence) -- observed inconsistent in
+          this yfinance version (FTEC's ``dividendYield`` read 0.35 while
+          its own ``yield`` field read 0.0035 for the same fund on the same
+          call).
+
+        Returns a plain dict of raw inputs (not the canonical
+        ``FundEvidence`` model), consistent with ``get_analyst_consensus``'s
+        existing style; ``alpha_lab.research.fund_evidence.build_fund_evidence``
+        turns this into the canonical object.
+        """
+        ticker_obj = self._ticker(ticker)
+
+        def _fetch() -> dict[str, Any]:
+            # FundsData is a lazy scraper: accessing `.funds_data` itself
+            # never raises -- the actual fetch (and YFDataException for a
+            # non-fund ticker) happens on first sub-property access. Every
+            # property must therefore be read inside this one
+            # call_with_classification call, not just the initial
+            # `.funds_data` access, or a non-fund ticker's exception would
+            # escape unclassified.
+            funds_data = ticker_obj.funds_data
+            overview = funds_data.fund_overview or {}
+            asset_classes = funds_data.asset_classes or {}
+            operations = funds_data.fund_operations
+            equity_holdings = funds_data.equity_holdings
+            top_holdings = funds_data.top_holdings
+            return {
+                "ticker": ticker.upper(),
+                "as_of": date.today(),
+                "category_name": overview.get("categoryName"),
+                "fund_family": overview.get("family"),
+                "legal_type": overview.get("legalType"),
+                "description": _text(funds_data.description),
+                "cash_position": _number(asset_classes.get("cashPosition")),
+                "stock_position": _number(asset_classes.get("stockPosition")),
+                "bond_position": _number(asset_classes.get("bondPosition")),
+                "preferred_position": _number(asset_classes.get("preferredPosition")),
+                "convertible_position": _number(asset_classes.get("convertiblePosition")),
+                "other_position": _number(asset_classes.get("otherPosition")),
+                "sector_weightings": {
+                    str(sector): _number(weight)
+                    for sector, weight in (funds_data.sector_weightings or {}).items()
+                },
+                "expense_ratio": _fund_table_value(operations, "Annual Report Expense Ratio", 0),
+                "category_avg_expense_ratio": _fund_table_value(
+                    operations, "Annual Report Expense Ratio", 1
+                ),
+                "holdings_turnover": _fund_table_value(operations, "Annual Holdings Turnover", 0),
+                "total_net_assets": _fund_table_value(operations, "Total Net Assets", 0),
+                "price_earnings": _fund_table_value(equity_holdings, "Price/Earnings", 0),
+                "price_book": _fund_table_value(equity_holdings, "Price/Book", 0),
+                "price_sales": _fund_table_value(equity_holdings, "Price/Sales", 0),
+                "price_cashflow": _fund_table_value(equity_holdings, "Price/Cashflow", 0),
+                "top_holdings": _top_holdings_rows(top_holdings),
+                "source": self.provider_name,
+            }
+
+        try:
+            return call_with_classification(_fetch, provider=self.provider_name)
+        except ProviderError as error:
+            if error.kind == ProviderErrorKind.NO_DATA:
+                return None
+            raise
 
     def get_estimates(self, ticker: str, observation_date: date) -> list[dict[str, Any]]:
         """Current consensus EPS/revenue estimates for `ticker`, as observed
@@ -518,6 +615,41 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _fund_table_value(frame: pd.DataFrame | None, row_label: str, column_index: int) -> float | None:
+    """One cell of a `FundsData.fund_operations`/`.equity_holdings`-shaped
+    DataFrame (index = attribute name, columns = [the fund's own value,
+    "Category Average"]) -- accessed positionally by `column_index` rather
+    than by the fund's own ticker as a column name, since a share-class
+    suffix or casing difference could otherwise silently miss the column.
+    None when the frame is absent, the row doesn't exist, the column
+    doesn't exist, or the cell is `pd.NA` -- never a fabricated 0."""
+    if frame is None or frame.empty or row_label not in frame.index:
+        return None
+    row = frame.loc[row_label]
+    if column_index >= len(row):
+        return None
+    return _number(row.iloc[column_index])
+
+
+def _top_holdings_rows(frame: pd.DataFrame | None) -> list[dict[str, Any]]:
+    """`FundsData.top_holdings` (index = holding's own ticker symbol,
+    columns = ["Name", "Holding Percent"]) as a plain list of dicts, in
+    the same order yfinance returned them -- already Yahoo's own top-N,
+    never re-sorted or truncated here."""
+    if frame is None or frame.empty:
+        return []
+    rows = []
+    for symbol, row in frame.iterrows():
+        rows.append(
+            {
+                "symbol": _text(symbol),
+                "name": _text(row.get("Name")),
+                "weight": _number(row.get("Holding Percent"), positive=True),
+            }
+        )
+    return rows
 
 
 def _int_or_none(value: Any) -> int | None:

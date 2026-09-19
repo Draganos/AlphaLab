@@ -135,6 +135,19 @@ def classify_yfinance_error(exc: BaseException, *, provider: str) -> ProviderErr
             cause=exc,
         )
 
+    if isinstance(exc, yf_exceptions.YFDataException):
+        # Raised for a genuinely absent *category* of data on an otherwise
+        # valid ticker -- e.g. ``Ticker.funds_data`` on an equity ("NVDA:
+        # No Fund data found."). Not a subclass of YFTickerMissingError
+        # (the ticker itself is fine), but the same honest "nothing here"
+        # outcome, never a provider malfunction worth retrying.
+        return ProviderError(
+            ProviderErrorKind.NO_DATA,
+            provider,
+            str(exc),
+            cause=exc,
+        )
+
     if isinstance(exc, yf_exceptions.YFException):
         return ProviderError(
             ProviderErrorKind.UNKNOWN_PROVIDER_ERROR,

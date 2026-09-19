@@ -491,6 +491,21 @@ class CurrentTechnicalSummary(Base):
     )
 
 
+class CurrentFundEvidence(Base):
+    """Current Fund Evidence (PR #30), one row per ticker. See
+    CurrentAnalystConsensus's docstring for the upsert/failure semantics;
+    `payload` is the full serialized
+    alpha_lab.research.fund_evidence.FundEvidence.
+    """
+
+    __tablename__ = "current_fund_evidence"
+    ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
 class CurrentExternalCalibration(Base):
     """Current (not historical) external calibration, one row per source
     (e.g. "Donatien"). Upserted only by an explicit refresh (see

@@ -90,10 +90,10 @@ class ResearchService:
 
         Enriched with the current Analyst Consensus / Technical Summary /
         AI Research Rating / Analyst Research (rating changes + revision
-        trend), if any have been computed for this ticker — a pure database
-        read of each (see ``SupplementalResearchService``/
+        trend) / Fund Evidence, if any have been computed for this ticker —
+        a pure database read of each (see ``SupplementalResearchService``/
         ``AnalystEventsService``), never a provider call and never a
-        recomputation. Any of the four can be ``None`` independently; that
+        recomputation. Any of the five can be ``None`` independently; that
         never affects the fundamental score/categories/coverage above,
         which are computed and read entirely separately.
         """
@@ -105,6 +105,7 @@ class ResearchService:
                 "technical_summary": self._supplemental.get_technical_summary(ticker),
                 "ai_research_assessment": self._supplemental.get_ai_research_assessment(ticker),
                 "analyst_research": self._analyst_events.get_research_summary(ticker),
+                "fund_evidence": self._supplemental.get_fund_evidence(ticker),
             }
         )
 

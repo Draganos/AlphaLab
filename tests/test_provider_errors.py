@@ -85,6 +85,24 @@ def test_unrelated_json_decode_error_is_not_misclassified_as_rate_limited():
     assert error.kind == ProviderErrorKind.UNKNOWN_PROVIDER_ERROR
 
 
+def test_yf_data_exception_is_classified_as_no_data_not_unknown():
+    """Reproduces Ticker.funds_data on a non-fund ticker
+    (yfinance raises YFDataException, e.g. "NVDA: No Fund data found.") --
+    a genuinely absent data category on an otherwise valid ticker, never a
+    provider malfunction worth retrying or alerting on."""
+    exc = yf_exceptions.YFDataException("NVDA: No Fund data found.")
+    error = classify_yfinance_error(exc, provider="YFinanceProvider")
+    assert error.kind == ProviderErrorKind.NO_DATA
+
+
+def test_yf_ticker_missing_error_still_classified_as_no_data():
+    """Regression: adding the YFDataException branch must not shadow the
+    existing, more specific YFTickerMissingError classification."""
+    exc = yf_exceptions.YFTickerMissingError("BADTICKER", "No timezone found")
+    error = classify_yfinance_error(exc, provider="YFinanceProvider")
+    assert error.kind == ProviderErrorKind.NO_DATA
+
+
 @pytest.mark.parametrize(
     "exc",
     [

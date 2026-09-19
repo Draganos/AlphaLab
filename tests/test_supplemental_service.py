@@ -41,6 +41,11 @@ class _FakeAnalystProvider(MarketDataProvider):
             raise self._raises
         return self._raw
 
+    def get_fund_data(self, ticker):
+        # These tests exercise equity tickers (NVDA); a real provider
+        # returns None for a non-fund ticker rather than raising.
+        return None
+
 
 def _seed_security_with_prices(engine, ticker="NVDA", days=300):
     with Session(engine) as session:

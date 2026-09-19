@@ -49,7 +49,9 @@ from alpha_lab.research.ai_rating import (
 )
 from alpha_lab.research.analyst_consensus import AnalystConsensus
 from alpha_lab.research.analyst_research import AnalystResearchSummary
+from alpha_lab.research.fund_evidence import FundEvidence
 from alpha_lab.research.model import CategoryStatus, StockResearch
+from alpha_lab.research.security_type import SecurityType, normalize_security_type
 from alpha_lab.research.technical import (
     MIN_COVERAGE_THRESHOLD,
     TOTAL_INDICATOR_COUNT,
@@ -132,7 +134,17 @@ def _fundamental_row(name: str, research: StockResearch) -> CoverageRow:
     if status is CoverageStatus.NO_EVIDENCE:
         reason = "no metrics available for this category"
     elif status is CoverageStatus.PARTIAL:
-        reason = f"{len(category.unavailable_metrics)} metric(s) unavailable"
+        if category.unavailable_metrics:
+            reason = f"{len(category.unavailable_metrics)} metric(s) unavailable"
+        else:
+            # A NOT_APPLICABLE category can still land here at PARTIAL: real
+            # evidence that leaked through despite the classification (see
+            # `_build_category`) is never suppressed, but the metrics still
+            # missing are themselves not-applicable, so `unavailable_metrics`
+            # (which only ever counts "expected but missing" metrics) stays
+            # empty -- reporting "0 metric(s) unavailable" here would read as
+            # contradictory next to a non-full coverage number.
+            reason = "remaining metrics not applicable to this security type"
     return CoverageRow(
         category=name,
         label=category.label,
@@ -163,6 +175,44 @@ def _analyst_consensus_row(analyst_consensus: AnalystConsensus | None) -> Covera
         evidence_count=None if analyst_consensus is None else analyst_consensus.total_analysts,
         freshness=None if analyst_consensus is None else analyst_consensus.as_of,
         providers=[] if analyst_consensus is None else [analyst_consensus.source],
+        limitation_reason=reason,
+    )
+
+
+def _fund_evidence_row(fund_evidence: FundEvidence | None, security_type: SecurityType) -> CoverageRow:
+    """PR #30: holdings/sector/asset-class/operations evidence for a fund
+    (e.g. an ETF) -- the mirror image of `_fundamental_row`'s
+    `NOT_APPLICABLE` handling: for a non-ETF security type, this evidence
+    is structurally not applicable (never fetched -- see
+    `YFinanceProvider.get_fund_data`), so it must read `NOT_APPLICABLE`,
+    not `NOT_COMPUTED`, or it would show up as a coverage gap on every
+    equity's Security Detail table. `NOT_COMPUTED` is reserved for the
+    genuine case: an ETF whose Fund Evidence just hasn't been refreshed
+    yet."""
+    if fund_evidence is None and security_type != SecurityType.ETF:
+        return CoverageRow(
+            category="fund_evidence",
+            label="Fund Evidence",
+            status=CoverageStatus.NOT_APPLICABLE,
+            limitation_reason="not applicable to this security type",
+        )
+    coverage = None if fund_evidence is None else fund_evidence.coverage
+    status = _status_for(coverage)
+    reason = None
+    if status is CoverageStatus.NOT_COMPUTED:
+        reason = "not computed for this research state"
+    elif status is CoverageStatus.NO_EVIDENCE:
+        reason = "no fund evidence confirmed for this security"
+    elif status is CoverageStatus.PARTIAL:
+        reason = "incomplete fund evidence reported by provider"
+    return CoverageRow(
+        category="fund_evidence",
+        label="Fund Evidence",
+        coverage=coverage,
+        status=status,
+        evidence_count=None if fund_evidence is None else len(fund_evidence.evidence_ids),
+        freshness=None if fund_evidence is None else fund_evidence.as_of,
+        providers=[] if fund_evidence is None else [fund_evidence.source],
         limitation_reason=reason,
     )
 
@@ -364,6 +414,7 @@ def build_security_coverage_summary(
     rows.append(_revisions_row(research.analyst_research))
     rows.append(_technical_row(research.technical_summary))
     rows.append(_ai_evidence_row(research.ai_research_assessment))
+    rows.append(_fund_evidence_row(research.fund_evidence, normalize_security_type(research.security_type)))
     rows.append(_news_row(news_articles))
     rows.append(_macro_row(macro_assessment))
     return SecurityCoverageSummary(

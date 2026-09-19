@@ -1328,3 +1328,173 @@ manual testing of the Evidence Coverage dashboard after the PR was open:**
    size since the old path was quadratic. Output verified byte-identical
    before/after. Regression test:
    `test_build_research_for_record_matches_get_stock_research`.
+
+**A third bug-check pass (requested after PR #29 had already merged, folded
+into PR #30 since PR #29 itself cannot be reopened) found two more
+low-severity issues, both text/documentation-only -- no crash, no data
+corruption, no coverage-number change:**
+
+1. `_build_category`'s `unavailable` list is gated on `applicable`, so a
+   category classified `NOT_APPLICABLE` for this security type whose
+   `status` nonetheless reads `PARTIAL` (real evidence leaking through
+   despite the classification -- see finding 1 above; confirmed today to
+   never actually happen for any of the six ETF-excluded categories, whose
+   underlying metrics always fetch as uniformly empty, not partial, but
+   not something the code itself rules out) would report an empty
+   `unavailable_metrics` list. `_fundamental_row` then rendered "0
+   metric(s) unavailable" next to non-full coverage -- self-contradictory.
+   Fixed with an explicit branch: an empty `unavailable_metrics` at
+   `PARTIAL` now reports "remaining metrics not applicable to this
+   security type" instead. Regression test: `test_partial_not_applicable_
+   category_reports_a_non_contradictory_reason`.
+2. `_confidence_factors`'s docstring still described `category_breadth` as
+   "the mean of the eight categories'" coverage, unchanged since before
+   this PR's own `applicable_categories` filtering -- for an ETF the
+   denominator is 2 (momentum + ai_research), not 8. Fixed to describe the
+   actual (PR #29) behavior.
+
+## 27. ETF Research Depth (PR #30)
+
+PR #29 stopped FTEC/GDX's six inapplicable fundamental categories from
+dragging down their coverage and confidence, but it added no genuine
+ETF-specific evidence -- an ETF's actual research surface (holdings,
+concentration, sector exposure, expense ratio, AUM, fund-level valuation
+averages) was still entirely unfetched. This PR implements it, per the
+roadmap's PR #30 spec, using exactly the fields confirmed live to be
+reliably populated for the installed yfinance version (1.7.0) -- nothing
+scraped just to inflate coverage.
+
+**Provider layer** (`alpha_lab.providers.yfinance_provider.get_fund_data`):
+`Ticker.funds_data` is a *lazy* scraper -- accessing the property itself
+never raises; the real fetch (and a `YFDataException`, e.g. "NVDA: No Fund
+data found.", for a non-fund ticker) only fires on the first sub-property
+access (`.fund_overview`, `.asset_classes`, `.top_holdings`, ...). The
+entire extraction -- every sub-property read -- is wrapped in one
+`call_with_classification` call so a mid-extraction `YFDataException`
+still gets classified and returns `None`, rather than raising unclassified
+partway through. `YFDataException` (not a subclass of
+`YFTickerMissingError` -- the ticker is fine, the fund *category* of data
+is what's missing) is a new classification branch in
+`alpha_lab.providers.errors.classify_yfinance_error`, mapped to
+`ProviderErrorKind.NO_DATA` alongside the existing `YFTickerMissingError`
+branch.
+
+Deliberately excluded, confirmed unreliable by live probing during Part A
+and documented in `get_fund_data`'s own docstring: `bond_holdings`/
+`bond_ratings` (inconsistent shape across funds), `equity_holdings`'s
+Median Market Cap and 3 Year Earnings Growth rows (`<NA>` for every fund
+checked), and the `info` dict's dividend yield/YTD return fields
+(inconsistent presence/units versus the dedicated `funds_data` rows).
+`_fund_table_value` reads the `fund_operations`/`equity_holdings`
+DataFrames *positionally* by column index (fund's own column vs. "Category
+Average"), avoiding brittleness from share-class-suffix or casing
+mismatches in a ticker-name lookup.
+
+**`alpha_lab.research.fund_evidence`** (new, pure, zero `alpha_lab`
+scoring dependencies): `FundEvidence` carries five independently-present
+domains -- asset allocation, sector weightings, fund operations (expense
+ratio/category average/turnover/AUM), equity-holdings valuation averages
+(P/E, P/B, P/S, P/CF only), and top holdings -- plus a domain-aware
+`coverage` (mirrors `AnalystResearchSummary`'s "absent domain counts as 0,
+never excluded from the denominator" convention) and a `top_holdings_
+concentration` (sum of top-holdings' weights). `build_fund_evidence`
+returns `None` (never an empty-but-present object) when every domain is
+absent, matching the existing "`None` means not computed" convention. A
+new `CurrentFundEvidence` table persists it, mirroring
+`CurrentAnalystConsensus` exactly (ticker PK/FK, JSON payload,
+`computed_at`).
+
+**Wiring**: `SupplementalRefreshService.refresh_fund_evidence` /
+`get_fund_evidence` follow the same shape as the existing analyst-
+consensus and technical-summary refresh/read pair; `refresh_all` always
+attempts it (independent of analyst success, like technical_summary),
+falling back to the last stored value on a `ProviderError`.
+`StockResearch` gained a `fund_evidence` field, populated in both
+`get_stock_research` and `build_research_for_record` (PR #29's O(n^2)
+fix) so the Universe Breakdown path stays O(n).
+
+**AI Research Rating** (`alpha_lab.research.ai_rating`): two changes.
+(1) `build_evidence_payload` now also skips `NOT_APPLICABLE` categories
+(previously only `UNAVAILABLE` was skipped), so a fund's six inapplicable
+fundamental categories no longer feed the AI a fabricated "score =
+unavailable" evidence item for something it was never expected to have.
+(2) When `fund_evidence` is supplied, up to four new evidence items are
+emitted (`fund:identity`, `fund:expense_ratio_vs_category`, `fund:
+top_holdings_concentration`, `fund:sector_concentration`). Only the
+expense-ratio-vs-category signal is banded into a dimension
+(`valuation_context`, via new `_EXPENSE_RATIO_THRESHOLDS_V1` mirroring the
+existing `_UPSIDE_THRESHOLDS_V1` shape) -- concentration and sector
+exposure are deliberately left as descriptive-only evidence for a future
+live LLM provider, not force-mapped to a good/bad judgment the
+deterministic provider has no principled threshold for.
+`build_evidence_coverage` is now security-type-aware: for `SecurityType.
+ETF`, `fund_evidence.coverage` (or `0.0` if fund evidence is genuinely
+absent -- never excluded from the denominator) substitutes for `analyst_
+coverage` in the 3-domain average, per the roadmap's explicit "do not
+reuse equity analyst gates blindly." The `EQUITY` path (the default, for
+any other/omitted security type) is byte-identical to before this PR --
+confirmed by a dedicated regression test.
+`alpha_lab.evidence_coverage.summary` gained a matching `_fund_evidence_
+row` in the per-security coverage breakdown.
+
+**Bugs caught in a final high-effort self-review pass, before opening the
+PR:**
+
+1. `_fund_evidence_row` returned `CoverageStatus.NOT_COMPUTED` for *every*
+   equity (since `fund_evidence` is always `None` for a non-fund), which
+   meant every equity's Evidence Coverage Security Detail page counted
+   "Fund Evidence" into `tracked`/`weak_rows` and listed it under "Weak or
+   missing category detail" -- contradicting both the function's own
+   intent and the `_fundamental_row` precedent from PR #29 (structurally
+   inapplicable is `NOT_APPLICABLE`, never a coverage gap). Fixed by
+   adding a `security_type` parameter with an early-return branch:
+   `fund_evidence is None and security_type != SecurityType.ETF` reports
+   `NOT_APPLICABLE`; a genuine ETF with no fund evidence *yet* still
+   correctly reports `NOT_COMPUTED`. Regression tests: `test_fund_
+   evidence_row_is_not_applicable_for_an_equity`, `test_fund_evidence_
+   row_is_not_computed_for_an_etf_not_yet_refreshed`.
+2. `top_holdings_concentration` summed only the top holdings with a
+   non-`None` weight, silently understating concentration with no signal
+   that it had done so if any single holding's weight came back `None`
+   (e.g. a genuine near-zero position the provider maps to `None`) --
+   while the evidence text this feeds ("Top N holdings concentration =
+   X%") implies a sum over all N. Fixed to return `None` (never a
+   silently-partial sum) unless every top holding has a genuine weight.
+   Regression test asserts the concentration for a fully-populated set of
+   top holdings against a hand-computed sum, and a separate test asserts
+   `None` when any holding's weight is `None`.
+
+**Real-data validation** (FTEC, GDX, and NVDA as an equity control, via
+`SupplementalRefreshService.refresh_all`): FTEC and GDX both get `fund_
+evidence` populated with full domain coverage (`1.0`) and realistic
+concentration figures (~63% and ~58% of assets in their respective top 10
+holdings). AI evidence coverage for both rose from what a blind equity-
+style average would have produced (0.533, penalizing them for analyst
+coverage they structurally can't have) to the new fund-aware 0.867. NVDA
+stayed exactly byte-identical (`fund_coverage=None`, same overall coverage
+as before this PR) -- confirming the `EQUITY` path is untouched. Both
+ETFs' AI rating stayed `REVIEW` after the fix, confirmed to be *honest*
+rather than a regression: only 2 of the 6 AI dimensions
+(`valuation_context` via the new expense-ratio banding, `catalyst_
+strength` via momentum/technical evidence) are genuinely assessable for a
+fund under this PR's deliberately conservative dimension-mapping scope --
+the other four dimensions depend on fundamental categories that are
+`NOT_APPLICABLE` to a fund and have no fund-evidence substitute defined
+here.
+
+Verified live via headless browser against a locally-started dashboard:
+Company Research's new Fund Evidence panel renders FTEC's expense ratio
+(0.08% vs. 0.90% category average), AUM, turnover, concentration, asset
+allocation, sector weightings, equity-holdings averages, and an
+expandable top-10-holdings table, with zero page errors; the AI evidence
+coverage caption correctly relabels "Analyst" to "Fund" for an ETF; the
+Valuation Context dimension shows "Very Positive" (the expense-ratio
+banding working end-to-end); and the Evidence Coverage Security Detail
+tab's tracked-category count for FTEC increased by exactly one (the new
+Fund Evidence row, counted as `FULL`) versus before this PR.
+
+Full test suite (`tests/test_provider_errors.py` +2, `tests/test_
+yfinance_fund_data_provider.py` new (5 tests), `tests/test_fund_evidence.py`
+new (9 tests), `tests/test_supplemental_service.py` updated fake provider,
+`tests/test_ai_rating.py` +8, `tests/test_coverage_summary.py` +2) and all
+three established smoke tests pass.

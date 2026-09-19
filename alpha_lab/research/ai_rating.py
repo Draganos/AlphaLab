@@ -148,6 +148,16 @@ class AIEvidenceCoverage(BaseModel):
     analyst_coverage: float = Field(ge=0, le=1)
     technical_coverage: float = Field(ge=0, le=1)
     overall_ai_evidence_coverage: float = Field(ge=0, le=1)
+    # PR #30: for an ETF, `analyst_coverage` is not a genuine evidence
+    # domain -- see `build_evidence_coverage`'s `security_type` param --
+    # so `overall_ai_evidence_coverage` is instead averaged over
+    # fundamental/fund/technical for a fund, and this field records that
+    # fund coverage for transparency. `analyst_coverage` above is still
+    # populated whenever real (even if unused in the average): never
+    # hidden, just not allowed to unfairly dilute a fund's overall
+    # reading. None for an equity (untouched three-domain average, exactly
+    # as before this PR).
+    fund_coverage: float | None = None
 
 
 def build_evidence_coverage(
@@ -155,12 +165,35 @@ def build_evidence_coverage(
     fundamental_coverage: float,
     analyst_consensus: "object | None" = None,
     technical_summary: "object | None" = None,
+    fund_evidence: "object | None" = None,
+    security_type: "object | None" = None,
 ) -> AIEvidenceCoverage:
     """The only place `overall_ai_evidence_coverage` is computed -- always
     an average over exactly three domains, never over however many happen
-    to be present."""
+    to be present.
+
+    `security_type` (an `alpha_lab.research.security_type.SecurityType`;
+    compared by its string value, `"ETF"`, to avoid importing that module
+    here -- this file deliberately imports nothing from `alpha_lab.research`
+    so every caller stays duck-typed) selects which three: for an ETF, the
+    roadmap's "do not reuse equity analyst gates blindly" rule means
+    Analyst Consensus -- structurally near-absent for a fund -- is
+    replaced by `fund_evidence.coverage` in the average. Omitting
+    `security_type` (or passing `EQUITY`/`OTHER`) reproduces the exact
+    three-domain equity average from before this parameter existed.
+    """
     analyst_coverage = analyst_consensus.coverage if analyst_consensus is not None else 0.0
     technical_coverage = technical_summary.coverage if technical_summary is not None else 0.0
+    if security_type == "ETF":
+        fund_coverage = fund_evidence.coverage if fund_evidence is not None else 0.0
+        overall = (fundamental_coverage + fund_coverage + technical_coverage) / 3
+        return AIEvidenceCoverage(
+            fundamental_coverage=fundamental_coverage,
+            analyst_coverage=analyst_coverage,
+            technical_coverage=technical_coverage,
+            overall_ai_evidence_coverage=overall,
+            fund_coverage=fund_coverage,
+        )
     overall = (fundamental_coverage + analyst_coverage + technical_coverage) / 3
     return AIEvidenceCoverage(
         fundamental_coverage=fundamental_coverage,
@@ -212,24 +245,33 @@ def build_evidence_payload(
     analyst_consensus: "object | None" = None,
     technical_summary: "object | None" = None,
     analyst_research: "object | None" = None,
+    fund_evidence: "object | None" = None,
 ) -> list[AIEvidenceItem]:
     """Extract the bounded, explicit evidence set a provider is allowed to
     see. `categories` is `StockResearch.categories`; kept loosely typed
     here (duck-typed) to avoid a circular import with `alpha_lab.research.model`.
-    `analyst_research` is an `alpha_lab.research.analyst_research.
-    AnalystResearchSummary` (also duck-typed for the same reason).
+    `analyst_research`/`fund_evidence` are `alpha_lab.research.
+    analyst_research.AnalystResearchSummary`/`alpha_lab.research.
+    fund_evidence.FundEvidence` (also duck-typed for the same reason).
 
     Deliberately excludes `_EXCLUDED_CATEGORIES` (the existing AI-derived
     `ai_research` category) -- this AI Research Rating synthesizes
-    fundamental/Analyst Consensus/Technical Summary/Analyst Research
-    evidence, never an already-AI-derived score, however it was itself
+    fundamental/Analyst Consensus/Technical Summary/Analyst Research/Fund
+    Evidence, never an already-AI-derived score, however it was itself
     computed.
     """
     items: list[AIEvidenceItem] = []
     for name, category in categories.items():
         if name in _EXCLUDED_CATEGORIES:
             continue
-        if category.status.value == "UNAVAILABLE":
+        if category.status.value in ("UNAVAILABLE", "NOT_APPLICABLE"):
+            # NOT_APPLICABLE (PR #30, e.g. `valuation` for an ETF) is
+            # structurally not applicable to this security's type, not
+            # missing evidence -- surfacing "Valuation score = unavailable"
+            # to the AI would misrepresent that as an evidence gap on a
+            # dimension that was never expected to have one. Also never
+            # counted as a citable evidence_id, so a provider can't cite
+            # what was never offered.
             continue
         detail = f"{category.label} score = "
         detail += "unavailable" if category.score is None else f"{category.score:.0f}/100"
@@ -334,6 +376,57 @@ def build_evidence_payload(
                         value=nearest.direction.value,
                     )
                 )
+    if fund_evidence is not None:
+        if fund_evidence.category_name or fund_evidence.fund_family:
+            items.append(
+                AIEvidenceItem(
+                    evidence_id="fund:identity",
+                    description=(
+                        f"Fund category = {fund_evidence.category_name or 'unknown'} "
+                        f"({fund_evidence.fund_family or 'unknown family'})"
+                    ),
+                    source="Fund Evidence",
+                )
+            )
+        expense_ratio = fund_evidence.operations.expense_ratio
+        category_avg = fund_evidence.operations.category_avg_expense_ratio
+        if expense_ratio is not None and category_avg:
+            relative = (category_avg - expense_ratio) / category_avg
+            items.append(
+                AIEvidenceItem(
+                    evidence_id="fund:expense_ratio_vs_category",
+                    description=(
+                        f"Expense ratio {expense_ratio:.2%} vs category average {category_avg:.2%} "
+                        f"({relative:+.0%} relative)"
+                    ),
+                    source="Fund Evidence",
+                    value=relative,
+                )
+            )
+        if fund_evidence.top_holdings_concentration is not None:
+            items.append(
+                AIEvidenceItem(
+                    evidence_id="fund:top_holdings_concentration",
+                    description=(
+                        f"Top {len(fund_evidence.top_holdings)} holdings concentration = "
+                        f"{fund_evidence.top_holdings_concentration:.0%}"
+                    ),
+                    source="Fund Evidence",
+                    value=fund_evidence.top_holdings_concentration,
+                )
+            )
+        if fund_evidence.sector_weightings:
+            largest_sector, largest_weight = max(
+                fund_evidence.sector_weightings.items(), key=lambda item: item[1]
+            )
+            items.append(
+                AIEvidenceItem(
+                    evidence_id="fund:sector_concentration",
+                    description=f"Largest sector exposure = {largest_sector} at {largest_weight:.0%}",
+                    source="Fund Evidence",
+                    value=largest_weight,
+                )
+            )
     return items
 
 
@@ -533,6 +626,20 @@ _UPSIDE_THRESHOLDS_V1: tuple[tuple[float, AIDimensionValue], ...] = (
 )
 _UPSIDE_FLOOR = AIDimensionValue.VERY_NEGATIVE
 
+# PR #30: a fund's expense ratio relative to its category average, banded
+# on the same -20%/-5%/+5%/+20% shape as _UPSIDE_THRESHOLDS_V1 (positive =
+# cheaper than peers, favorable) -- a distinct, independently versioned
+# constant rather than reusing _UPSIDE_THRESHOLDS_V1 directly, per this
+# file's own convention that each evidence domain's thresholds are allowed
+# to diverge independently in the future even if they start out aligned.
+_EXPENSE_RATIO_THRESHOLDS_V1: tuple[tuple[float, AIDimensionValue], ...] = (
+    (0.20, AIDimensionValue.VERY_POSITIVE),
+    (0.05, AIDimensionValue.POSITIVE),
+    (-0.05, AIDimensionValue.NEUTRAL),
+    (-0.20, AIDimensionValue.NEGATIVE),
+)
+_EXPENSE_RATIO_FLOOR = AIDimensionValue.VERY_NEGATIVE
+
 # A blended dimension's average numeric signal maps back to a value using
 # the same -2..+2 band shape as AnalystConsensus._RATING_THRESHOLDS_V1 --
 # deliberately aligned so "moderately positive" means the same magnitude
@@ -595,6 +702,8 @@ def _dimension_value_for_evidence(evidence_id: str, value: float | str) -> AIDim
         return _band(value, _NET_RATING_CHANGE_THRESHOLDS_V1, _NET_RATING_CHANGE_FLOOR)
     if evidence_id == "estimate_revision:trend_direction" and isinstance(value, str):
         return _REVISION_DIRECTION_TO_DIMENSION_VALUE.get(value)
+    if evidence_id == "fund:expense_ratio_vs_category" and isinstance(value, (int, float)):
+        return _band(value, _EXPENSE_RATIO_THRESHOLDS_V1, _EXPENSE_RATIO_FLOOR)
     return None
 
 
@@ -633,6 +742,17 @@ class DeterministicAIRatingProvider(AIRatingProvider):
     technical, or risk signal. Both are omitted entirely (not banded to
     NEUTRAL) when the underlying evidence was insufficient to compute them;
     see `build_evidence_payload`.
+
+    PR #30 addition: a fund's expense ratio relative to its category
+    average feeds `valuation_context` alongside `fundamental:valuation`/
+    `analyst:upside_to_mean` -- a fund cheaper than its peers is a genuine
+    valuation-shaped signal, the same way analyst upside is. Fund identity/
+    top-holdings concentration/sector concentration are exposed as
+    evidence (see `build_evidence_payload`) but deliberately not banded
+    into any dimension here: unlike expense ratio, "is 60% concentration
+    good or bad" is not a judgment this deterministic provider makes --
+    they remain available for a live LLM-based provider to reason about
+    without a fabricated numeric verdict from this rule-based one.
     """
 
     # dimension -> the evidence_ids it may be derived from, in the order
@@ -649,7 +769,11 @@ class DeterministicAIRatingProvider(AIRatingProvider):
             "estimate_revision:trend_direction",
         ),
         "competitive_position": ("fundamental:business_quality",),
-        "valuation_context": ("fundamental:valuation", "analyst:upside_to_mean"),
+        "valuation_context": (
+            "fundamental:valuation",
+            "analyst:upside_to_mean",
+            "fund:expense_ratio_vs_category",
+        ),
         "risk_profile": ("fundamental:financial_strength",),
         "catalyst_strength": ("fundamental:momentum", "technical:overall_rating"),
     }

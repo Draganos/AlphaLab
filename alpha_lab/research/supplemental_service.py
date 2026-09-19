@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from alpha_lab.database.models import (
     CurrentAIResearchAssessment,
     CurrentAnalystConsensus,
+    CurrentFundEvidence,
     CurrentTechnicalSummary,
     Price,
 )
@@ -43,6 +44,8 @@ from alpha_lab.research.ai_rating import (
 from alpha_lab.research.analyst_consensus import AnalystConsensus, build_analyst_consensus
 from alpha_lab.research.analyst_events import AnalystEventsService
 from alpha_lab.research.analyst_research import AnalystResearchSummary
+from alpha_lab.research.fund_evidence import FundEvidence, build_fund_evidence
+from alpha_lab.research.security_type import normalize_security_type
 from alpha_lab.research.model import StockResearch
 from alpha_lab.research.technical import TechnicalSummary, build_technical_summary
 
@@ -50,15 +53,22 @@ from alpha_lab.research.technical import TechnicalSummary, build_technical_summa
 @dataclass
 class SupplementalRefreshResult:
     """Outcome of `SupplementalResearchService.refresh_all` -- one explicit
-    three-domain refresh. `analyst_error` is set (and `ai_research_assessment`
+    refresh across Analyst Consensus, Technical Summary, Fund Evidence, and
+    AI Research Rating. `analyst_error` is set (and `ai_research_assessment`
     left `None`) exactly when Analyst Consensus failed to refresh; see
     `refresh_all` for why the AI assessment is skipped rather than degraded
-    in that case."""
+    in that case. `fund_evidence_error` is set when a Fund Evidence refresh
+    attempt failed (rate limiting, network, ...) -- `fund_evidence` itself
+    still reflects the last successfully stored value in that case (never
+    `None` just because *this* refresh attempt failed), and never blocks
+    the AI Research Rating the way an Analyst Consensus failure does."""
 
     analyst_consensus: AnalystConsensus | None
     technical_summary: TechnicalSummary
+    fund_evidence: "FundEvidence | None"
     ai_research_assessment: AIResearchAssessment | None
     analyst_error: ProviderError | None
+    fund_evidence_error: ProviderError | None
 
 
 class SupplementalResearchService:
@@ -79,6 +89,10 @@ class SupplementalResearchService:
     def get_ai_research_assessment(self, ticker: str) -> AIResearchAssessment | None:
         row = self._get_row(CurrentAIResearchAssessment, ticker)
         return None if row is None else AIResearchAssessment.model_validate(row.payload)
+
+    def get_fund_evidence(self, ticker: str) -> FundEvidence | None:
+        row = self._get_row(CurrentFundEvidence, ticker)
+        return None if row is None else FundEvidence.model_validate(row.payload)
 
     def _get_row(self, model, ticker: str):
         normalized = ticker.strip().upper()
@@ -141,6 +155,25 @@ class SupplementalResearchService:
         self._upsert(CurrentTechnicalSummary, symbol, summary.model_dump(mode="json"))
         return summary
 
+    def refresh_fund_evidence(
+        self, ticker: str, provider: MarketDataProvider
+    ) -> FundEvidence | None:
+        """Fetch + compute + upsert. Returns `None` (leaving any existing
+        row untouched) when `ticker` genuinely has no fund data -- e.g. it's
+        an equity, not an ETF/fund; `YFinanceProvider.get_fund_data` already
+        distinguishes that from a real provider failure and returns `None`
+        for it rather than raising. Raises `ProviderError` on an actual
+        provider failure, also leaving the existing row untouched."""
+        symbol = ticker.strip().upper()
+        raw = provider.get_fund_data(symbol)
+        if raw is None:
+            return None
+        evidence = build_fund_evidence(raw)
+        if evidence is None:
+            return None
+        self._upsert(CurrentFundEvidence, symbol, evidence.model_dump(mode="json"))
+        return evidence
+
     def refresh_ai_research_assessment(
         self,
         ticker: str,
@@ -149,27 +182,34 @@ class SupplementalResearchService:
         analyst_consensus: AnalystConsensus | None = None,
         technical_summary: TechnicalSummary | None = None,
         analyst_research: AnalystResearchSummary | None = None,
+        fund_evidence: FundEvidence | None = None,
     ) -> AIResearchAssessment:
         """Synthesize already-computed evidence. `research` must be the
         base StockResearch (fundamental evidence only); pass the current
-        analyst_consensus/technical_summary/analyst_research explicitly so
-        this never has to read them back itself. Raises EvidenceViolation if
-        the configured provider cites evidence outside what was supplied --
-        never silently corrected."""
+        analyst_consensus/technical_summary/analyst_research/fund_evidence
+        explicitly so this never has to read them back itself. Raises
+        EvidenceViolation if the configured provider cites evidence outside
+        what was supplied -- never silently corrected."""
         symbol = ticker.strip().upper()
         evidence = build_evidence_payload(
             categories=research.categories,
             analyst_consensus=analyst_consensus,
             technical_summary=technical_summary,
             analyst_research=analyst_research,
+            fund_evidence=fund_evidence,
         )
         # Domain-aware: a missing Analyst Consensus or Technical Summary
         # counts as 0 coverage for that domain, never as "not applicable"
-        # and excluded from the average -- see AIEvidenceCoverage.
+        # and excluded from the average -- see AIEvidenceCoverage. For an
+        # ETF, `security_type` swaps Analyst Consensus for Fund Evidence in
+        # that average instead (see build_evidence_coverage's docstring --
+        # "do not reuse equity analyst gates blindly").
         evidence_coverage = build_evidence_coverage(
             fundamental_coverage=research.overall_coverage,
             analyst_consensus=analyst_consensus,
             technical_summary=technical_summary,
+            fund_evidence=fund_evidence,
+            security_type=normalize_security_type(research.security_type),
         )
 
         provider = configured_ai_rating_provider()
@@ -190,17 +230,22 @@ class SupplementalResearchService:
         self, ticker: str, provider: MarketDataProvider, research: StockResearch
     ) -> SupplementalRefreshResult:
         """The explicit "Refresh for this ticker" action's full sequence:
-        Analyst Consensus, then Technical Summary (independent of Analyst
-        Consensus, so always attempted), then AI Research Rating -- but only
-        when Analyst Consensus refreshed cleanly.
+        Analyst Consensus, Technical Summary, and Fund Evidence (all three
+        independent of each other, so all always attempted), then AI
+        Research Rating -- but only when Analyst Consensus refreshed
+        cleanly.
 
         A failed Analyst Consensus refresh never triggers an AI refresh: the
-        AI Research Rating explicitly synthesizes all three domains, and
+        AI Research Rating explicitly synthesizes all evidence domains, and
         synthesizing it anyway with a missing Analyst Consensus would
         silently replace a previously valid assessment with a weaker one
         derived from incomplete evidence, rather than surfacing the failure.
         The existing AI Research Rating (if any) is left exactly as it was
-        when Analyst Consensus fails.
+        when Analyst Consensus fails. A failed Fund Evidence refresh is
+        different -- see `SupplementalRefreshResult`'s docstring -- and
+        never blocks the AI refresh the way an Analyst Consensus failure
+        does (Fund Evidence is only ever relevant for an ETF in the first
+        place, via `build_evidence_coverage`'s `security_type`).
         """
         analyst: AnalystConsensus | None = None
         analyst_error: ProviderError | None = None
@@ -209,6 +254,13 @@ class SupplementalResearchService:
         except ProviderError as error:
             analyst_error = error
         technical = self.refresh_technical_summary(ticker)
+        fund_evidence: FundEvidence | None = None
+        fund_evidence_error: ProviderError | None = None
+        try:
+            fund_evidence = self.refresh_fund_evidence(ticker, provider)
+        except ProviderError as error:
+            fund_evidence_error = error
+            fund_evidence = self.get_fund_evidence(ticker)
         ai_assessment: AIResearchAssessment | None = None
         if analyst_error is None:
             # Pure DB read (no provider call) of whatever Analyst Research
@@ -223,12 +275,15 @@ class SupplementalResearchService:
                 analyst_consensus=analyst,
                 technical_summary=technical,
                 analyst_research=analyst_research,
+                fund_evidence=fund_evidence,
             )
         return SupplementalRefreshResult(
             analyst_consensus=analyst,
             technical_summary=technical,
+            fund_evidence=fund_evidence,
             ai_research_assessment=ai_assessment,
             analyst_error=analyst_error,
+            fund_evidence_error=fund_evidence_error,
         )
 
     def _upsert(self, model, ticker: str, payload: dict) -> None:

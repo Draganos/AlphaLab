@@ -361,6 +361,61 @@ def test_full_fundamental_coverage_alone_does_not_read_as_full_ai_evidence_cover
     assert coverage.overall_ai_evidence_coverage < 1.0
 
 
+# --- PR #30: security-type-aware evidence coverage for a fund ---
+
+
+class _FakeFundEvidence:
+    def __init__(self, coverage):
+        self.coverage = coverage
+
+
+def test_equity_security_type_ignores_fund_evidence_entirely():
+    """Regression: omitting security_type (or EQUITY) must reproduce the
+    exact three-domain equity average from before this parameter existed,
+    even if fund_evidence is (implausibly) supplied."""
+    coverage = build_evidence_coverage(
+        fundamental_coverage=1.0,
+        analyst_consensus=_FakeAnalystConsensus(0.8),
+        technical_summary=_FakeTechnicalSummary(0.6),
+        fund_evidence=_FakeFundEvidence(1.0),
+        security_type="EQUITY",
+    )
+    assert coverage.overall_ai_evidence_coverage == pytest.approx((1.0 + 0.8 + 0.6) / 3)
+    assert coverage.fund_coverage is None
+
+
+def test_etf_security_type_substitutes_fund_coverage_for_analyst_coverage():
+    """The roadmap's "do not reuse equity analyst gates blindly" rule: an
+    ETF's structurally-near-absent Analyst Consensus must not drag down
+    overall_ai_evidence_coverage -- Fund Evidence takes its place in the
+    average instead."""
+    coverage = build_evidence_coverage(
+        fundamental_coverage=1.0,
+        analyst_consensus=_FakeAnalystConsensus(0.0),
+        technical_summary=_FakeTechnicalSummary(1.0),
+        fund_evidence=_FakeFundEvidence(1.0),
+        security_type="ETF",
+    )
+    # Averaged over fundamental/fund/technical (1.0 each) -- not diluted by
+    # analyst_coverage's genuine 0.0, which an equity-blind average would
+    # have used instead.
+    assert coverage.overall_ai_evidence_coverage == pytest.approx(1.0)
+    assert coverage.fund_coverage == 1.0
+    # analyst_coverage is still reported, just not used in the average.
+    assert coverage.analyst_coverage == 0.0
+
+
+def test_etf_security_type_with_no_fund_evidence_counts_as_zero_not_excluded():
+    coverage = build_evidence_coverage(
+        fundamental_coverage=1.0,
+        technical_summary=_FakeTechnicalSummary(1.0),
+        fund_evidence=None,
+        security_type="ETF",
+    )
+    assert coverage.fund_coverage == 0.0
+    assert coverage.overall_ai_evidence_coverage == pytest.approx((1.0 + 0.0 + 1.0) / 3)
+
+
 # --- evidence payload construction: the only thing a provider ever sees ---
 
 
@@ -413,6 +468,21 @@ def test_evidence_payload_excludes_unavailable_categories_entirely():
     assert "fundamental:valuation" not in ids
 
 
+def test_evidence_payload_excludes_not_applicable_categories_entirely():
+    """PR #30 regression: a NOT_APPLICABLE category (e.g. valuation for an
+    ETF) must never surface as "score = unavailable" evidence -- that
+    would misrepresent a structurally-inapplicable category as a missing
+    one, and offer a citable evidence_id for something never offered."""
+    categories = {
+        "business_quality": _FakeCategory("Business Quality", 75.0, 1.0, "AVAILABLE"),
+        "valuation": _FakeCategory("Valuation", None, 0.0, "NOT_APPLICABLE"),
+    }
+    items = build_evidence_payload(categories=categories)
+    ids = {item.evidence_id for item in items}
+    assert "fundamental:business_quality" in ids
+    assert "fundamental:valuation" not in ids
+
+
 def test_evidence_payload_includes_available_metrics_but_not_missing_ones():
     categories = {
         "business_quality": _FakeCategory(
@@ -448,6 +518,72 @@ def test_evidence_payload_omits_analyst_and_technical_evidence_when_not_supplied
     items = build_evidence_payload(categories={})
     ids = {item.evidence_id for item in items}
     assert not any(i.startswith("analyst:") or i.startswith("technical:") for i in ids)
+
+
+# --- PR #30: Fund Evidence in the AI evidence payload ---
+
+
+class _FakeFundOperations:
+    def __init__(self, expense_ratio=None, category_avg_expense_ratio=None):
+        self.expense_ratio = expense_ratio
+        self.category_avg_expense_ratio = category_avg_expense_ratio
+
+
+class _FakeFundEvidenceFull:
+    def __init__(
+        self, *, category_name="Technology", fund_family="Fidelity Investments",
+        expense_ratio=0.00084, category_avg_expense_ratio=0.009,
+        top_holdings_concentration=0.63, top_holdings=(1, 2, 3),
+        sector_weightings=None,
+    ):
+        self.category_name = category_name
+        self.fund_family = fund_family
+        self.operations = _FakeFundOperations(expense_ratio, category_avg_expense_ratio)
+        self.top_holdings_concentration = top_holdings_concentration
+        self.top_holdings = list(top_holdings)
+        self.sector_weightings = sector_weightings or {"technology": 0.99, "financial_services": 0.01}
+
+
+def test_evidence_payload_carries_fund_evidence_when_supplied():
+    items = build_evidence_payload(categories={}, fund_evidence=_FakeFundEvidenceFull())
+    ids = {item.evidence_id for item in items}
+    assert "fund:identity" in ids
+    assert "fund:expense_ratio_vs_category" in ids
+    assert "fund:top_holdings_concentration" in ids
+    assert "fund:sector_concentration" in ids
+
+
+def test_evidence_payload_omits_fund_evidence_when_not_supplied():
+    items = build_evidence_payload(categories={})
+    ids = {item.evidence_id for item in items}
+    assert not any(i.startswith("fund:") for i in ids)
+
+
+def test_evidence_payload_expense_ratio_evidence_is_positive_when_cheaper_than_category():
+    items = build_evidence_payload(
+        categories={},
+        fund_evidence=_FakeFundEvidenceFull(expense_ratio=0.001, category_avg_expense_ratio=0.01),
+    )
+    item = next(i for i in items if i.evidence_id == "fund:expense_ratio_vs_category")
+    assert item.value == pytest.approx(0.9)
+
+
+def test_evidence_payload_omits_top_holdings_concentration_when_none():
+    items = build_evidence_payload(
+        categories={}, fund_evidence=_FakeFundEvidenceFull(top_holdings_concentration=None),
+    )
+    ids = {item.evidence_id for item in items}
+    assert "fund:top_holdings_concentration" not in ids
+
+
+def test_deterministic_provider_bands_expense_ratio_into_valuation_context():
+    evidence = build_evidence_payload(
+        categories={},
+        fund_evidence=_FakeFundEvidenceFull(expense_ratio=0.001, category_avg_expense_ratio=0.01),
+    )
+    raw = DeterministicAIRatingProvider().assess("FTEC", evidence)
+    assert raw.valuation_context.value == AIDimensionValue.VERY_POSITIVE
+    assert "fund:expense_ratio_vs_category" in raw.valuation_context.supporting_evidence_ids
 
 
 # --- DeterministicAIRatingProvider: honest, multi-domain, offline default ---
