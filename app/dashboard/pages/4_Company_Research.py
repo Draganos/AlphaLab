@@ -174,9 +174,11 @@ def _render_ai_research_panel(column, assessment) -> None:
     if assessment.evidence_gaps:
         column.caption(f"Evidence gaps: {len(assessment.evidence_gaps)}")
     coverage = assessment.evidence_coverage
+    domain_2_label = "Fund" if coverage.fund_coverage is not None else "Analyst"
+    domain_2_value = coverage.fund_coverage if coverage.fund_coverage is not None else coverage.analyst_coverage
     column.caption(
         "AI evidence coverage — Fundamental "
-        f"{coverage.fundamental_coverage:.0%} · Analyst {coverage.analyst_coverage:.0%} · "
+        f"{coverage.fundamental_coverage:.0%} · {domain_2_label} {domain_2_value:.0%} · "
         f"Technical {coverage.technical_coverage:.0%} · Overall {coverage.overall_ai_evidence_coverage:.0%}"
     )
     column.write(
@@ -190,6 +192,100 @@ def _render_ai_research_panel(column, assessment) -> None:
             st.write(assessment.supporting_evidence)
         else:
             st.caption("No evidence was cited by the provider.")
+
+
+def _render_fund_evidence_panel(research) -> None:
+    """PR #30: holdings/sector/asset-class/operations evidence for a fund
+    (e.g. an ETF) -- the evidence that exists *instead* of the six
+    fundamental categories alpha_lab.research.security_type marks
+    NOT_APPLICABLE for one. Renders nothing for an equity (fund_evidence is
+    always None there) so this never adds noise to a non-fund ticker's page."""
+    evidence = research.fund_evidence
+    if evidence is None:
+        return
+    st.subheader("Fund Evidence")
+    st.caption(
+        "Holdings, sector/asset-class allocation, and fund operations -- "
+        "the evidence AlphaLab actually has for a fund, rather than judging "
+        "it against the equity fundamental-scoring categories above/below "
+        "(most of which are NOT_APPLICABLE to a fund; see Category overview)."
+    )
+    identity = f"{_dash(evidence.category_name)} · {_dash(evidence.fund_family)} · {_dash(evidence.legal_type)}"
+    st.caption(identity)
+    columns = st.columns(4)
+    columns[0].metric(
+        "Expense ratio",
+        _dash(None if evidence.operations.expense_ratio is None else f"{evidence.operations.expense_ratio:.2%}"),
+        None
+        if evidence.operations.category_avg_expense_ratio is None
+        else f"category avg {evidence.operations.category_avg_expense_ratio:.2%}",
+    )
+    columns[1].metric(
+        "Total net assets",
+        _dash(None if evidence.operations.total_net_assets is None else f"{evidence.operations.total_net_assets:,.0f}"),
+    )
+    columns[2].metric(
+        "Holdings turnover",
+        _dash(None if evidence.operations.holdings_turnover is None else f"{evidence.operations.holdings_turnover:.0%}"),
+    )
+    columns[3].metric(
+        "Top holdings concentration",
+        _dash(
+            None
+            if evidence.top_holdings_concentration is None
+            else f"{evidence.top_holdings_concentration:.0%}"
+        ),
+        f"of {len(evidence.top_holdings)} holdings" if evidence.top_holdings else None,
+    )
+    st.caption(f"Fund evidence coverage: {evidence.coverage:.0%}")
+
+    detail_columns = st.columns(3)
+    detail_columns[0].markdown("**Asset allocation**")
+    allocation = evidence.asset_allocation
+    detail_columns[0].write(
+        {
+            "Cash": _dash(None if allocation.cash is None else f"{allocation.cash:.1%}"),
+            "Stock": _dash(None if allocation.stock is None else f"{allocation.stock:.1%}"),
+            "Bond": _dash(None if allocation.bond is None else f"{allocation.bond:.1%}"),
+            "Preferred": _dash(None if allocation.preferred is None else f"{allocation.preferred:.1%}"),
+            "Convertible": _dash(None if allocation.convertible is None else f"{allocation.convertible:.1%}"),
+            "Other": _dash(None if allocation.other is None else f"{allocation.other:.1%}"),
+        }
+    )
+    detail_columns[1].markdown("**Sector weightings**")
+    if evidence.sector_weightings:
+        top_sectors = sorted(evidence.sector_weightings.items(), key=lambda item: item[1], reverse=True)
+        detail_columns[1].write({sector: f"{weight:.1%}" for sector, weight in top_sectors if weight})
+    else:
+        detail_columns[1].caption("Not reported.")
+    detail_columns[2].markdown("**Equity holdings averages**")
+    eh = evidence.equity_holdings
+    detail_columns[2].write(
+        {
+            "P/E": _dash(eh.price_earnings),
+            "P/B": _dash(eh.price_book),
+            "P/S": _dash(eh.price_sales),
+            "P/CF": _dash(eh.price_cashflow),
+        }
+    )
+
+    if evidence.top_holdings:
+        with st.expander(f"Top {len(evidence.top_holdings)} holdings"):
+            st.dataframe(
+                [
+                    {
+                        "Symbol": _dash(holding.symbol),
+                        "Name": _dash(holding.name),
+                        "Weight": _dash(None if holding.weight is None else f"{holding.weight:.2%}"),
+                    }
+                    for holding in evidence.top_holdings
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+    if evidence.description:
+        with st.expander("Fund description"):
+            st.caption(evidence.description)
 
 
 def _render_supplemental_panels(research) -> None:
@@ -287,6 +383,9 @@ def _render_stock_research(research, *, quote=None) -> None:
     st.divider()
     _render_supplemental_panels(research)
     st.divider()
+    _render_fund_evidence_panel(research)
+    if research.fund_evidence is not None:
+        st.divider()
     _render_research_summary(research)
     st.divider()
     st.subheader("AlphaLab Fundamental Research")
@@ -737,12 +836,14 @@ try:
                 )
 
     st.divider()
-    st.subheader("Refresh Analyst Consensus, Technical Summary & AI Research")
+    st.subheader("Refresh Analyst Consensus, Technical Summary, Fund Evidence & AI Research")
     st.caption(
         "Opening this page or changing the ticker never calls a provider or "
         "recomputes these. Only this explicit action does — Analyst "
-        "Consensus makes one live yfinance call; Technical Summary and AI "
-        "Research use only already-stored data."
+        "Consensus and Fund Evidence each make one live yfinance call "
+        "(Fund Evidence genuinely returns nothing for an equity, which is "
+        "not an error); Technical Summary and AI Research use only "
+        "already-stored data."
     )
     if st.button("🔄 Refresh for this ticker", key="refresh_supplemental"):
         supplemental = SupplementalResearchService(engine)
@@ -759,6 +860,13 @@ try:
                 "AI Research Rating not refreshed — it requires Analyst "
                 "Consensus, which failed to refresh above. The previous "
                 "AI Research Rating (if any) is unchanged."
+            )
+        if result.fund_evidence_error is not None:
+            error = result.fund_evidence_error
+            st.warning(
+                f"Fund Evidence not refreshed: {error.kind.value} — {error.reason}. "
+                "The AI Research Rating above used the last successfully stored "
+                "Fund Evidence, if any."
             )
         st.success("Refresh complete — reload the page to see the updated panels above.")
 

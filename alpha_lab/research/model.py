@@ -53,6 +53,7 @@ from pydantic import BaseModel, Field
 from alpha_lab.research.ai_rating import AIResearchAssessment
 from alpha_lab.research.analyst_consensus import AnalystConsensus
 from alpha_lab.research.analyst_research import AnalystResearchSummary
+from alpha_lab.research.fund_evidence import FundEvidence
 from alpha_lab.research.technical import TechnicalSummary
 
 CATEGORY_LABELS: dict[str, str] = {
@@ -206,6 +207,14 @@ class StockResearch(BaseModel):
     # alpha_lab.research.analyst_research's module docstring. Same None
     # convention as the three fields above.
     analyst_research: AnalystResearchSummary | None = None
+    # PR #30: holdings/sector/asset-class/operations evidence for a fund
+    # (e.g. an ETF) -- see alpha_lab.research.fund_evidence's module
+    # docstring. Distinct from the six fundamental categories
+    # alpha_lab.research.security_type marks NOT_APPLICABLE for a fund;
+    # this is the evidence that exists *instead*. Same None convention as
+    # the four fields above -- None for an equity (never fetched) and for
+    # a fund whose evidence hasn't been refreshed yet.
+    fund_evidence: FundEvidence | None = None
 
 
 class ResearchSnapshotSummary(BaseModel):

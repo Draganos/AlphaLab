@@ -156,6 +156,56 @@ def test_not_applicable_fundamental_category_is_never_shown_as_a_coverage_gap():
     assert row.limitation_reason == "not applicable to this security type"
 
 
+def test_fund_evidence_row_is_not_applicable_for_an_equity():
+    """fund_evidence is always None for an equity (never fetched) -- must
+    read as NOT_APPLICABLE, matching _fundamental_row's own convention,
+    never as a coverage gap (NOT_COMPUTED) this security was never
+    expected to fill in the first place."""
+    research = _stock_research()  # default fixture has security_type="equity"
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "fund_evidence")
+    assert row.status == CoverageStatus.NOT_APPLICABLE
+    assert row.coverage is None
+    assert row.limitation_reason == "not applicable to this security type"
+
+
+def test_fund_evidence_row_is_not_computed_for_an_etf_not_yet_refreshed():
+    """Distinct from the equity case: a genuine ETF whose Fund Evidence
+    just hasn't been refreshed yet is NOT_COMPUTED, not NOT_APPLICABLE."""
+    research = _stock_research(security_type="ETF")
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "fund_evidence")
+    assert row.status == CoverageStatus.NOT_COMPUTED
+    assert row.limitation_reason == "not computed for this research state"
+
+
+def test_fund_evidence_row_reflects_a_funds_genuine_coverage():
+    from alpha_lab.research.fund_evidence import build_fund_evidence
+
+    raw = {
+        "ticker": "FTEC", "as_of": date(2026, 9, 18), "category_name": "Technology",
+        "fund_family": "Fidelity Investments", "legal_type": "ETF", "description": None,
+        "cash_position": 0.0006, "stock_position": 0.9991, "bond_position": 0.0,
+        "preferred_position": 0.0, "convertible_position": 0.0, "other_position": 0.0003,
+        "sector_weightings": {"technology": 0.99}, "expense_ratio": 0.00084,
+        "category_avg_expense_ratio": 0.009, "holdings_turnover": 0.09,
+        "total_net_assets": 691876.75, "price_earnings": 0.03, "price_book": 0.09,
+        "price_sales": 0.13, "price_cashflow": 0.03,
+        "top_holdings": [{"symbol": "NVDA", "name": "NVIDIA Corp", "weight": 0.17}],
+        "source": "YFinanceProvider",
+    }
+    fund_evidence = build_fund_evidence(raw)
+    research = _stock_research(fund_evidence=fund_evidence)
+    summary = build_security_coverage_summary(research)
+    row = next(r for r in summary.rows if r.category == "fund_evidence")
+    assert row.status == CoverageStatus.FULL
+    assert row.coverage == 1.0
+    assert row.evidence_count == 5
+    assert row.freshness == date(2026, 9, 18)
+    assert row.providers == ["YFinanceProvider"]
+    assert row.limitation_reason is None
+
+
 def test_analyst_consensus_row_is_not_computed_when_none():
     research = _stock_research(analyst_consensus=None)
     summary = build_security_coverage_summary(research)
