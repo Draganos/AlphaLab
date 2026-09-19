@@ -1498,3 +1498,127 @@ yfinance_fund_data_provider.py` new (5 tests), `tests/test_fund_evidence.py`
 new (9 tests), `tests/test_supplemental_service.py` updated fake provider,
 `tests/test_ai_rating.py` +8, `tests/test_coverage_summary.py` +2) and all
 three established smoke tests pass.
+
+## 28. Automatic Stale-Data Refresh + Main-Page Full Refresh
+
+Not a roadmap PR -- an operational feature requested directly: launching
+the dashboard should auto-refresh core data when it's stale (never
+silently, and never mid-render), and the main page should carry an
+explicit manual "Full Refresh" button for the same operation on demand.
+
+**`alpha_lab.refresh`** (new top-level module, mirrors `alpha_lab.data_
+quality`'s flat placement for a similarly cross-cutting operational
+concern): the ONE canonical "core refresh" code path, reused by both
+callers below rather than duplicated.
+
+* `is_universe_price_stale(engine, stale_after_days)` -- a pure database
+  read (`SELECT ticker, MAX(date) ... GROUP BY ticker`, never a full
+  price-history table scan, since this runs unconditionally on every
+  dashboard render) reusing the *existing* `settings.data_quality
+  ["stale_price_days"]` observation limit and `alpha_lab.data_quality.
+  assess_freshness`, both already in production use for the Data Quality
+  section's per-ticker display. An empty universe (nothing tracked yet)
+  is never "stale" -- that is a separate bootstrapping concern.
+* `run_core_refresh(engine, settings)` -- ingests price/fundamental data
+  for exactly the already-tracked universe (`configured_universe_tickers`,
+  the same `Security` rows `MarketScreenerService.build_live_records`
+  itself reads, never a rediscovered/expanded universe) via `alpha_lab.
+  ingestion.IngestionService`, then calls `MarketScreenerService.
+  rebuild_current_research()`. Deliberately narrow scope, per explicit
+  instruction: never the supplemental research domains (Analyst
+  Consensus/Technical/AI Research/News/Macro Regime/Donatien External
+  Calibration) -- those remain independently refreshable through their
+  own existing `scripts/refresh_*.py` mechanisms. One ticker's *provider*
+  failure never aborts the rest (mirrors `scripts/load_us_data.py`'s
+  `_ingest_universe` exactly -- only `ProviderError` is caught per
+  ticker); the rebuild step's own failure is caught and reported on
+  `CoreRefreshResult.research_error` rather than propagated, and can
+  never corrupt or partially overwrite the previously persisted current
+  research, since `Phase3Repository.save_current_research` already
+  validates before opening a session and persists one immutable build
+  atomically.
+* `run_core_refresh_guarded(engine, settings, state)` -- refuses to start
+  a second refresh while `state` (typically `st.session_state`) already
+  records one in progress, returning `None` instead of overlapping. This
+  guard is explicitly scoped to one session/process: it does not (and by
+  design does not attempt to) prevent two different browser sessions from
+  each starting their own core refresh concurrently -- true cross-session
+  locking was explicitly ruled out as unnecessary complexity for this
+  change (partially-refreshed state, concurrent provider calls, and
+  ambiguous UI consistency are exactly what staying synchronous/atomic
+  and narrowly scoped avoids; a backgrounded "Refresh Supplemental
+  Research" workflow with its own progress/status handling is left for a
+  future, separate phase).
+
+**`scripts/launch.py`** (new): checks `is_universe_price_stale` once
+before the Streamlit server ever starts, runs `run_core_refresh` only if
+stale, then execs `streamlit run app/dashboard/main.py` regardless of
+whether that refresh fully succeeded -- a failed or partial refresh never
+blocks the dashboard from launching with whatever valid data is already
+persisted. Deliberately outside Streamlit's own process: `main.py` is
+rerun by Streamlit on every widget interaction, and this check/refresh
+must run exactly once, before the server starts, never on every rerun.
+
+**`app/dashboard/main.py`**: a "🔄 Full Refresh" button calls `run_core_
+refresh_guarded(engine, settings, st.session_state)` directly inside its
+`if st.button(...):` block -- the only place in this file that ever
+invokes a provider; every other render remains a pure read, exactly like
+the rest of this codebase's explicit-refresh architecture. A stale-data
+warning banner (reusing `is_universe_price_stale`) sits above it for
+context. After the button's result is shown, `build_screener.clear()`
+invalidates the cached screener DataFrame so the *rest of this same
+script run* (the `build_screener()` call further down the page) picks up
+fresh data -- deliberately no `st.rerun()` afterward: Streamlit already
+runs the script top-to-bottom on the click that triggered this, and an
+explicit rerun would restart the script before the user could read the
+success/error message (on the fresh run `st.button(...)` returns `False`,
+so the message block never re-executes and Streamlit silently drops the
+prior run's element).
+
+**Bugs caught in a high-effort self-review pass, before validation:**
+
+1. The Full Refresh handler originally called `st.rerun()` right after
+   displaying `st.success()`/`st.error()`, immediately restarting the
+   script and dropping the just-shown message before the user could read
+   it -- contradicting this codebase's own established pattern elsewhere
+   (Company Research's/Macro Regime's refresh buttons deliberately omit
+   `st.rerun()` for exactly this reason). Fixed by removing it; clearing
+   the cache alone is sufficient since `build_screener()` is called later
+   in the same run.
+2. `_latest_price_by_ticker` pulled every stored `Price` row into Python
+   just to find each ticker's latest date, and `is_universe_price_stale`
+   runs unconditionally on every dashboard render -- a full price-history
+   table scan on every page load/rerun. Fixed to use `SELECT ticker,
+   MAX(date) ... GROUP BY ticker`, returning one row per ticker.
+3. The module docstring and `run_core_refresh_guarded`'s docstring
+   originally implied "no concurrent provider calls" as an unconditional
+   guarantee; the guard is actually scoped to one `state` mapping (one
+   Streamlit session), not cross-session/cross-process. Corrected both
+   docstrings to state the guarantee's actual scope rather than overclaim
+   it, instead of expanding the implementation to match the overclaim --
+   true cross-session locking was explicitly out of scope for this change.
+
+**Validation**: full test suite (`tests/test_refresh.py` new, 12 tests
+covering fresh-data-skips-refresh, stale-data-triggers-exactly-one-
+ingestion-call-per-ticker, the configured-universe/rebuild-read ticker
+set matching exactly, a failed rebuild never touching previously
+persisted current research, a per-ticker provider failure never aborting
+the rest or the rebuild, a normal module import/rerun of `main.py` never
+calling `run_core_refresh` even when patched to raise on any call, the
+Full Refresh path delegating to the same `run_core_refresh` provider
+calls, a refresh already in progress never duplicated, and the
+in-progress flag always clearing even when the refresh raises) and all
+three established smoke tests pass. `git diff --check`: clean. Real-data
+validation against the live database: `is_universe_price_stale` correctly
+reads `True` (the tracked universe's price data is in fact older than the
+configured 5-day limit), matching the pre-existing "stale price" Data
+Quality flag already shown elsewhere for the same tickers. Verified live
+via headless browser on the main dashboard: zero page errors; the stale-
+data warning banner and Full Refresh button both render correctly,
+matching the offline validation exactly. A real network-backed refresh
+was deliberately not triggered during validation (to avoid unnecessary
+yfinance rate-limit usage) -- the underlying ingestion/rebuild path is
+exhaustively covered by the fake-provider unit tests above and is the
+exact same `IngestionService`/`MarketScreenerService.rebuild_current_
+research` path every other real-data-validated PR in this document
+already exercises.
