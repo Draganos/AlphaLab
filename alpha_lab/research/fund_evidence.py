@@ -70,7 +70,14 @@ class AssetAllocation(BaseModel):
 class FundOperations(BaseModel):
     """`total_net_assets` (AUM) is in whatever units the provider reports
     (yfinance's `funds_data.fund_operations` -- observed live in millions
-    of the fund's trading currency); never rescaled or assumed here."""
+    of the fund's trading currency); never rescaled or assumed here.
+
+    `category_avg_expense_ratio` is deliberately excluded from
+    `is_present()`: it describes this fund's *category* (a peer benchmark),
+    not this fund itself, so it alone must never make the domain read as
+    "we have operations evidence for this fund" -- it is carried purely as
+    comparison context for whichever of the other three, genuinely
+    fund-specific fields is present."""
 
     expense_ratio: float | None = Field(None, ge=0)
     category_avg_expense_ratio: float | None = Field(None, ge=0)

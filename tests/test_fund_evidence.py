@@ -53,6 +53,18 @@ def test_returns_none_when_every_domain_is_absent():
     assert build_fund_evidence(raw) is None
 
 
+def test_category_avg_expense_ratio_alone_does_not_make_operations_present():
+    """category_avg_expense_ratio describes the fund's category (a peer
+    benchmark), not this fund itself -- it must never single-handedly mark
+    the operations domain as present when nothing genuinely fund-specific
+    (expense_ratio/holdings_turnover/total_net_assets) is known."""
+    raw = _raw(expense_ratio=None, holdings_turnover=None, total_net_assets=None)
+    evidence = build_fund_evidence(raw)
+    assert evidence.operations.category_avg_expense_ratio == 0.009
+    assert not evidence.operations.is_present()
+    assert "fund:operations" not in evidence.evidence_ids
+
+
 def test_full_coverage_when_all_five_domains_present():
     evidence = build_fund_evidence(_raw())
     assert evidence.coverage == 1.0
