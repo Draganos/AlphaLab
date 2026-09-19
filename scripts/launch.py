@@ -12,6 +12,19 @@ or partial refresh never blocks the dashboard from starting with whatever
 valid data is already persisted (see `run_core_refresh`'s own docstring
 for why a failure here can never corrupt that persisted state).
 
+`run_core_refresh` itself only isolates a per-ticker *provider* failure
+(`ProviderError`, mirroring `scripts/load_us_data.py`'s established
+`_ingest_universe` pattern) and a `rebuild_current_research` failure --
+both land on the returned `CoreRefreshResult`, never raised. An
+infrastructure-level failure outside those two paths (e.g. the database
+itself becoming unreachable mid-loop) is deliberately left to propagate
+out of `run_core_refresh`, matching that same precedent. This script's
+own contract is broader than that, though: it promises to launch
+Streamlit "regardless" of the refresh's outcome, so the `run_core_refresh`
+call below is wrapped in its own broad exception handler -- the one place
+that promise is actually kept -- rather than launch.py silently relying
+on a narrower guarantee `run_core_refresh` never made.
+
 Deliberately outside Streamlit's own process: `main.py` is rerun by
 Streamlit on every widget interaction, and this staleness check/refresh
 must run exactly once, before the server starts -- not on every rerun.
@@ -52,19 +65,28 @@ def main() -> None:
                 f"{stale_after_days}-day observation limit -- running core refresh "
                 f"(price/fundamental ingestion + research rebuild) before launch."
             )
-            result = run_core_refresh(engine, settings)
-            print(
-                f"Core refresh: {len(result.tickers_succeeded)}/"
-                f"{len(result.tickers_attempted)} ticker(s) ingested "
-                f"({len(result.tickers_failed)} failed)."
-            )
-            if not result.ok:
-                print(
-                    f"Research rebuild failed ({result.research_error}) -- launching "
-                    f"with whatever current research was already persisted."
-                )
+            try:
+                result = run_core_refresh(engine, settings)
+            except Exception as error:  # noqa: BLE001 -- this script's own stated
+                # contract is "launch Streamlit regardless of refresh outcome";
+                # run_core_refresh only guarantees that for a per-ticker provider
+                # failure or a rebuild failure (both captured on the result
+                # instead of raised), never for an infrastructure-level failure
+                # outside those paths, so that broader promise is kept here.
+                print(f"Core refresh failed unexpectedly ({error}) -- launching with whatever current research was already persisted.")
             else:
-                print(f"Research rebuilt for {result.research_record_count} securit(y/ies).")
+                print(
+                    f"Core refresh: {len(result.tickers_succeeded)}/"
+                    f"{len(result.tickers_attempted)} ticker(s) ingested "
+                    f"({len(result.tickers_failed)} failed)."
+                )
+                if not result.ok:
+                    print(
+                        f"Research rebuild failed ({result.research_error}) -- launching "
+                        f"with whatever current research was already persisted."
+                    )
+                else:
+                    print(f"Research rebuilt for {result.research_record_count} securit(y/ies).")
         else:
             print("Tracked universe's price data is within the configured observation limit; skipping refresh.")
     finally:
