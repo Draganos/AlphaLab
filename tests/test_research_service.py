@@ -273,6 +273,21 @@ def test_get_latest_snapshot_is_distinct_from_get_stock_research(research_servic
     assert service.get_latest_snapshot("AAPL").overall_score == pytest.approx(50.0)
 
 
+def test_get_latest_snapshot_as_of_is_a_thin_passthrough_to_the_repository(research_service):
+    """The detailed point-in-time behavior (created_at-based filtering) is
+    tested against ResearchSnapshotRepository directly in
+    tests/test_research_snapshots.py -- this only proves the service-level
+    method actually delegates to it, using today as an unambiguous as_of
+    that must see an already-persisted snapshot."""
+    service, engine = research_service
+    _seed_current_research(engine, overall_score=50.0)
+    assert service.get_latest_snapshot_as_of("AAPL", date.today()) is None
+    service.persist_snapshot(service.get_stock_research("AAPL"))
+    reconstructed = service.get_latest_snapshot_as_of("AAPL", date.today())
+    assert reconstructed is not None
+    assert reconstructed.overall_score == pytest.approx(50.0)
+
+
 def test_get_research_history_lists_persisted_snapshots_newest_first(research_service):
     service, engine = research_service
     _seed_current_research(engine, evaluation_date=date(2026, 8, 28), overall_score=60.0)

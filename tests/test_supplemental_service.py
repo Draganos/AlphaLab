@@ -2,10 +2,11 @@
 persistence/read-back, provider-failure data preservation, and the AI
 assessment's dependency on already-computed evidence. No network access."""
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_lab.database import create_schema, make_engine
@@ -318,3 +319,90 @@ def test_ai_assessment_never_touches_the_fundamental_score(engine):
 
     assert research.overall_score == original_score
     assert {name: cat.score for name, cat in research.categories.items()} == original_categories
+
+
+# --- get_technical_summary_as_of: point-in-time reconstruction --------------
+#
+# Technical Summary needs no snapshot table of its own -- it is a pure
+# function of Price history, and Price history genuinely accumulates day by
+# day. But `run_core_refresh` can backfill up to two years of history in a
+# single call, so PIT-safety here means filtering on `Price.ingested_at`,
+# never `Price.date` alone -- exactly the same rationale established for
+# `AnalystEventsService.get_rating_changes`'s `as_of` handling.
+
+
+def _seed_prices_with_ingested_at(engine, ticker, days, ingested_at, *, start=date(2025, 1, 1)):
+    with Session(engine) as session:
+        if session.get(Security, ticker) is None:
+            session.add(Security(ticker=ticker))
+            session.commit()
+        for i in range(days):
+            session.add(
+                Price(
+                    ticker=ticker,
+                    date=start + timedelta(days=i),
+                    close=100 + i * 0.5,
+                    high=101 + i * 0.5,
+                    low=99 + i * 0.5,
+                    ingested_at=ingested_at,
+                )
+            )
+        session.commit()
+
+
+def test_get_technical_summary_as_of_matches_refresh_when_all_data_already_ingested(engine):
+    """Sanity/consistency check: reconstructing "as of today" from fully
+    already-ingested history must match refresh_technical_summary's own
+    live computation exactly."""
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    live = service.refresh_technical_summary("NVDA")
+
+    as_of_today = service.get_technical_summary_as_of("NVDA", date.today())
+
+    assert as_of_today.coverage == live.coverage
+    assert as_of_today.overall_rating == live.overall_rating
+    assert as_of_today.overall_score == pytest.approx(live.overall_score)
+
+
+def test_get_technical_summary_as_of_excludes_price_rows_not_yet_ingested_by_that_date(engine):
+    """The core leak this guards against: a ticker's entire price history
+    can be backfilled in one refresh call today -- a historical as_of read
+    must not see it before that ingestion genuinely happened."""
+    ingested_at = datetime(2026, 9, 1)
+    _seed_prices_with_ingested_at(engine, "NVDA", 300, ingested_at)
+    service = SupplementalResearchService(engine)
+
+    before_ingestion = service.get_technical_summary_as_of("NVDA", date(2026, 8, 1))
+    after_ingestion = service.get_technical_summary_as_of("NVDA", date(2026, 9, 2))
+
+    assert before_ingestion.coverage == 0.0
+    assert before_ingestion.overall_rating == TechnicalRating.REVIEW
+    assert after_ingestion.coverage == 1.0
+
+
+def test_get_technical_summary_as_of_only_uses_price_bars_on_or_before_the_date(engine):
+    """Even for already-ingested rows, a bar dated after `as_of` must never
+    be used to compute what was "known" as of an earlier date."""
+    long_ago = datetime(2020, 1, 1)
+    _seed_prices_with_ingested_at(engine, "NVDA", 400, long_ago, start=date(2025, 1, 1))
+    service = SupplementalResearchService(engine)
+
+    mid_window = service.get_technical_summary_as_of("NVDA", date(2025, 3, 1))
+    full_window = service.get_technical_summary_as_of("NVDA", date(2026, 6, 1))
+
+    # ~59 days of history by 2025-03-01 -- short of the 200-day SMA/EMA
+    # windows, so coverage must be strictly lower than the full window's.
+    assert mid_window.coverage < full_window.coverage
+    assert full_window.coverage == 1.0
+
+
+def test_get_technical_summary_as_of_never_returns_none(engine):
+    """Always succeeds, exactly like refresh_technical_summary's own
+    guarantee -- an untracked ticker or a date before any history yields an
+    honest REVIEW summary, never None and never an exception."""
+    service = SupplementalResearchService(engine)
+    summary = service.get_technical_summary_as_of("NOPE", date(2020, 1, 1))
+    assert summary is not None
+    assert summary.overall_rating == TechnicalRating.REVIEW
+    assert summary.coverage == 0.0

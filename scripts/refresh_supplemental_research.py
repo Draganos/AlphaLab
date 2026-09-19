@@ -67,9 +67,7 @@ def main() -> int:
                     ticker, base_research, analyst_consensus=None, technical_summary=technical
                 )
             succeeded.append(ticker)
-            continue
-
-        if base_research is None:
+        elif base_research is None:
             # No fundamental research yet for this ticker -- nothing to
             # synthesize an AI assessment from, but Analyst Consensus and
             # Technical Summary still refresh independently.
@@ -80,13 +78,23 @@ def main() -> int:
             supplemental.refresh_technical_summary(ticker)
             if ticker not in failed:
                 succeeded.append(ticker)
-            continue
-
-        result = supplemental.refresh_all(ticker, provider, base_research)
-        if result.analyst_error is not None:
-            failed[ticker] = result.analyst_error
         else:
-            succeeded.append(ticker)
+            result = supplemental.refresh_all(ticker, provider, base_research)
+            if result.analyst_error is not None:
+                failed[ticker] = result.analyst_error
+            else:
+                succeeded.append(ticker)
+
+        # Roadmap: historical research reconstruction (see ARCHITECTURE.md).
+        # Whichever branch above ran, re-read current research and persist
+        # an automatic snapshot of it -- the same shared method the Company
+        # Research page's "Refresh for this ticker" button calls, so this
+        # script's routine/batch use builds real history exactly like a
+        # manual per-ticker refresh does, not just the latter. A no-op when
+        # there is still no current research at all for this ticker
+        # (snapshot_current_research returns None), and idempotent when
+        # nothing actually changed.
+        research_service.snapshot_current_research(ticker)
 
     print()
     print("Supplemental research refresh complete")

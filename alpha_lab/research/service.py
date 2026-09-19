@@ -26,6 +26,8 @@ research (see module docstring in ``alpha_lab.research.snapshots``):
 Callers never need to know a database or repository is involved.
 """
 
+from datetime import date
+
 from sqlalchemy import Engine
 
 from alpha_lab.config import Settings
@@ -122,6 +124,31 @@ class ResearchService:
 
     # --- Historical snapshots -----------------------------------------
 
+    def snapshot_current_research(self, ticker: str) -> ResearchSnapshotSummary | None:
+        """Re-read current research and persist an automatic historical
+        snapshot of it -- or do nothing if no current research exists for
+        this ticker at all. Idempotent (``persist_snapshot`` dedupes
+        identical content), so calling this after a refresh that changed
+        nothing never creates a duplicate.
+
+        This is how Analyst Consensus/Technical Summary/AI Research
+        Rating/Fund Evidence -- none of which has a history table of its
+        own -- start accumulating real history from *ordinary* refreshes,
+        rather than requiring a separate manual "Save research snapshot"
+        click every time. Both of this codebase's supplemental-refresh
+        entry points call this right after their own refresh completes:
+        the Company Research page's "Refresh for this ticker" button, and
+        ``scripts/refresh_supplemental_research.py``'s batch run -- see
+        ARCHITECTURE.md's "Historical Research Reconstruction" section for
+        why a single shared call site matters here (an earlier version of
+        this wired only the UI button, silently leaving the batch script's
+        routine use out of history entirely).
+        """
+        research = self.get_stock_research(ticker)
+        if research is None:
+            return None
+        return self.persist_snapshot(research)
+
     def persist_snapshot(self, stock_research: StockResearch) -> ResearchSnapshotSummary:
         """Explicitly persist one immutable historical snapshot.
 
@@ -151,6 +178,15 @@ class ResearchService:
         research if no snapshot has been persisted since the last refresh.
         """
         return self._snapshots.get_latest(ticker)
+
+    def get_latest_snapshot_as_of(self, ticker: str, as_of: date) -> StockResearch | None:
+        """Point-in-time historical lookup: the most recent snapshot that
+        genuinely existed by ``as_of`` (see
+        ``ResearchSnapshotRepository.get_latest_as_of``'s own docstring for
+        the PIT rationale). ``None`` means no snapshot had been saved for
+        this ticker by that date -- an honest capability gap, not an error,
+        for any date before automatic/manual snapshotting started."""
+        return self._snapshots.get_latest_as_of(ticker, as_of)
 
     def get_research_history(self, ticker: str) -> list[ResearchSnapshotSummary]:
         """Lightweight snapshot history for a ticker, newest first.

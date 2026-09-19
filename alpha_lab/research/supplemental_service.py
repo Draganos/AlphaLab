@@ -19,7 +19,7 @@ preparation) happens before any database write, exactly mirroring
 """
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 import pandas as pd
 from sqlalchemy import Engine, select
@@ -71,6 +71,23 @@ class SupplementalRefreshResult:
     fund_evidence_error: ProviderError | None
 
 
+def _price_history_frame(rows) -> pd.DataFrame:
+    """Shared `Price` rows -> `build_technical_summary`-shaped DataFrame
+    conversion, used by both the current (`refresh_technical_summary`) and
+    point-in-time (`get_technical_summary_as_of`) computations so the two
+    never drift out of sync on how a row becomes a usable price bar."""
+    frame = pd.DataFrame(
+        [
+            {"date": row.date, "close": row.close, "high": row.high, "low": row.low}
+            for row in rows
+            if row.close is not None
+        ]
+    )
+    if not frame.empty:
+        frame = frame.set_index("date")
+    return frame
+
+
 class SupplementalResearchService:
     def __init__(self, engine: Engine):
         self.engine = engine
@@ -93,6 +110,45 @@ class SupplementalResearchService:
     def get_fund_evidence(self, ticker: str) -> FundEvidence | None:
         row = self._get_row(CurrentFundEvidence, ticker)
         return None if row is None else FundEvidence.model_validate(row.payload)
+
+    def get_technical_summary_as_of(self, ticker: str, as_of: date) -> TechnicalSummary:
+        """Point-in-time reconstruction of Technical Summary, computed on
+        demand from AlphaLab's own stored Price history -- unlike Analyst
+        Consensus/AI Research Rating/Fund Evidence (single upserted rows
+        with no history of their own, reconstructible only from whatever
+        `StockResearch` snapshots happen to have been persisted -- see
+        `ResearchSnapshotRepository.get_latest_as_of`), Technical Summary
+        needs no snapshot at all: it is a pure function of Price history,
+        and Price history genuinely accumulates day by day regardless of
+        when a refresh happens to run, so any past date within that history
+        can be reconstructed directly, not just moments someone happened to
+        refresh.
+
+        PIT-safe: filters on `Price.ingested_at <= end_of(as_of)`, never on
+        `Price.date` alone -- exactly the same rationale as
+        `AnalystEventsService.get_rating_changes`'s own `as_of` handling.
+        `run_core_refresh` ingests up to two years of history in a single
+        call, so a row dated years in the past can still have been inserted
+        into this table only today; filtering on `date` alone would let a
+        historical `as_of` read see price bars AlphaLab had not actually
+        stored yet as of that date. Always returns a `TechnicalSummary`
+        (never `None`) -- a short/empty historical price window yields an
+        honest REVIEW summary with zero coverage, exactly like
+        `refresh_technical_summary`'s own "always succeeds" guarantee."""
+        symbol = ticker.strip().upper()
+        upper_bound = datetime.combine(as_of, time.max)
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(Price)
+                .where(
+                    Price.ticker == symbol,
+                    Price.date <= as_of,
+                    Price.ingested_at <= upper_bound,
+                )
+                .order_by(Price.date)
+            ).all()
+        frame = _price_history_frame(rows)
+        return build_technical_summary(symbol, frame, as_of=as_of, source="AlphaLabPriceHistory")
 
     def _get_row(self, model, ticker: str):
         normalized = ticker.strip().upper()
@@ -137,15 +193,7 @@ class SupplementalResearchService:
             rows = session.scalars(
                 select(Price).where(Price.ticker == symbol).order_by(Price.date)
             ).all()
-        frame = pd.DataFrame(
-            [
-                {"date": row.date, "close": row.close, "high": row.high, "low": row.low}
-                for row in rows
-                if row.close is not None
-            ]
-        )
-        if not frame.empty:
-            frame = frame.set_index("date")
+        frame = _price_history_frame(rows)
         summary = build_technical_summary(
             symbol,
             frame,

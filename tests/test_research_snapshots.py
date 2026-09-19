@@ -3,8 +3,11 @@
 from datetime import UTC, date, datetime
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from alpha_lab.database import create_schema, make_engine
+from alpha_lab.database.models import ResearchSnapshot
 from alpha_lab.research import CATEGORY_ORDER, RESEARCH_SCHEMA_VERSION, build_stock_research
 from alpha_lab.research.snapshots import ResearchSnapshotRepository
 from alpha_lab.screener import LiveResearchRecord
@@ -394,3 +397,69 @@ def test_adding_only_analyst_consensus_changes_the_snapshot_identity(repository)
     )
     assert without.snapshot_id != with_consensus.snapshot_id
     assert len(repository.list_for_ticker("AAPL")) == 2
+
+
+# --- get_latest_as_of: point-in-time historical reconstruction --------------
+#
+# Analyst Consensus/Technical Summary/AI Research Rating/Fund Evidence have
+# no dedicated history table of their own -- a past date's values for them
+# are only reconstructible through whichever StockResearch snapshot was
+# persisted at the time. These tests set `created_at` directly (bypassing
+# `repository.save`, which always stamps "now") to simulate snapshots
+# genuinely persisted at different real times, mirroring
+# tests/test_analyst_events_service.py's established `_set_retrieved_at`
+# pattern for the same reason.
+
+
+def _set_created_at(engine, snapshot_id: str, created_at: datetime) -> None:
+    with Session(engine) as session:
+        row = session.scalar(
+            select(ResearchSnapshot).where(ResearchSnapshot.snapshot_id == snapshot_id)
+        )
+        row.created_at = created_at
+        session.commit()
+
+
+@pytest.fixture
+def engine(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'snapshots_as_of.db'}")
+    create_schema(engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def test_get_latest_as_of_returns_none_when_nothing_saved_yet(engine):
+    repository = ResearchSnapshotRepository(engine)
+    assert repository.get_latest_as_of("AAPL", date(2026, 1, 1)) is None
+
+
+def test_get_latest_as_of_returns_the_most_recent_snapshot_not_after_the_date(engine):
+    repository = ResearchSnapshotRepository(engine)
+    older = repository.save(_aapl_v1())
+    _set_created_at(engine, older.snapshot_id, datetime(2026, 8, 1, tzinfo=UTC).replace(tzinfo=None))
+    newer = repository.save(_aapl_v2())
+    _set_created_at(engine, newer.snapshot_id, datetime(2026, 9, 10, tzinfo=UTC).replace(tzinfo=None))
+
+    before_either = repository.get_latest_as_of("AAPL", date(2026, 7, 1))
+    between = repository.get_latest_as_of("AAPL", date(2026, 8, 15))
+    after_both = repository.get_latest_as_of("AAPL", date(2026, 9, 15))
+
+    assert before_either is None
+    assert between is not None and between.overall_score == pytest.approx(65.0)  # v1
+    assert after_both is not None and after_both.overall_score == pytest.approx(70.0)  # v2
+
+
+def test_get_latest_as_of_excludes_a_snapshot_not_yet_persisted_by_that_date(engine):
+    """PIT-safety: a snapshot's own `evaluation_date` is not proof it was
+    actually persisted by a requested `as_of` -- only `created_at` is."""
+    repository = ResearchSnapshotRepository(engine)
+    saved = repository.save(_aapl_v1())  # evaluation_date = 2026-08-28
+    _set_created_at(engine, saved.snapshot_id, datetime(2026, 9, 20, tzinfo=UTC).replace(tzinfo=None))
+
+    as_of_before_persisted = repository.get_latest_as_of("AAPL", date(2026, 9, 1))
+    as_of_after_persisted = repository.get_latest_as_of("AAPL", date(2026, 9, 21))
+
+    assert as_of_before_persisted is None
+    assert as_of_after_persisted is not None
