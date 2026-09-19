@@ -15,6 +15,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database.models import Price
 from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
+from alpha_lab.refresh import is_universe_price_stale, run_core_refresh_guarded
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.search import ScreenCriteria, ScreenRecord, apply_screen
 
@@ -110,6 +111,62 @@ left.subheader("CORE PORTFOLIO")
 left.write("Tracked separately; AlphaLab does not make allocation recommendations for it.")
 right.subheader("SYSTEMATIC EXPERIMENTAL SLEEVE")
 right.write(f"Paper starting value setting: AED {settings.paper_trading['initial_value_aed']:,.0f} — a simulation setting, not a recommendation.")
+
+st.divider()
+_stale_price_days = settings.data_quality["stale_price_days"]
+if is_universe_price_stale(engine, _stale_price_days):
+    st.warning(
+        f"Some tracked securities have price data older than the configured "
+        f"{_stale_price_days}-day observation limit."
+    )
+else:
+    st.caption(f"Tracked universe's price data is within the configured {_stale_price_days}-day observation limit.")
+if st.button("🔄 Full Refresh (price + fundamental data + research)"):
+    # Core only: price/fundamental ingestion + research rebuild -- never the
+    # supplemental domains (Analyst Consensus/Technical/AI/News/Macro/
+    # Donatien), which stay independently refreshable via their own pages/
+    # scripts. See alpha_lab.refresh's module docstring for why this stays
+    # synchronous and atomic rather than kicking off background work.
+    with st.spinner("Refreshing core data — price/fundamental ingestion, then research rebuild..."):
+        try:
+            result = run_core_refresh_guarded(engine, settings, st.session_state)
+        except Exception as error:  # noqa: BLE001 -- run_core_refresh_guarded only
+            # guarantees a per-ticker provider failure or a rebuild failure land on
+            # the returned CoreRefreshResult, never raised; an infrastructure-level
+            # failure outside those paths is deliberately left to propagate (see
+            # alpha_lab.refresh's module docstring). This button's own job is to
+            # never take the whole page down for that, so it's caught here and
+            # shown the same way any other refresh failure is -- existing research
+            # is unaffected either way (run_core_refresh never corrupts it).
+            unexpected_error = str(error)
+            result = None
+        else:
+            unexpected_error = None
+    if unexpected_error is not None:
+        st.error(f"Full Refresh failed unexpectedly ({unexpected_error}); existing research is unchanged.")
+    elif result is None:
+        st.warning("A refresh is already in progress for this session.")
+    elif not result.ok:
+        st.error(
+            f"Research rebuild failed ({result.research_error}); existing "
+            f"research is unchanged. Ingested {len(result.tickers_succeeded)}/"
+            f"{len(result.tickers_attempted)} ticker(s) ({len(result.tickers_failed)} failed)."
+        )
+    else:
+        st.success(
+            f"Ingested {len(result.tickers_succeeded)}/{len(result.tickers_attempted)} "
+            f"ticker(s) ({len(result.tickers_failed)} failed); research rebuilt for "
+            f"{result.research_record_count} securit(y/ies)."
+        )
+    # Deliberately no st.rerun() here: Streamlit already runs this script
+    # top-to-bottom on the click that got us here, and build_screener() is
+    # called later in this SAME run (below) -- clearing its cache now is
+    # enough for that call to pick up fresh data. An explicit rerun would
+    # immediately restart the script, and since st.button() returns False
+    # on that next run, the success/error message above would never be
+    # re-emitted and Streamlit would silently drop it before the user
+    # could read it.
+    build_screener.clear()
 
 st.header("Stock Screener")
 screen = build_screener()

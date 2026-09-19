@@ -115,6 +115,17 @@ streamlit run app/dashboard/main.py
 
 The dashboard labels the core portfolio separately from the systematic experimental sleeve. The AED 5,000 value is a paper-simulation setting, **not** a recommendation to invest that amount. An empty database produces instructions rather than fabricated sample prices.
 
+### Auto-refreshing stale data at launch
+
+`scripts/launch.py` wraps the command above: it checks whether the tracked universe's price data is older than the configured `stale_price_days` observation limit (a database read, no network), runs a core refresh (price/fundamental ingestion + research rebuild) only if it is, then starts Streamlit either way.
+
+```bash
+python scripts/launch.py
+python scripts/launch.py -- --server.headless true
+```
+
+The dashboard's main page also carries a manual "Full Refresh" button that runs the same core refresh on demand. Neither path touches the supplemental research domains (Analyst Consensus, Technical, AI Research, News, Macro Regime, Donatien External Calibration) — those remain independently refreshable through their own pages and `scripts/refresh_*.py` scripts.
+
 ## Run tests
 
 ```bash
