@@ -1622,3 +1622,28 @@ exhaustively covered by the fake-provider unit tests above and is the
 exact same `IngestionService`/`MarketScreenerService.rebuild_current_
 research` path every other real-data-validated PR in this document
 already exercises.
+
+**Bug caught in external review of this PR, before merge:** `run_core_
+refresh` deliberately only isolates two failure modes -- a per-ticker
+`ProviderError` (mirroring `scripts/load_us_data.py`'s established
+`_ingest_universe` pattern) and a `rebuild_current_research` failure --
+both land on the returned `CoreRefreshResult` rather than raising. An
+infrastructure-level failure outside those two paths (e.g. the database
+itself becoming unreachable mid-loop) was deliberately left to propagate,
+matching that same precedent. But `scripts/launch.py`'s own docstring
+promised something broader -- "launches Streamlit regardless of whether
+that refresh fully succeeded" -- and nothing enforced that promise for
+this specific case: an unexpected exception from `run_core_refresh`
+propagated straight out of `main()`, so `os.execvp(...)` was never
+reached and the dashboard never launched at all, the opposite of the
+documented contract. Fixed by wrapping the `run_core_refresh` call itself
+in `scripts/launch.py` with its own broad exception handler -- the one
+place that broader promise is actually kept, without changing `run_core_
+refresh`'s precedent-matching, precisely-scoped exception handling.
+The Full Refresh button had the same gap (an unexpected exception would
+have hit Streamlit's default traceback UI instead of the same graceful
+`st.error(...)` every other refresh failure gets); fixed the same way,
+at the button's own call site. Regression tests:
+`tests/test_launch.py` (new, 4 tests, including `test_launch_still_
+execs_streamlit_when_core_refresh_raises_unexpectedly`, which reproduces
+the original bug -- `os.execvp` was never called -- and confirms the fix).

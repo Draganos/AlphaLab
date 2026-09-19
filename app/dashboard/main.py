@@ -128,8 +128,23 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
     # scripts. See alpha_lab.refresh's module docstring for why this stays
     # synchronous and atomic rather than kicking off background work.
     with st.spinner("Refreshing core data — price/fundamental ingestion, then research rebuild..."):
-        result = run_core_refresh_guarded(engine, settings, st.session_state)
-    if result is None:
+        try:
+            result = run_core_refresh_guarded(engine, settings, st.session_state)
+        except Exception as error:  # noqa: BLE001 -- run_core_refresh_guarded only
+            # guarantees a per-ticker provider failure or a rebuild failure land on
+            # the returned CoreRefreshResult, never raised; an infrastructure-level
+            # failure outside those paths is deliberately left to propagate (see
+            # alpha_lab.refresh's module docstring). This button's own job is to
+            # never take the whole page down for that, so it's caught here and
+            # shown the same way any other refresh failure is -- existing research
+            # is unaffected either way (run_core_refresh never corrupts it).
+            unexpected_error = str(error)
+            result = None
+        else:
+            unexpected_error = None
+    if unexpected_error is not None:
+        st.error(f"Full Refresh failed unexpectedly ({unexpected_error}); existing research is unchanged.")
+    elif result is None:
         st.warning("A refresh is already in progress for this session.")
     elif not result.ok:
         st.error(
