@@ -1792,3 +1792,131 @@ at the button's own call site. Regression tests:
 `tests/test_launch.py` (new, 4 tests, including `test_launch_still_
 execs_streamlit_when_core_refresh_raises_unexpectedly`, which reproduces
 the original bug -- `os.execvp` was never called -- and confirms the fix).
+
+## 30. Historical Validation of New Research Layers (roadmap PR #32)
+
+Not a new evidence domain -- the roadmap's next phase after Research
+Stance, explicitly a validation pass: "Could the research state on date X
+have accessed information that was only published after date X? If yes,
+fix the provenance boundary." Every research layer added since PR #26
+(Analyst Consensus, Analyst Rating Changes/Revision Trend, Technical
+Summary, AI Research Rating, News, Macro Regime/External Calibration,
+Fund Evidence, Research Stance) and the research-snapshot mechanism
+itself were audited against that question.
+
+**Snapshot mechanism (clean).** `alpha_lab.research.snapshots.
+ResearchSnapshotRepository` already persists one immutable, fully-
+materialized `StockResearch` payload per snapshot (`model_dump(mode=
+"json")` of everything -- categories, `analyst_consensus`, `technical_
+summary`, `ai_research_assessment`, `analyst_research`, `fund_evidence`).
+`get`/`get_latest`/`list_for_ticker` deserialize that frozen payload
+directly and never re-join against any `Current*` table, so reading an
+old snapshot can never pick up today's data -- current-vs-historical
+separation holds structurally, not by convention. Idempotent on content
+(`payload_hash`-derived `snapshot_id`), confirming snapshot reproducibility.
+PR #31's own historical-snapshot rendering path (Company Research's
+Research Stance panel) already omits Macro/External Calibration/News for
+a snapshot view for the same reason, rather than re-fetching them "now" --
+verified consistent with this mechanism's own guarantee.
+
+**News / Macro Regime / External Calibration (already correct, confirmed
+by re-reading, no change).** `NewsService.get_history(as_of=...)` filters
+`retrieved_at <= end_of(as_of)`; `MacroRegimeService.get_assessment_as_of`/
+`ExternalCalibrationService.get_calibration_as_of` follow the identical
+`retrieved_at`-based pattern. All three already correctly treat the
+source's own claimed date (`published_at`, a market date) as evidence to
+display, never as the eligibility test for what a historical `as_of` read
+may see.
+
+**Technical Summary / Analyst Consensus / AI Research Rating / Fund
+Evidence (no leak, but no historical replay capability either).** Each is
+a single upserted `Current*` row per ticker with no `as_of` parameter
+anywhere in `SupplementalResearchService`'s read methods -- there is
+nothing to leak because there is no historical query surface at all yet.
+This is a real capability gap, not a bug: reconstructing what any of
+these looked like on a past date is exactly the *next* roadmap phase's
+job ("historical research reconstruction... where source coverage
+permits"), not this one's.
+
+**Bug found and fixed: `AnalystEventsService`'s `as_of` parameter was
+not point-in-time-safe.** `get_research_summary(ticker, as_of=...)`
+accepted `as_of` and stamped it onto the output and the 90-day rating-
+change tally's window start -- but the two underlying reads it actually
+calls, `get_rating_changes`/`get_latest_revision_trend`, took no `as_of`
+at all and always returned every stored row regardless. yfinance's
+`upgradeDowngradeHistory`/`earningsTrend` each backfill a ticker's entire
+history in one refresh call (see `AnalystRatingChange`/`EstimateRevisionTrend`'s
+own docstrings), so a row whose claimed `grade_date`/`observation_date` is
+years in the past can still have been inserted into these tables only
+today. A caller requesting `get_research_summary(ticker, as_of=<a past
+date>)` would have silently received rating changes and revision-trend
+observations AlphaLab had not actually ingested until long after that
+date -- exactly the future-information leak this phase exists to catch,
+and precisely the trap the next roadmap phase (historical research
+reconstruction) would have inherited had it reached for this parameter
+trusting it was already safe.
+
+Fixed by filtering both reads on the field that actually records when
+AlphaLab itself stored the row -- `AnalystRatingChange.retrieved_at` and
+`EstimateRevisionTrend.ingested_at` (a genuine ingestion timestamp,
+distinct from `observation_date`, which is merely the refresh call's own
+`as_of` argument and so cannot be trusted for a read-side PIT filter) --
+mirroring `NewsService.get_history`'s established `retrieved_at`-based
+pattern exactly, rather than filtering on the source's claimed
+`grade_date`/`observation_date`. `get_research_summary` now passes `as_of`
+through to both reads unconditionally, so `build_analyst_research_summary`
+never sees a row AlphaLab hadn't yet ingested. Omitting `as_of` (the
+current-research path every existing caller uses) is completely
+unaffected -- verified byte-identical against the live database.
+
+**Two further self-review findings on that same fix, both resolved
+before opening this PR:**
+
+1. *Per-period "latest" selection was still ordered by the untrusted
+   field.* The new `ingested_at`-based `WHERE` clause correctly excluded
+   not-yet-ingested rows, but `get_latest_revision_trend`'s subsequent
+   "pick the newest row per `fiscal_period`" step still ordered by
+   `observation_date` -- the same caller-controlled field the fix's own
+   rationale says cannot be trusted. Two rows for the same period can
+   have an `observation_date` order that disagrees with the order
+   AlphaLab actually ingested them in, silently picking the wrong "latest"
+   row. Fixed by ordering that selection by `ingested_at` too, consistent
+   with the rest of the fix. Regression test added: two observations for
+   one `fiscal_period` with `observation_date` and `ingested_at` order
+   deliberately reversed, confirming the `ingested_at`-latest row wins.
+2. *Tz-aware vs. naive datetime comparison.* `AnalystRatingChange.
+   retrieved_at`/`EstimateRevisionTrend.ingested_at` default to a
+   tz-aware `datetime.now(UTC)`, while the new `as_of` upper bound is a
+   naive `datetime.combine(as_of, time.max)` -- unlike `NewsArticleRecord.
+   retrieved_at`, which is explicitly stripped of tzinfo before storage
+   (`alpha_lab/news/service.py`). Verified empirically (a throwaway
+   in-memory-SQLite script, not just read) that this is not a bug:
+   SQLAlchemy's plain `DateTime` column on SQLite discards tzinfo on
+   write regardless, so both sides always compare as naive UTC wall-clock
+   values. No behavior change; docstrings note this explicitly so a
+   future reader doesn't have to re-derive it.
+
+**Deliberately not done:** no change to the backtest/trading engine, and
+the new research layers are not injected into `HistoricalScoringService`
+or any strategy path -- per the roadmap, that decision is explicitly
+deferred to a future phase, decided from what this validation actually
+found, not assumed.
+
+**Real-data validation** (live database): `get_research_summary("NVDA",
+as_of=date(2020, 1, 1))` -- a date before this environment's data was
+ever ingested -- correctly returns `None` (nothing had genuinely been
+ingested by then), while `get_research_summary("NVDA")` (current) and
+`get_research_summary("NVDA", as_of=date.today())` both correctly return
+the full current view (20 rating changes, 2 revision-trend periods),
+identical to before this fix -- confirming the filter excludes exactly
+what it should and nothing more.
+
+Full test suite (`tests/test_analyst_events_service.py` +4: two direct
+tests proving `get_rating_changes`/`get_latest_revision_trend` exclude a
+row whose `retrieved_at`/`ingested_at` postdates the requested `as_of`
+while including it once `as_of` catches up, one end-to-end
+`get_research_summary` test, plus one regression test for the
+per-period-selection finding above; one pre-existing test's incidental
+`as_of` argument corrected since it was unrelated to what that test
+actually verifies) and all three established smoke tests pass.
+`git diff --check`: clean.
