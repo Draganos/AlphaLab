@@ -33,7 +33,7 @@ untouched -- both tables are append-only, so there is nothing to overwrite.
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -62,10 +62,30 @@ class AnalystEventsService:
     # --- reads: pure DB, no network, no computation ------------------------
 
     def get_rating_changes(
-        self, ticker: str, *, limit: int | None = 20
+        self, ticker: str, *, limit: int | None = 20, as_of: date | None = None
     ) -> list[AnalystRatingChange]:
         """Most recent rating-change events first. `limit=None` returns the
-        full stored history."""
+        full stored history.
+
+        `as_of`, when given, is a point-in-time-safe read: filters
+        `retrieved_at <= end_of(as_of)` -- mirrors `NewsService.get_history`'s
+        `as_of` handling exactly, for the same reason. `grade_date` is the
+        source's own claimed event date, not proof AlphaLab actually had
+        this row stored by `as_of`: yfinance's `upgradeDowngradeHistory`
+        backfills a ticker's *entire* rating-change history in one refresh
+        call (see `AnalystRatingChange`'s own docstring), so a row graded
+        years ago can still have been inserted into this table only today.
+        Filtering on `grade_date` alone would silently leak that
+        not-yet-ingested history into a historical read. Omitting `as_of`
+        returns every stored event (the full current view), unchanged.
+
+        `retrieved_at` is stored via a tz-aware `datetime.now(UTC)` default,
+        while this comparison's upper bound is a naive `datetime.combine`
+        (matching `NewsService.get_history`'s literal, though that field is
+        explicitly stripped of tzinfo before storage). This is safe here
+        too: SQLAlchemy's plain `DateTime` column on SQLite discards
+        tzinfo on write, so both sides compare as naive UTC wall-clock
+        values -- confirmed empirically, not just assumed."""
         normalized = ticker.strip().upper()
         with Session(self.engine) as session:
             statement = (
@@ -73,26 +93,48 @@ class AnalystEventsService:
                 .where(AnalystRatingChange.ticker == normalized)
                 .order_by(AnalystRatingChange.grade_date.desc(), AnalystRatingChange.id.desc())
             )
+            if as_of is not None:
+                statement = statement.where(
+                    AnalystRatingChange.retrieved_at <= datetime.combine(as_of, time.max)
+                )
             if limit is not None:
                 statement = statement.limit(limit)
             rows = session.scalars(statement).all()
             session.expunge_all()
             return list(rows)
 
-    def get_latest_revision_trend(self, ticker: str) -> list[EstimateRevisionTrend]:
+    def get_latest_revision_trend(
+        self, ticker: str, *, as_of: date | None = None
+    ) -> list[EstimateRevisionTrend]:
         """The most recent stored observation for each `fiscal_period` --
         never a mix of an old and a newer observation for the same period,
-        and never re-derived/interpolated between observations."""
+        and never re-derived/interpolated between observations.
+
+        `as_of`, when given, filters `ingested_at <= end_of(as_of)` --
+        `ingested_at` (not `observation_date`) is the field that actually
+        records when AlphaLab stored this row, mirroring `get_rating_
+        changes`'s `retrieved_at`-based filtering for the same reason.
+        `observation_date` defaults to the refresh call's own `as_of`
+        argument (see `refresh_revision_trend`), which a caller could set
+        to any date -- trusting it for a *read*-side PIT filter would let a
+        mislabeled write silently defeat this exact safeguard. For the same
+        reason, "most recent per fiscal_period" is also decided by
+        `ingested_at`, not `observation_date`: two rows for the same period
+        can have `observation_date`s that disagree with insertion order,
+        and it is `ingested_at` that actually reflects which row AlphaLab
+        knew about more recently."""
         normalized = ticker.strip().upper()
         with Session(self.engine) as session:
-            rows = session.scalars(
-                select(EstimateRevisionTrend)
-                .where(EstimateRevisionTrend.ticker == normalized)
-                .order_by(
-                    EstimateRevisionTrend.fiscal_period,
-                    EstimateRevisionTrend.observation_date.desc(),
+            statement = select(EstimateRevisionTrend).where(EstimateRevisionTrend.ticker == normalized)
+            if as_of is not None:
+                statement = statement.where(
+                    EstimateRevisionTrend.ingested_at <= datetime.combine(as_of, time.max)
                 )
-            ).all()
+            statement = statement.order_by(
+                EstimateRevisionTrend.fiscal_period,
+                EstimateRevisionTrend.ingested_at.desc(),
+            )
+            rows = session.scalars(statement).all()
             session.expunge_all()
         latest_by_period: dict[date, EstimateRevisionTrend] = {}
         for row in rows:
@@ -113,16 +155,24 @@ class AnalystEventsService:
         `get_rating_changes(ticker, limit=20)` directly) -- pass it through
         explicitly rather than relying on `build_analyst_research_summary`'s
         own (smaller) default, which is tuned for other, more compact
-        callers of that function."""
+        callers of that function.
+
+        `as_of` is now genuinely point-in-time-safe end to end (PR #32
+        historical-validation fix): both underlying reads are filtered to
+        what AlphaLab had actually ingested by `as_of` (see `get_rating_
+        changes`/`get_latest_revision_trend`'s own docstrings) before
+        `build_analyst_research_summary` ever sees them, not just stamped
+        onto the output's own `as_of` field as before."""
+        effective_as_of = as_of or date.today()
         rating_changes = self.get_rating_changes(
-            ticker, limit=_SUMMARY_RATING_CHANGES_FETCH_LIMIT
+            ticker, limit=_SUMMARY_RATING_CHANGES_FETCH_LIMIT, as_of=as_of
         )
-        revision_trend = self.get_latest_revision_trend(ticker)
+        revision_trend = self.get_latest_revision_trend(ticker, as_of=as_of)
         return build_analyst_research_summary(
             ticker,
             rating_changes,
             revision_trend,
-            as_of=as_of or date.today(),
+            as_of=effective_as_of,
             recent_changes_limit=recent_changes_limit,
         )
 
