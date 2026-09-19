@@ -1498,3 +1498,148 @@ yfinance_fund_data_provider.py` new (5 tests), `tests/test_fund_evidence.py`
 new (9 tests), `tests/test_supplemental_service.py` updated fake provider,
 `tests/test_ai_rating.py` +8, `tests/test_coverage_summary.py` +2) and all
 three established smoke tests pass.
+
+## 28. Research Stance (PR #31)
+
+Every prior PR added a new evidence *domain* (Analyst Consensus, Technical
+Summary, AI Research Rating, Analyst Revisions, Fund Evidence, ...); none
+of them synthesized across domains. The only cross-domain view that
+existed was Company Research's `_render_research_summary`, an ad hoc
+five-row table with no conflict detection, no Macro/External
+Calibration/Revisions, and no traceability beyond a rating label. This PR
+formalizes that into `alpha_lab.research_stance`, per the roadmap's PR
+#31 spec: an inspectable, traceable synthesis of already-computed
+evidence, never a new score.
+
+**`alpha_lab.research_stance.stance`** (new top-level package, pure,
+zero database/provider access): deliberately outside `alpha_lab.research`
+-- like `alpha_lab.evidence_coverage`/`alpha_lab.alignment`, it reads
+Macro Regime/External Calibration (via `alpha_lab.alignment.
+AlignmentAssessment`) and (indirectly, through the caller) the News
+Engine, both of which `tests/test_macro_regression.py`/`test_news_
+regression.py` forbid any scoring module from importing.
+
+`build_research_stance(research, *, news_articles=None, alignment=None)`
+builds nine `StanceLine`s, mirroring `build_security_coverage_summary`'s
+`news_articles`/`macro_assessment` optional-input pattern exactly:
+
+* **Seven directional domains** -- fundamentals, analysts, revisions,
+  technical, ai_research, macro, external_calibration -- each `StanceLine.
+  label` is that domain's *own already-existing* categorical value,
+  verbatim: `StockResearch.score_interpretation` ("Strong"/"Neutral"/...,
+  already exactly the roadmap's own worked example), `AnalystConsensus.
+  rating`, the nearest fiscal period's `RevisionDirection` (`revision_
+  trend[0]` -- the list is sorted ascending by fiscal_period, so index 0
+  is the soonest, most decision-relevant estimate; documented in `_build_
+  revisions_line`'s docstring, since summarizing every period into one
+  direction was deliberately out of scope), `TechnicalSummary.overall_
+  rating`, `AIResearchAssessment.rating`, and `AlignmentAssessment.
+  market_regime`/`donatien_lean`. This module invents no new user-facing
+  terminology anywhere -- every label is a read, never a computation. A
+  private `StanceLean` (POSITIVE/NEGATIVE/NEUTRAL/INSUFFICIENT_DATA)
+  buckets each domain's own vocabulary for internal conflict detection
+  only; it is never displayed.
+* **Two non-directional domains** -- news, coverage_confidence -- have
+  `StanceLine.lean = None` (not `INSUFFICIENT_DATA`; a distinct
+  NOT_APPLICABLE-shaped state, mirroring `alpha_lab.research.security_
+  type`'s NOT_APPLICABLE-vs-UNAVAILABLE distinction) and never
+  participate in the outcome/conflict logic. News is non-directional
+  because, per its own module docstring, it has "no sentiment, no
+  relevance, no derived judgment of any kind" -- inventing a sentiment
+  label here to fill the roadmap's illustrative "News: Neutral" example
+  would be exactly the kind of fabricated conclusion this project
+  refuses to produce, so News surfaces only as an evidence-count fact
+  (`"N article(s)"`), same presence-only treatment `alpha_lab.evidence_
+  coverage` already gives it. Coverage/confidence is a meta-statement
+  about how much evidence exists across every *other* domain, not itself
+  an opinion about the security -- folding it into the tally would
+  double-count what it describes.
+
+**`ResearchStanceOutcome`** (POSITIVE/MIXED_POSITIVE/NEUTRAL/MIXED_
+NEGATIVE/NEGATIVE/INSUFFICIENT_DATA) is an unweighted count of directional
+domains' leans -- not a blended score, per the roadmap's explicit "Do NOT
+create an arbitrary weighted average": no negative -> POSITIVE, no
+positive -> NEGATIVE, positive-majority -> MIXED_POSITIVE, negative-
+majority -> MIXED_NEGATIVE, an exact tie is its own explicit NEUTRAL
+outcome (never silently broken one way), and no domain with a definite
+lean at all -> INSUFFICIENT_DATA (never forced to NEUTRAL, which would
+misrepresent "no basis to judge" as "judged and balanced"). `_detect_
+conflicts` lists every minority-vs-majority disagreement among directional
+domains in plain English (`DOMAIN_ORDER`-deterministic, so the same inputs
+always reproduce the same `conflicts`/`primary_conflict`) -- per the
+roadmap's "if evidence conflicts, expose the conflict", nothing is ever
+hidden inside `outcome` alone; `conflicts` is the complete, authoritative
+list and `primary_conflict` (`conflicts[0]`) is a convenience, not a
+replacement.
+
+**Wiring**: Company Research's `_render_research_summary` is replaced by
+`_render_research_stance_panel`, reusing that same integration point
+rather than adding a redundant parallel panel. The current-research call
+site fetches `NewsService(engine).get_history(ticker, limit=20)` and
+`AlignmentService(engine).get_current_assessment()` (both already-
+persisted, already-PIT-safe reads -- no new provider call) and passes
+them into `build_research_stance`. The historical-snapshot call site
+deliberately passes neither: computing them "now" for a snapshot from an
+earlier `evaluation_date` would leak current-day Macro/External
+Calibration/News into a supposedly point-in-time view. `_render_stock_
+research` (shared by both call sites) accepts an optional `stance`
+parameter and falls back to `build_research_stance(research)` (no
+news/alignment) when omitted, so a snapshot still shows a stance built
+entirely from its own frozen fundamentals/analyst/revisions/technical/
+AI-research fields (genuinely point-in-time) with Macro/External
+Calibration/News honestly reading `NOT_COMPUTED` rather than a leaked
+read -- true point-in-time-correct historical Research Stance is
+explicitly PR #32's job (historical validation of the new research
+layers), not this one's; combining the two phases was deliberately
+avoided.
+
+**Real-data validation** (the live 11-security universe, including 4
+market-wide macro-proxy tickers and 2 ETFs): `AlignmentAssessment` read
+`ALIGNED`/`RISK_ON`/`CONSTRUCTIVE` market-wide, applied identically to
+every ticker. NVDA/MA: all-positive directional domains (fundamentals
+`Unavailable` from a config gap -- correctly `INSUFFICIENT_DATA`, never
+guessed -- analysts `BUY`, revisions `IMPROVING`, ai_research `POSITIVE`,
+macro/calibration both positive) -> outcome `POSITIVE`, zero conflicts.
+AAL: analyst revisions `DETERIORATING` and technical `STRONG_SELL` both
+against a positive macro/calibration backdrop -> outcome `NEUTRAL` (an
+exact 2-vs-2 tie) with both conflicts named explicitly, e.g. "Analyst
+Revisions (DETERIORATING) disagrees with positive evidence from Macro
+Regime/External Calibration". FTEC/GDX (ETFs): fundamentals/analysts/
+revisions/ai_research all correctly `INSUFFICIENT_DATA` (`REVIEW`/`NOT_
+COMPUTED`, matching PR #29/#30's NOT_APPLICABLE-aware categories feeding
+`score_interpretation`/`AnalystConsensus.rating`), technical `BUY` ->
+outcome `POSITIVE`, zero conflicts. The 4 macro-proxy tickers (no
+`StockResearch` fundamentals/analyst/technical/AI domains at all)
+correctly show every ticker-specific line as `INSUFFICIENT_DATA`/`NOT_
+COMPUTED` while still reading the shared market-wide macro/calibration
+lines. Verified live via headless browser on Company Research (AAL):
+zero page errors; the panel renders "Research stance: Neutral / evenly
+mixed" with both conflict sentences displayed verbatim, exactly matching
+the offline validation run.
+
+**Bug caught in a final high-effort self-review pass, before opening the
+PR:** `_build_analysts_line` did an unguarded dict lookup on `analyst_
+consensus.rating`, which the `AnalystConsensus` model declares `AnalystRating
+| None` (defaulting to `None`) even though the one production builder,
+`build_analyst_consensus`, never actually produces a bare `None` (`REVIEW`
+covers "couldn't be rated") -- a present-but-ratingless `AnalystConsensus`
+(constructible directly, or round-tripped from a legacy/malformed stored
+payload) raised an uncaught `KeyError: None`, crashing the whole Company
+Research page render. The analogous Optional sub-fields on `_build_macro_
+line`/`_build_external_calibration_line` were already guarded correctly;
+analysts was the one line missing the same guard. Fixed by degrading to
+`NOT_COMPUTED`/`INSUFFICIENT_DATA`, same as an absent `AnalystConsensus`
+entirely. Regression test: `test_analysts_line_handles_a_present_
+consensus_with_no_rating`.
+
+Full test suite (`tests/test_research_stance.py` new, 24 tests covering
+every per-domain lean mapping, the nearest-vs-furthest revision period
+choice, non-directional News/Coverage-confidence never participating in
+conflicts, all six outcome branches including the exact-tie case, the
+ratingless-AnalystConsensus guard above, and that `overall_score`/
+`categories` are never read back into or mutated) and all three
+established smoke tests pass; `tests/test_macro_regression.py`/`test_news_
+regression.py`/`test_alignment_regression.py`/`test_calibration_
+regression.py` still pass unmodified, confirming the new package's
+reverse-import direction (reading `alpha_lab.research` types) never
+crosses back into a scoring module.
