@@ -1,11 +1,16 @@
 """Canonical "core refresh" operation: price/fundamental ingestion for the
 already-configured universe, followed by a current-research rebuild.
 
-This is deliberately the ONE code path behind both the launch-time
-auto-refresh check (`scripts/launch.py`) and the main dashboard's "Full
-Refresh" button (`app/dashboard/main.py`) -- neither caller re-implements
-ingestion or research-building logic; both call `run_core_refresh`
-directly. "Core" is scoped narrowly on purpose: price/fundamental data via
+This is deliberately the ONE code path behind the launch-time auto-refresh
+check (`scripts/launch.py`), the main dashboard's own automatic
+on-session-start refresh of whatever is currently stale, and its manual
+"Full Refresh" button (all in `app/dashboard/main.py`) -- none of these
+callers re-implement ingestion or research-building logic; all call
+`run_core_refresh` directly, the automatic dashboard trigger passing
+`stale_universe_tickers`'s result so it re-ingests only what is actually
+stale (keeping that automatic trigger's cost proportional to the problem)
+while the launch check and the button both omit `tickers` for the full
+configured universe. "Core" is scoped narrowly on purpose: price/fundamental data via
 `alpha_lab.ingestion.IngestionService` plus `MarketScreenerService.
 rebuild_current_research()`, never the supplemental research domains
 (Analyst Consensus/Technical/AI Research/News/Macro Regime/Donatien
@@ -19,12 +24,15 @@ Full Refresh buttons, or a Full Refresh click racing the launch-time
 check -- from running concurrently; see `run_core_refresh_guarded`'s own
 docstring for exactly what its in-progress guard does and does not cover.
 
-`is_universe_price_stale` is a pure database read (no network) -- safe to
-call on every Streamlit render, exactly like every other read in this
-codebase's explicit-refresh architecture. `run_core_refresh` is the one
-function that calls a provider; every caller must invoke it deliberately
-(a pre-launch check or an explicit button click), never as a side effect
-of rendering a page.
+`is_universe_price_stale`/`stale_universe_tickers` are pure database reads
+(no network) -- safe to call on every Streamlit render, exactly like every
+other read in this codebase's explicit-refresh architecture. `run_core_
+refresh` is the one function that calls a provider; every caller must
+invoke it deliberately (a pre-launch check, an explicit button click, or
+the dashboard's own once-per-session automatic trigger guarded by
+`st.session_state`), never as an unconditional side effect of rendering a
+page -- the automatic trigger still only ever calls it once per browser
+session (see `app/dashboard/main.py`'s own guard), not on every rerun.
 """
 
 from collections.abc import MutableMapping
@@ -68,6 +76,33 @@ def configured_universe_tickers(engine: Engine) -> list[str]:
         return list(session.scalars(select(Security.ticker).order_by(Security.ticker)))
 
 
+def stale_universe_tickers(
+    engine: Engine, stale_after_days: int, *, evaluation_date: date | None = None
+) -> list[str]:
+    """Exactly which already-tracked tickers have a latest stored price
+    observation that is missing or older than `stale_after_days` -- the
+    same staleness rule `is_universe_price_stale` uses, but returning the
+    actual subset (in `configured_universe_tickers`'s own order) rather
+    than a single boolean, so a caller can refresh only what is actually
+    stale (e.g. the dashboard's automatic on-session-start refresh) instead
+    of paying for the entire universe every time. Pure database read, no
+    network. An empty universe returns an empty list -- see
+    `is_universe_price_stale`'s docstring for why that is never "stale"."""
+    evaluation_date = evaluation_date or date.today()
+    tickers = configured_universe_tickers(engine)
+    if not tickers:
+        return []
+    latest_by_ticker = _latest_price_by_ticker(engine)
+    return [
+        ticker
+        for ticker in tickers
+        if assess_freshness(
+            "price", latest_by_ticker.get(ticker), evaluation_date, stale_after_days
+        )
+        is not None
+    ]
+
+
 def is_universe_price_stale(
     engine: Engine, stale_after_days: int, *, evaluation_date: date | None = None
 ) -> bool:
@@ -77,18 +112,9 @@ def is_universe_price_stale(
     is never "stale": there is nothing here for a core refresh to fix,
     that is a separate bootstrapping concern (`scripts/load_universe.py`).
     """
-    evaluation_date = evaluation_date or date.today()
-    tickers = configured_universe_tickers(engine)
-    if not tickers:
-        return False
-    latest_by_ticker = _latest_price_by_ticker(engine)
-    for ticker in tickers:
-        issue = assess_freshness(
-            "price", latest_by_ticker.get(ticker), evaluation_date, stale_after_days
-        )
-        if issue is not None:
-            return True
-    return False
+    return bool(
+        stale_universe_tickers(engine, stale_after_days, evaluation_date=evaluation_date)
+    )
 
 
 @dataclass
@@ -111,7 +137,11 @@ class CoreRefreshResult:
 
 
 def run_core_refresh(
-    engine: Engine, settings: Settings, *, years: int = DEFAULT_INGESTION_YEARS
+    engine: Engine,
+    settings: Settings,
+    *,
+    years: int = DEFAULT_INGESTION_YEARS,
+    tickers: list[str] | None = None,
 ) -> CoreRefreshResult:
     """The canonical core refresh: ingest price/fundamental data for the
     configured universe (one ticker's *provider* failure never aborts the
@@ -121,6 +151,19 @@ def run_core_refresh(
     being unusable, is deliberately left to propagate rather than silently
     continuing to attempt more writes against it), then rebuild current
     research from whatever is now stored.
+
+    `tickers`, when given, restricts ingestion to exactly that subset of
+    the configured universe -- e.g. the dashboard's automatic
+    on-session-start refresh, which passes only `stale_universe_tickers`'s
+    result so that trigger's cost stays proportional to what is actually
+    stale, rather than always re-ingesting the entire universe. Omitting
+    it (the default -- used by both `scripts/launch.py`'s launch-time
+    check and the manual Full Refresh button) ingests the full configured
+    universe, exactly as before this parameter existed. Either way, the
+    research rebuild step below always runs against the full current
+    database state: it is a local read/recompute, not a network call, so
+    narrowing its scope to match a partial ingestion would only leave
+    already-fresh tickers' research stale for no reason.
 
     Never raises for a per-ticker *provider* failure. `MarketScreenerService.
     rebuild_current_research`'s own failure is caught and reported on the
@@ -132,21 +175,21 @@ def run_core_refresh(
     Full Refresh button) decide how to surface `research_error`, never how
     to recover the data -- there is nothing to recover.
     """
-    tickers = configured_universe_tickers(engine)
+    target_tickers = configured_universe_tickers(engine) if tickers is None else list(tickers)
     ingestion_service = IngestionService(YFinanceProvider(), engine)
     end = date.today()
     start = end - timedelta(days=365 * years)
 
     succeeded: list[str] = []
     failed: dict[str, str] = {}
-    for ticker in tickers:
+    for ticker in target_tickers:
         try:
             ingestion_service.ingest(ticker, start, end)
             succeeded.append(ticker)
         except ProviderError as error:
             failed[ticker] = str(error)
 
-    result = CoreRefreshResult(tickers_attempted=tickers, tickers_succeeded=succeeded, tickers_failed=failed)
+    result = CoreRefreshResult(tickers_attempted=target_tickers, tickers_succeeded=succeeded, tickers_failed=failed)
     try:
         records = MarketScreenerService(engine, settings).rebuild_current_research()
         result.research_rebuilt = True
@@ -164,13 +207,15 @@ def run_core_refresh_guarded(
     state: MutableMapping[str, object],
     *,
     years: int = DEFAULT_INGESTION_YEARS,
+    tickers: list[str] | None = None,
 ) -> CoreRefreshResult | None:
-    """Same operation as `run_core_refresh`, refusing to start a second one
-    while `state` already records one in progress -- `state` is typically
-    Streamlit's `st.session_state`, which persists across reruns for the
-    same browser session, so a refresh started by one button click stays
-    recorded across the rerun that click triggers. Returns `None` without
-    calling any provider when a refresh is already in progress, instead of
+    """Same operation as `run_core_refresh` (see its own docstring for what
+    `tickers` restricts), refusing to start a second one while `state`
+    already records one in progress -- `state` is typically Streamlit's
+    `st.session_state`, which persists across reruns for the same browser
+    session, so a refresh started by one button click stays recorded
+    across the rerun that click triggers. Returns `None` without calling
+    any provider when a refresh is already in progress, instead of
     starting an overlapping one; the in-progress flag is always cleared
     again before returning, on both success and failure, so a crashed
     refresh never permanently locks out future attempts.
@@ -186,6 +231,6 @@ def run_core_refresh_guarded(
         return None
     state["core_refresh_in_progress"] = True
     try:
-        return run_core_refresh(engine, settings, years=years)
+        return run_core_refresh(engine, settings, years=years, tickers=tickers)
     finally:
         state["core_refresh_in_progress"] = False
