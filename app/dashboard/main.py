@@ -195,7 +195,7 @@ else:
         st.warning("Factor inputs are unavailable for this security.")
     else:
         st.plotly_chart(px.bar(chart, x="Factor", y="Score", range_y=[0, 100],
-                               title=f"Why {ticker} received its score"), width="stretch")
+                               title=f"Why {ticker} received its score"))
 
 st.header("Data Quality")
 st.write("Unavailable fields remain blank and are excluded with visible coverage; no missing factor is silently converted to a positive signal.")

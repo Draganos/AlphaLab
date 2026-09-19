@@ -36,7 +36,7 @@ if st.button("Compare equal-capital experiments", type="primary"):
                                            TransactionCostModel(**settings.backtest.costs.model_dump()))
         curves = {"Passive": passive, "Manual": manual_curve, "AlphaLab": result.nav}
         st.dataframe(compare_experiments(curves, settings.backtest.risk_free_rate), width="stretch")
-        st.plotly_chart(px.line(pd.concat(curves, axis=1).dropna(), title="Equal-capital equity curves"), width="stretch")
+        st.plotly_chart(px.line(pd.concat(curves, axis=1).dropna(), title="Equal-capital equity curves"))
         st.error(universe.limitation)
     except (ValueError, KeyError) as exc:
         st.warning(str(exc))
