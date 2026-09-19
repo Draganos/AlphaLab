@@ -4,6 +4,7 @@ import streamlit as st
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from alpha_lab.alignment import AlignmentService
 from alpha_lab.calibration.sector_alignment import get_sector_tier_weights_for_ticker
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
@@ -17,6 +18,7 @@ from alpha_lab.research.ai_rating import DIMENSION_NAMES
 from alpha_lab.research.analyst_events import AnalystEventsService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 from alpha_lab.research.technical import IndicatorCategory
+from alpha_lab.research_stance import ResearchStance, build_research_stance
 
 st.set_page_config(page_title="AlphaLab Company Research", layout="wide")
 st.title("Company Research")
@@ -306,60 +308,76 @@ def _render_supplemental_panels(research) -> None:
     _render_ai_research_panel(columns[2], research.ai_research_assessment)
 
 
-_FUNDAMENTAL_INTERPRETATION_BY_SCORE = (
-    (85, "Exceptional"),
-    (70, "Strong"),
-    (55, "Positive"),
-    (40, "Neutral"),
-    (25, "Weak"),
-)
+_OUTCOME_DISPLAY = {
+    "POSITIVE": "Positive",
+    "MIXED_POSITIVE": "Mixed — leaning positive",
+    "NEUTRAL": "Neutral / evenly mixed",
+    "MIXED_NEGATIVE": "Mixed — leaning negative",
+    "NEGATIVE": "Negative",
+    "INSUFFICIENT_DATA": "Insufficient data",
+}
 
 
-def _qualitative_fundamental_label(research) -> str:
-    if research.overall_score is None:
-        return "Unavailable"
-    for threshold, label in _FUNDAMENTAL_INTERPRETATION_BY_SCORE:
-        if research.overall_score >= threshold:
-            return label
-    return "Weak"
+def _render_research_stance_panel(research, stance: "ResearchStance | None") -> None:
+    """PR #31: cross-domain Research Stance — an inspectable, traceable
+    synthesis of already-computed evidence, never a new composite score.
+    See `alpha_lab.research_stance`'s module docstring for the full
+    methodology, including exactly which domains are directional and why
+    News/Coverage-confidence deliberately never are.
 
-
-def _render_research_summary(research) -> None:
-    """Qualitative-only cross-domain summary — never a new composite score."""
-    st.subheader("Research Summary")
-    st.caption("Qualitative context only. This is not a combined score.")
+    `stance` is `None` only for a historical snapshot view: Macro Regime/
+    External Calibration/News would otherwise be read "as of now" rather
+    than as of the snapshot's own evaluation date, leaking information a
+    point-in-time-correct view must not have — see
+    `alpha_lab.research_stance`'s docstring and the project roadmap's PR
+    #32 (historical validation), which owns fixing this properly. For a
+    snapshot, this still computes a stance from the snapshot's own frozen
+    fundamentals/analyst/revisions/technical/AI-research fields (all
+    genuinely point-in-time), with Macro/External Calibration/News simply
+    reading NOT_COMPUTED rather than a leaked current-day read.
+    """
+    if stance is None:
+        stance = build_research_stance(research)
+        st.caption(
+            "Historical snapshot: Macro Regime, External Calibration, and "
+            "News reflect this snapshot's own evidence only (not computed "
+            "here), never a current-day read leaking into the past."
+        )
+    st.subheader("Research Stance")
+    st.caption(
+        "An inspectable synthesis of already-computed evidence layers — "
+        "never a new composite score, and never a replacement for the "
+        "AlphaLab Fundamental Score below. Every line traces back to an "
+        "existing research domain's own vocabulary."
+    )
+    st.metric("Research stance", _OUTCOME_DISPLAY[stance.outcome.value])
+    if stance.conflicts:
+        st.warning(
+            "Evidence conflicts detected — not hidden inside the stance above:\n\n"
+            + "\n".join(f"- {conflict}" for conflict in stance.conflicts)
+        )
     rows = [
-        {"Domain": "Fundamentals", "Assessment": _qualitative_fundamental_label(research)},
         {
-            "Domain": "Analyst Consensus",
-            "Assessment": "Not yet computed"
-            if research.analyst_consensus is None
-            else _rating_label(research.analyst_consensus.rating),
-        },
-        {
-            "Domain": "Technicals",
-            "Assessment": "Not yet computed"
-            if research.technical_summary is None
-            else _rating_label(research.technical_summary.overall_rating),
-        },
-        {
-            "Domain": "AI Research Rating",
-            "Assessment": "Not yet computed"
-            if research.ai_research_assessment is None
-            else _rating_label(research.ai_research_assessment.rating),
-        },
-        {"Domain": "Evidence quality (confidence)", "Assessment": research.confidence_label},
+            "Domain": line.label_display,
+            "Assessment": line.label.replace("_", " ").title(),
+            "Detail": line.detail or "",
+        }
+        for line in stance.lines
     ]
     st.dataframe(rows, width="stretch", hide_index=True)
 
 
-def _render_stock_research(research, *, quote=None) -> None:
+def _render_stock_research(research, *, quote=None, stance: "ResearchStance | None" = None) -> None:
     """Render one StockResearch object. Shared, read-only rendering for both
     the current-research view and a selected historical snapshot's detail —
     the same evidence-first presentation either way, never re-derived per
     caller. `quote` (price/market cap/Sharia status/last refresh) is only
     available for current research; historical snapshots don't carry it,
-    since it was never part of the canonical StockResearch contract."""
+    since it was never part of the canonical StockResearch contract.
+    `stance` (PR #31) is likewise only computed with full context (Macro/
+    External Calibration/News) for the current-research view — see
+    `_render_research_stance_panel`'s docstring for why a historical
+    snapshot deliberately omits it instead of leaking a current-day read."""
     st.header(f"{research.company_name or research.ticker} · {research.ticker}")
     st.caption(
         f"{_dash(research.sector)} / {_dash(research.industry)} · "
@@ -386,7 +404,7 @@ def _render_stock_research(research, *, quote=None) -> None:
     _render_fund_evidence_panel(research)
     if research.fund_evidence is not None:
         st.divider()
-    _render_research_summary(research)
+    _render_research_stance_panel(research, stance)
     st.divider()
     st.subheader("AlphaLab Fundamental Research")
     st.caption(
@@ -754,7 +772,12 @@ try:
             f"{current_build.evaluation_date}; version {current_build.score_version}"
         )
 
-    _render_stock_research(research, quote=quote)
+    stance_news_articles = NewsService(engine).get_history(ticker, limit=20)
+    stance_alignment = AlignmentService(engine).get_current_assessment()
+    stance = build_research_stance(
+        research, news_articles=stance_news_articles, alignment=stance_alignment
+    )
+    _render_stock_research(research, quote=quote, stance=stance)
 
     st.divider()
     st.subheader("Donatien External Calibration — sector context (audit-only)")
