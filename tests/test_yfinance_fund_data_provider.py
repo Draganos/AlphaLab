@@ -132,8 +132,16 @@ def test_get_fund_data_top_holdings_preserves_order_and_weights(monkeypatch):
 
 def test_get_fund_data_never_fabricates_unreliable_equity_holdings_fields(monkeypatch):
     """Median Market Cap / 3 Year Earnings Growth are <NA> in the real
-    payload and are not extracted at all -- confirms the pd.NA cells don't
-    silently become 0 or some other placeholder."""
+    payload (confirmed unreliable during the PR #30 investigation) --
+    `_fetch` deliberately never calls `_fund_table_value` for either row at
+    all (see its own docstring), so there is no extraction path that could
+    coerce their `pd.NA` cells into 0 or another placeholder in the first
+    place. This asserts the two keys are absent by construction, matching
+    `EquityHoldingsCharacteristics` never having fields for them
+    (`test_fund_evidence.py::test_equity_holdings_excludes_unreliable_
+    fields_by_construction`) -- it does not exercise `_fund_table_value`'s
+    own `pd.NA` handling, which other fields in this file's tests already
+    do (e.g. `price_earnings`/`price_book` above)."""
     provider = _provider_with_ticker(monkeypatch, _FakeTicker(_FakeFundsData()))
     raw = provider.get_fund_data("FTEC")
     assert "median_market_cap" not in raw
