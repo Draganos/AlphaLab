@@ -1,5 +1,7 @@
 """Evidence-oriented company drill-down, driven by the canonical StockResearch object."""
 
+from datetime import date
+
 import streamlit as st
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -892,6 +894,18 @@ try:
                 "Fund Evidence, if any."
             )
         st.success("Refresh complete — reload the page to see the updated panels above.")
+        # Automatic forward-only historical snapshotting (roadmap: historical
+        # research reconstruction) -- see ResearchService.snapshot_current_
+        # research's own docstring. scripts/refresh_supplemental_research.py's
+        # batch run calls the exact same shared method, so history
+        # accumulates identically from either usage path, not just this one.
+        try:
+            saved = service.snapshot_current_research(ticker)
+        except Exception as error:  # noqa: BLE001 - surfaced, not swallowed
+            st.warning(f"Automatic historical snapshot was not saved: {error}")
+        else:
+            if saved is not None:
+                st.caption(f"Historical snapshot recorded automatically (id {saved.snapshot_id[:12]}…).")
 
     st.divider()
     st.subheader("Analyst Rating Changes & Estimate Revision Trend")
@@ -995,6 +1009,43 @@ try:
                     st.error("One of the selected snapshots could not be loaded.")
                 else:
                     _render_comparison(comparison)
+
+    st.divider()
+    st.subheader("Reconstruct research as of a past date")
+    st.caption(
+        "Not a search across every saved moment: Analyst Consensus/AI "
+        "Research Rating/Fund Evidence have no history of their own before "
+        "this feature existed, so this finds the most recently *persisted* "
+        "research snapshot on or before the chosen date for those three "
+        "(see \"Save this research as a historical snapshot\" and the "
+        "automatic snapshot recorded by \"Refresh for this ticker\" above). "
+        "Technical Summary needs no snapshot at all -- it is always "
+        "recomputed exactly as of the chosen date from AlphaLab's own "
+        "stored price history."
+    )
+    as_of_date = st.date_input("As of date", value=date.today(), key="research_as_of_date")
+    if st.button("Reconstruct", key="reconstruct_as_of"):
+        as_of_snapshot = service.get_latest_snapshot_as_of(ticker, as_of_date)
+        as_of_technical = SupplementalResearchService(engine).get_technical_summary_as_of(
+            ticker, as_of_date
+        )
+        if as_of_snapshot is None:
+            st.warning(
+                f"No research snapshot had been saved for {ticker} by {as_of_date} "
+                "yet -- Analyst Consensus/AI Research Rating/Fund Evidence are "
+                "unavailable for this date. Showing Technical Summary alone, "
+                "reconstructed from stored price history."
+            )
+            _render_technical_summary_panel(st, as_of_technical)
+        else:
+            st.caption(
+                f"Nearest snapshot on or before {as_of_date}: evaluation "
+                f"{as_of_snapshot.evaluation_date}. Technical Summary below is "
+                f"recomputed exactly as of {as_of_date}, not the snapshot's own date."
+            )
+            _render_stock_research(
+                as_of_snapshot.model_copy(update={"technical_summary": as_of_technical})
+            )
 
     with Session(engine) as session:
         ethics = session.scalar(

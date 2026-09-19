@@ -24,7 +24,7 @@ remember.
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, time
 
 from sqlalchemy import Engine, select
 from sqlalchemy.exc import IntegrityError
@@ -122,6 +122,33 @@ class ResearchSnapshotRepository:
                     ResearchSnapshot.created_at.desc(),
                     ResearchSnapshot.id.desc(),
                 )
+                .limit(1)
+            )
+            return None if row is None else StockResearch.model_validate(row.payload)
+
+    def get_latest_as_of(self, ticker: str, as_of: date) -> StockResearch | None:
+        """The most recently persisted snapshot that genuinely existed by
+        `as_of` -- filters on `created_at <= end_of(as_of)` (the row's own
+        real persistence timestamp), never on `evaluation_date` alone,
+        mirroring every other point-in-time read in this codebase
+        (`AnalystEventsService`/`NewsService`/`MacroRegimeService`/
+        `ExternalCalibrationService`): a snapshot's claimed evaluation date
+        is not proof it was actually persisted by then. Returns `None` when
+        no snapshot for this ticker had been saved yet as of that date --
+        never fabricated from current data. This is how a caller finds out
+        what Analyst Consensus/Technical Summary/AI Research Rating/Fund
+        Evidence looked like on a past date, since those domains have no
+        dedicated historical table of their own -- they ride along inside
+        whatever `StockResearch` snapshot was persisted at the time (see
+        `alpha_lab.research.service.ResearchService.build_research_for_record`'s
+        enrichment)."""
+        normalized = ticker.strip().upper()
+        upper_bound = datetime.combine(as_of, time.max)
+        with Session(self.engine) as session:
+            row = session.scalar(
+                select(ResearchSnapshot)
+                .where(ResearchSnapshot.ticker == normalized, ResearchSnapshot.created_at <= upper_bound)
+                .order_by(ResearchSnapshot.created_at.desc(), ResearchSnapshot.id.desc())
                 .limit(1)
             )
             return None if row is None else StockResearch.model_validate(row.payload)

@@ -2002,3 +2002,139 @@ own first run and never firing twice; the automatic trigger touching only
 the stale subset when a fresh ticker sits alongside it in the universe;
 and a fully-fresh universe never triggering it at all. Full test suite
 and all three established smoke tests pass. `git diff --check`: clean.
+
+## 32. Historical Research Reconstruction (roadmap)
+
+Roadmap's next phase after Historical Validation (§30): where §30 audited
+that no new research layer leaks future information into a historical
+`as_of` read, this phase adds the actual reconstruction capability for the
+domains §30 identified as having "no leak, but no historical replay
+capability either" -- Technical Summary, Analyst Consensus, AI Research
+Rating, and Fund Evidence. Scoped explicitly (per direction): cover all
+four domains now; for the three with no history table of their own,
+"reconstruction" means starting genuine forward-only snapshotting rather
+than fabricating anything retroactively, keeping the automatic trigger's
+cost proportional to what a user actually does (not a blanket background
+job) -- and, distinctly, Technical Summary needs no snapshot at all.
+
+**Technical Summary: reconstructed on demand, not snapshotted.** Unlike
+the other three, Technical Summary is a pure function of `Price` history
+(`build_technical_summary`, unchanged), and Price history genuinely
+accumulates day by day regardless of whether anyone ever refreshes
+anything -- so any past date within that history is reconstructible
+directly. New `SupplementalResearchService.get_technical_summary_as_of
+(ticker, as_of)` filters on `Price.ingested_at <= end_of(as_of)`, never on
+`Price.date` alone -- `run_core_refresh` can backfill up to two years of
+history in a single call, so a bar dated years in the past can still have
+been inserted only today; filtering on `date` alone would leak that
+not-yet-ingested history into a historical read, exactly the trap §30's
+own `AnalystEventsService` fix exists to warn against. Always returns a
+`TechnicalSummary` (never `None`): a short/excluded price window yields an
+honest REVIEW rating with zero coverage, matching `refresh_technical_
+summary`'s own "always succeeds" guarantee. `refresh_technical_summary`
+and the new method now share one `_price_history_frame` helper so the two
+computations can never silently drift apart on what counts as a usable
+price bar.
+
+**Analyst Consensus / AI Research Rating / Fund Evidence: no new tables --
+the existing `StockResearch` snapshot mechanism already carried them.**
+Auditing `ResearchService.build_research_for_record` found it already
+enriches `StockResearch` with the *current* value of all three (plus
+Technical Summary and Analyst Research) on every call, and `persist_
+snapshot` already freezes whatever `StockResearch` it is given -- so a
+snapshot saved at any moment already captures all three domains' state at
+that moment. The only actual gap was that persisting a snapshot required
+a separate, easy-to-forget manual "Save research snapshot" click; nothing
+made it happen automatically alongside an actual refresh. Building three
+new dedicated snapshot tables (the original plan) would have duplicated a
+mechanism that already existed and already round-trips these fields
+(`tests/test_research_snapshots.py`'s existing supplemental-domain
+coverage).
+
+Fixed with one new method, `ResearchService.snapshot_current_research
+(ticker)`: re-reads current research and calls `persist_snapshot` on it,
+or does nothing if there is none. Idempotent (`persist_snapshot` dedupes
+identical content), so a refresh that changed nothing never creates a
+duplicate. Both of this codebase's supplemental-refresh entry points call
+it right after their own refresh completes: Company Research's "Refresh
+for this ticker" button, and `scripts/refresh_supplemental_research.py`'s
+batch run (every branch of it -- normal, `--skip-analyst`, and "no
+fundamental research yet", not only the common case). The pre-existing
+manual "Save research snapshot" button is unchanged and still useful on
+its own (e.g. to mark a fundamental-score-only change with no
+supplemental refresh).
+
+**Self-review finding, fixed before this PR:** the first version of this
+wired the automatic snapshot directly into the Company Research page's
+button handler only (re-reading `research` and calling `persist_snapshot`
+inline there), never into the batch script -- which is plausibly the
+*primary* way supplemental research actually gets refreshed for a whole
+universe in practice (its own docstring: refresh all three domains for US
+securities, one call). Left as-is, the script's routine/nightly use would
+have kept building zero history, silently defeating "history accumulates
+from ordinary use" for its own main usage path. Fixed by extracting the
+shared `snapshot_current_research` method above and calling it from both
+places instead of only the UI. A second, smaller finding from the same
+review: `get_technical_summary_as_of`'s `Price` query filtered rows dated
+after `as_of` in Python after fetching them, rather than in the same SQL
+`WHERE` clause -- harmless today (backfills are capped at two years) but
+needlessly pulling rows across the DB connection just to discard them;
+fixed by adding `Price.date <= as_of` to the query itself.
+
+**New point-in-time snapshot lookup.** `ResearchSnapshotRepository.
+get_latest_as_of(ticker, as_of)` / `ResearchService.get_latest_snapshot_
+as_of` return the most recently *persisted* snapshot that genuinely
+existed by `as_of` -- filtered on `ResearchSnapshot.created_at`, the row's
+own real persistence timestamp, never on `evaluation_date` (the research's
+own claimed date), mirroring every other PIT read in this codebase.
+Returns `None` when nothing had been saved for that ticker by that date --
+an honest capability gap for any date before automatic/manual
+snapshotting started, never fabricated. The existing per-snapshot browsing
+UI (pick a saved snapshot by its own label) was already sufficient to
+*view* a specific known snapshot; this adds the "what was the state as of
+this date" query the roadmap phase is actually about.
+
+**UI**: Company Research gained a "Reconstruct research as of a past
+date" section -- a date picker + button that calls `get_latest_snapshot_
+as_of` for Analyst Consensus/AI Research Rating/Fund Evidence and
+`get_technical_summary_as_of` for Technical Summary (recomputed exactly
+as of the chosen date, not just as of the nearest snapshot's own date,
+since it can be), rendering both through the existing shared
+`_render_stock_research`/`_render_technical_summary_panel` functions
+already used for the current-research and per-snapshot views -- no new
+rendering logic, just a new way to reach it. When no snapshot exists yet
+for the requested date, it honestly says so and falls back to showing
+Technical Summary alone (which never depends on a snapshot).
+
+**Deliberately not done:** no change to `HistoricalScoringService` or any
+backtest/strategy path -- these four domains remain supplemental research
+evidence only, exactly as established in every prior phase that touched
+them.
+
+**Validation:** new tests in `tests/test_research_snapshots.py` (`get_
+latest_as_of`: none-yet, most-recent-not-after, and a `created_at`-vs-
+`evaluation_date` PIT regression), `tests/test_supplemental_service.py`
+(`get_technical_summary_as_of`: matches the live computation when nothing
+is excluded, excludes not-yet-ingested price rows, excludes bars dated
+after `as_of` even when already ingested, and never returns `None`),
+`tests/test_research_service.py` (thin-wrapper passthrough), and new
+`tests/test_refresh_supplemental_research.py` (the self-review fix above:
+`scripts/refresh_supplemental_research.py`'s `main()` persists an
+automatic snapshot for a refreshed ticker, both in its normal path and
+its `--skip-analyst` path). Full test suite and all three established
+smoke tests pass. `git diff --check`:
+clean. Explicitly scoped out of the permanent test suite: full `AppTest`
+coverage of the Company Research page's new UI section -- that page has
+far more moving parts than the main dashboard, and the new logic there is
+a few lines of glue over already-tested methods; instead it was validated
+exploratorily via `AppTest` (seeded a ticker, clicked "Refresh for this
+ticker", confirmed the automatic snapshot caption and no exception,
+exercised "Reconstruct" both for a date with no snapshot yet, correctly
+falling back to Technical-Summary-only, and for today, correctly finding
+the just-created snapshot) rather than checked in as a maintained test.
+Real-data validation (live database, read-only, no network call):
+`get_latest_snapshot_as_of("NVDA"/"MA"/"AAL", as_of=2020-01-01)` all
+correctly return `None` (nothing had been ingested that far back in this
+environment), while `get_technical_summary_as_of(ticker, date.today())`
+matches the live `get_technical_summary` computation exactly (same
+coverage, same rating) for all three.
