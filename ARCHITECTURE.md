@@ -2138,3 +2138,172 @@ correctly return `None` (nothing had been ingested that far back in this
 environment), while `get_technical_summary_as_of(ticker, date.today())`
 matches the live `get_technical_summary` computation exactly (same
 coverage, same rating) for all three.
+
+## 33. Signal Predictive-Value Study (roadmap)
+
+Roadmap's next phase after Historical Research Reconstruction (§32): per
+the roadmap's own explicit framing at Historical Validation (§30) --
+"first establish historical correctness [then] a future separate phase
+can investigate whether research signals have predictive/decision value"
+-- this measures, read-only, whether any supplemental signal correlates
+with a ticker's own subsequent price return. **Never wired into
+`HistoricalScoringService` or any scoring/backtest path** -- this only
+measures whether a signal *would have* said anything, it does not make
+that happen; that remains a separate future decision either way.
+
+**Scope, decided explicitly before writing any code:**
+
+- **Technical Summary** is the only domain analyzed by default -- the
+  only one *capable* of testable historical depth, since it is a pure
+  function of `Price` history (`get_technical_summary_as_of`), which
+  accumulates day by day regardless of whether anyone ever refreshes
+  anything.
+- **Analyst Consensus / AI Research Rating** have no historical depth of
+  their own yet -- their only history is whatever `ResearchSnapshot` rows
+  §32's `snapshot_current_research` has recorded, which is close to zero
+  per ticker the moment that phase shipped. The methodology for
+  correlating them (`collect_analyst_consensus_observations`/
+  `collect_ai_research_assessment_observations`, using `AnalystConsensus.
+  rating_score`/`AIResearchAssessment.score` -- both already numeric, no
+  ordinal re-encoding needed) is fully designed and implemented, but each
+  deliberately raises `InsufficientSnapshotHistory` below
+  `MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE` (30) real `(ticker, snapshot)`
+  pairs, rather than silently computing a correlation from a handful of
+  near-simultaneous snapshots and reporting it as if it meant something.
+  No code change is needed to "enable" them later -- they start working
+  correctly the moment enough real history has accumulated.
+- **Fund Evidence is excluded by design, not data depth.** Unlike the
+  other three, it has no ordinal rating/score field at all (see
+  `FundEvidence`) -- purely descriptive (asset allocation, sector
+  weightings, operations, holdings), with no single bullish/bearish
+  reading to correlate against a forward return. A derived signal (e.g.
+  concentration or expense-ratio percentile) is a genuinely new research
+  question for a future phase, not this one's "does the existing signal
+  predict anything" -- so it is left out entirely rather than forcing an
+  artificial score onto it.
+
+**Methodology:** Pearson and Spearman correlation between a signal's
+value at each sampled historical date and the ticker's own actual forward
+return from that date, using AlphaLab's own stored `Price` history for
+the forward return -- no PIT filtering needed on that side, since it asks
+"what actually happened next in reality" (already-established fact),
+never "what did AlphaLab know" (which is what the *signal* side must
+still get right, via the same PIT-safe `as_of` reads §30-32 established).
+Reported descriptively only (`pearson`/`spearman`/`sample_size`), never
+with a computed "significant" verdict -- see the external review finding
+below for why. No `scipy` dependency (not otherwise used in this
+codebase): Spearman is computed as Pearson correlation of the
+rank-transformed values (`Series.rank()`, pure pandas/numpy), which is
+mathematically identical to pandas' own `method="spearman"` but avoids
+the transitive scipy dependency that path silently pulls in.
+
+**Self-review findings, fixed before this PR:**
+
+1. The Technical Summary path had no minimum-observation gate at all,
+   unlike the two snapshot-based domains -- in exactly the sparse-history
+   scenario this phase's own real-data run below hit, a handful of
+   surviving (non-REVIEW) samples could produce a technically-large `|r|`
+   flagged `approx_significant=True` purely by chance, the identical
+   spurious-significance trap `MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE` was
+   introduced to prevent for the other two domains. Fixed by moving the
+   sample-size gate into `_correlate` itself, applied uniformly to every
+   domain -- Technical Summary still always reports whatever it computed
+   (it never raises `InsufficientSnapshotHistory`), it just never flags a
+   tiny sample as significant.
+2. The module's own docstring claimed "no scipy dependency", but
+   `pandas.Series.corr(method="spearman")` transitively requires scipy at
+   runtime -- verified by actually blocking the import and reproducing
+   the crash. scipy happens to be installed in this environment but is
+   not a declared project dependency and is used nowhere else in
+   `alpha_lab`; a future contributor auditing "unused" pinned packages
+   could reasonably drop it, silently breaking this module. Fixed via the
+   rank-transform approach above (verified correct against pandas' own
+   Spearman on a hand-checked example, and verified to still work with
+   scipy's import actively blocked).
+
+**External review findings, fixed after opening this PR:**
+
+3. **The significance flag treated repeated snapshots as independent
+   observations.** `|r| > 2/sqrt(n)` assumes `n` independent samples, but
+   `_collect_snapshot_domain_observations` counts every persisted
+   `ResearchSnapshot` for a ticker as one observation regardless of how
+   close together in time they were recorded -- two snapshots a day apart
+   have forward-return windows overlapping in all but one day, which is
+   the classic clustered/repeated-measures problem (see e.g.
+   `statsmodels`' GEE estimator, built for exactly this). Treating that
+   raw count as `n` in the threshold overstates confidence. Rather than
+   build the clustering-aware correction this would need (minimum
+   snapshot spacing, or a cluster-robust estimator) for what is still a
+   near-zero-history, exploratory phase, `approx_significant` was removed
+   entirely -- `CorrelationResult` now reports `pearson`/`spearman`/
+   `sample_size` descriptively and leaves the judgment of whether that is
+   compelling to whoever reads the result, for every domain including
+   Technical Summary (which has no clustering concern of its own, since
+   `sample_interval_days` already keeps its own samples non-overlapping,
+   but shares the same reporting shape for consistency).
+4. **The snapshot-domain forward-return anchor could use a price not yet
+   known at snapshot time.** `_collect_snapshot_domain_observations` used
+   `entry.created_at.date()`'s own closing price as the entry price for
+   the forward return -- but unlike Technical Summary's `as_of` (a
+   deliberate end-of-day reconstruction boundary), `entry.created_at` is a
+   real, uncontrolled intraday timestamp: a snapshot recorded mid-session
+   (e.g. 11:00) could be paired with that same day's own close, which
+   plainly was not yet known at that moment. Fixed by anchoring on the
+   first trading day's close strictly after the snapshot date instead
+   (`prices.index.searchsorted(..., side="right")`) -- Technical Summary's
+   own sampling is untouched, since its `as_of` already represents "known
+   by end of this day" by construction, not a raw event timestamp.
+
+**Real-data run** (live database, read-only, no network call) -- an
+important, genuine finding discovered by actually running the study, not
+a bug to fix: every domain reports **zero testable observations today**,
+for two related-but-distinct reasons. Technical Summary: this
+environment's entire multi-year `Price` history was bulk-backfilled in
+one real moment (`run_core_refresh` ingests up to two years per call), so
+every row shares roughly one `Price.ingested_at` regardless of how far
+back its `date` is -- every sampled historical date still predates that
+real ingestion moment, so `get_technical_summary_as_of` correctly (not a
+bug) returns REVIEW for all of them, exactly as PIT-safety demands.
+Analyst Consensus / AI Research Rating: `InsufficientSnapshotHistory`, as
+designed (§32's automatic snapshotting only just started). Both amount to
+the same underlying constraint -- **this phase needs real elapsed
+wall-clock time with live, incremental usage, not more code** -- and the
+correlation study working correctly is exactly what surfaces that
+honestly instead of fabricating a number. Per the agreed methodology
+("start with correlation; only build the backtest-overlay comparison for
+a signal that passes that first filter"), since nothing passed the filter
+today, **no backtest-overlay comparison is built in this phase** -- there
+is nothing valid to run it against yet. Re-running `scripts/analyze_
+signal_predictive_value.py` after enough real time has passed (this
+environment's own next auto-refresh cycles onward) is expected to start
+producing real Technical Summary results; Analyst Consensus/AI Research
+Rating need enough "Refresh for this ticker"/batch-script runs to clear
+30 observations across the universe.
+
+**Deliberately not done:** no scoring/backtest integration of any kind,
+regardless of what a future correlation run finds -- that remains a
+separate decision. A known, accepted minor inefficiency, not fixed here:
+running the Analyst Consensus and AI Research Rating studies back to back
+(as the CLI script does) re-walks each ticker's `ResearchSnapshot` history
+and re-deserializes the same payloads twice; not worth the added
+complexity while both return zero real observations in every environment
+that has run this so far.
+
+**Validation:** `tests/test_signal_predictive_value.py` (12 tests) --
+`_correlate`'s own math (perfect positive/negative correlation, a small
+pearson for pure noise, too few observations returns `None` not a crash,
+and confirmation `CorrelationResult` reports its true `sample_size`
+without any `approx_significant` attribute even for a technically-perfect
+correlation from 5 points), `collect_technical_summary_observations`'
+pairing/skip logic (correct forward-return pairing via a hand-computed
+example, REVIEW samples skipped, short-history and untracked tickers
+produce zero observations without crashing) via a monkeypatched
+`SupplementalResearchService` isolating this module's own logic from
+indicator computation (already exhaustively tested in `tests/
+test_technical_summary.py`), `collect_analyst_consensus_observations`
+raising below the threshold / succeeding once enough real snapshots exist
+(seeded directly, mirroring this session's established `_set_created_at`
+PIT-testing pattern), and the external-review regression: a snapshot
+recorded mid-session is paired with the next trading day's close, never
+that same day's own close. Full test suite and all three established
+smoke tests pass. `git diff --check`: clean.
