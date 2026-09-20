@@ -6,6 +6,7 @@ from alpha_lab.ai.research import (
     OpenAIResearchProvider,
     configured_ai_research_provider,
 )
+from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
 
 __all__ = [
     "AIResearchProvider",
@@ -13,5 +14,6 @@ __all__ = [
     "DeterministicAIResearchProvider",
     "analyze_documents",
     "OpenAIResearchProvider",
+    "RuleBasedFinancialResearchProvider",
     "configured_ai_research_provider",
 ]

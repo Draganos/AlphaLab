@@ -407,7 +407,11 @@ class MarketScreenerService:
             "valuation": _category_score(percentile, "valuation"),
             "momentum": _category_score(percentile, "momentum"),
             "financial_strength": _category_score(percentile, "financial_strength"),
-            "ai_research": data["ai"].ai_rating if data["ai_attributable"] else None,
+            "ai_research": (
+                data["ai"].ai_rating
+                if data["ai_attributable"] and _ai_is_scoring_eligible(data["ai"])
+                else None
+            ),
             "shareholder_return": _category_score(percentile, "shareholder_return"),
         }
         category_coverage = _category_evidence_coverage(
@@ -564,6 +568,38 @@ def _ai_is_attributable(ai: AIResearchAnalysis | None) -> bool:
         and ai.prompt_version
         and ai.model
     )
+
+
+# ai_research SCORING eligibility, deliberately separate from
+# _ai_is_attributable's data-completeness check above: an analysis can be
+# fully attributable (real evidence, real fingerprint) and still not be
+# trusted to move a 10%-weighted category in `overall_score`
+# (config/default.yaml's `rating_weights.ai_research`). Being excluded
+# here has no effect on whether the analysis is computed, persisted, or
+# shown in Company Research / Evidence Coverage -- only on whether its
+# `ai_rating` is allowed to participate in the weighted score. A provider
+# not listed here still contributes its full `category_coverage`/
+# `ai_attributable` signal (real evidence exists), it just scores as
+# UNAVAILABLE for `overall_score` purposes -- automatically excluded from
+# both the weighted sum and its denominator, the same as any other
+# missing category.
+#
+# `RuleBasedFinancialResearchProvider` -- the deterministic phrase-lexicon
+# default introduced for the Document Evidence Engine (see
+# ARCHITECTURE.md) -- is deliberately NOT included: its own calibration
+# study (`alpha_lab.analytics.signal_predictive_value`, the Signal
+# Predictive-Value phase) found a near-zero real correlation with actual
+# forward returns on the only sample tested so far (pearson +0.065,
+# spearman +0.058, n=59 across AAL/MA/NVDA) -- not evidence that an
+# unvalidated V1 heuristic belongs in a real, weighted investment score.
+# Add a provider's name here only once it has been validated the same
+# way a scoring input should be, not merely because it produces a
+# plausible-looking number.
+_SCORING_ELIGIBLE_AI_PROVIDERS: frozenset[str] = frozenset({"openai"})
+
+
+def _ai_is_scoring_eligible(ai: AIResearchAnalysis | None) -> bool:
+    return ai is not None and ai.provider in _SCORING_ELIGIBLE_AI_PROVIDERS
 
 
 def _select_estimate_series(

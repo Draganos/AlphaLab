@@ -2493,3 +2493,498 @@ missing.
 `latest_by_ticker` reports each ticker's true latest date -- a regression
 guard against `GROUP BY`'s correctness, not just its existence. Full test
 suite and all three smoke tests pass. `git diff --check`: clean.
+
+## 35. Evidence Coverage Hardening: Investigation (no code change)
+
+Prompted by a direct question -- "which point do we work on hardening
+coverage" -- rather than a reported bug. `scripts/coverage_report.py`
+against the live 11-ticker universe (3 individual equities -- AAL, MA,
+NVDA -- 2 ETFs, 6 macro-proxy indices/commodities) showed two scoring
+categories, `analyst_revisions` and `ai_research`, at **0% coverage
+across every single ticker**, including MA and NVDA, which are at 100%
+on every other category. Both were traced to root cause against the
+real database rather than guessed at; neither needed a code change.
+
+**`analyst_revisions`: working as designed, needs elapsed time, not
+code.** Real `Estimate` snapshots exist for AAL/MA/NVDA, but only two per
+fiscal period, 3 days apart (this environment's estimates were captured
+2026-09-14 and 2026-09-17). `alpha_lab.ratings.estimates.
+calculate_revision_factors` needs an observation at least 7 days older
+than the current one to compute even its shortest window, so every
+revision metric correctly returns `None` today. The same "needs real
+elapsed time, not more code" shape as §32/§33's own findings -- this
+resolves itself as ingestion keeps running day over day.
+
+**`ai_research`: a real, pre-existing capability gap -- not a bug, and
+not a case for wiring in the newer AI system.** The screener's
+`ai_research` scoring category (`alpha_lab.screener.service`) is fed by
+`alpha_lab.ai`'s `AIResearchAnalysis`/`AIResearchService.ensure_all()` --
+an "attributable to source documents" design gated by `_ai_is_attributable`
+requiring, among other fields, non-empty `analyzed_document_ids`. That
+pipeline needs `CompanyDocument` rows (actual filing/press-release text)
+to analyze, and `company_documents` has **zero rows in this database**.
+Tracing further: `alpha_lab.providers.interfaces.CompanyDocumentProvider`
+is declared but has no concrete implementation anywhere in the codebase
+-- the existing `SECCompanyFactsProvider` only fetches structured XBRL
+numeric facts (revenue, EPS, ...), never narrative filing text. This
+feature was scaffolded (interface + consumer service) back in the
+project's first PR and never completed with a real document source --
+an honest gap the coverage report is correctly surfacing, not a defect
+in what exists.
+
+Separately, `alpha_lab.research.ai_rating`'s `AIResearchAssessment` --
+the system behind the Company Research page's AI Research Rating --
+*does* have real data in this environment (verified: POSITIVE/68.75 for
+MA, POSITIVE/75.0 for NVDA, NEUTRAL/43.75 for AAL). It would be tempting
+to wire this into the empty `ai_research` scoring category, but its own
+module docstring explicitly forbids exactly that: it "interprets
+already-validated AlphaLab evidence" and "must not be blended into
+[`overall_score`]... or the existing `ai_research` rating category...
+which is a different, pre-existing system left completely untouched by
+this module." That boundary is deliberate, not an oversight -- it keeps
+the objective fundamental score and AI qualitative synthesis
+architecturally separate. Blending them to make one coverage number look
+better would be exactly the kind of fabricated-looking improvement this
+project's evidence-first principle exists to prevent.
+
+**Conclusion, recorded rather than acted on:**
+
+| Finding | Status |
+|---|---|
+| `analyst_revisions` coverage | Working correctly; needs elapsed time, not code |
+| `ai_research` scoring coverage | Known unimplemented capability (no document-ingestion provider exists) |
+| `AIResearchAssessment` (AI Research Rating) | Working correctly and independently, by design |
+| Coverage report itself | Correctly surfacing a real gap, not miscomputing anything |
+| Fundamental score / `ai_research` category boundary | Correct as designed; not touched |
+
+**Next roadmap phase, scoped but not started: Document Evidence Engine
+(SEC filing ingestion → legacy `ai_research` scoring).** The narrowest
+version that would close this specific gap: SEC EDGAR 10-K/10-Q filing
+text ingestion into `CompanyDocument` (CIK resolution, filing/accession
+metadata, filed date for PIT, content hash/dedup, source URL), feeding
+the `AIResearchService`/`AIResearchAnalysis` pipeline that already exists
+and is already wired into scoring -- no scoring-architecture change
+needed, only the missing data source. Deliberately out of scope for a
+first version: 8-K filings, press releases, arbitrary web scraping, and
+any change to `AIResearchAssessment`, Research Stance, or the fundamental
+score's own weighting -- each is a separate decision for a later phase,
+not bundled into closing this one gap.
+
+**Validation:** none -- no code changed. This section documents a live-
+database investigation and its conclusion.
+
+### 35.1 Follow-up: per-ticker sweep against the real dashboard code path
+
+Continued at explicit request ("GDX only has data for momentum, many
+market caps are missing") -- a full sweep of every evidence domain for
+every real ticker (AAL, MA, NVDA, FTEC, GDX), using `build_security_
+coverage_summary` (the exact function the Evidence & Coverage Dashboard
+itself calls), not ad hoc queries. Every apparent gap traced to a
+verified, correct reason; none needed a code change, and none was
+"fixed" by inserting a number.
+
+**Self-correction, recorded rather than hidden.** The first pass of this
+sweep queried `current_fund_evidence`'s JSON payload for a top-level
+`total_net_assets` key and found it `None` for GDX/FTEC, and reported
+that as a bug. It was not one -- `build_fund_evidence` correctly nests
+that field under `payload["operations"]["total_net_assets"]`, and it was
+there all along: GDX `total_net_assets=23608.55`, `expense_ratio=0.0051`;
+FTEC `total_net_assets=691876.75`, `expense_ratio=0.00084` -- both
+persisted values matched a fresh live `funds_data.fund_operations` pull
+exactly. (Yahoo's reporting units for this specific field were not
+independently reconciled against its own separate `info["totalAssets"]`
+figure -- the two don't share a clean scale factor for FTEC -- so this
+records that the persisted value faithfully matches the source, not a
+verified real-world dollar amount; that ambiguity belongs to yfinance's
+own API, not to anything AlphaLab computes.) The mistake here was
+querying the wrong JSON path, not a defect in the persisted data.
+Re-running `scripts/refresh_supplemental_research.py GDX FTEC` (the
+correct, legitimate way to refresh this domain) confirmed the same real
+values were already present before that run. Recorded here so this
+false alarm isn't repeated.
+
+**GDX/FTEC have materially more real coverage than the 8-category
+scoring view alone suggests.** That view correctly shows 5 of 8
+categories `NOT_APPLICABLE` for an ETF (`business_quality`, `earnings_
+growth`, `financial_strength`, `valuation`, `shareholder_return`,
+`analyst_revisions`) and only `momentum` populated -- which reads as
+"only momentum" if that is the only view consulted. The fuller Evidence
+Coverage view (16 rows, not 8) shows real, populated evidence for
+Technical (`FULL`, 1.0), Fund Evidence (`FULL`, 1.0), News (`FULL`, 1.0,
+20 real articles), Macro Regime (`FULL`, 1.0), and AI Evidence
+(`PARTIAL`, 0.87, 2/3 required dimensions assessable) -- five domains
+with genuine data the narrower scoring-category view doesn't surface.
+Only Analyst Consensus/History/Revisions (`NO_EVIDENCE`/`NOT_COMPUTED`
+-- confirmed live: `yf.Ticker("GDX"/"FTEC").get_recommendations()` and
+`.get_analyst_price_targets()` both return empty, genuinely no sell-side
+analyst coverage exists for either ETF on Yahoo) and the `ai_research`
+scoring category (§35's already-documented CompanyDocument gap) are
+without evidence -- both real, both already explained, neither a defect.
+
+**AAL's four "missing" valuation/quality metrics are correct, deliberate
+refusals to compute a misleading ratio -- verified against live data,
+not assumed:**
+
+| Metric | Guard | Verified live |
+|---|---|---|
+| `roe` (Business Quality) | `_positive(total_equity)` | AAL's `total_equity` = **-$3.97B** (real, confirmed in `fundamentals`) |
+| `debt_equity` (Financial Strength) | same negative-equity guard | same |
+| `price_fcf` (Valuation) | `_positive(free_cash_flow)` | AAL's latest-quarter FCF = **-$351M** |
+| `forward_pe` (Valuation) | `_positive(forward_eps)` | AAL's consensus forward EPS = **-$0.17** (confirmed in `raw_metrics["current_consensus_eps"]`) |
+
+Net income divided by negative equity, or price divided by negative FCF
+or negative forward EPS, produces a number that looks like a ratio but
+means nothing (a "negative P/E" convention issue well known in equity
+research) -- `alpha_lab.ratings.quality`/`alpha_lab.ratings.valuation`
+correctly return `None` rather than publish it. AAL's own well-documented
+post-2020 balance sheet (heavy debt, negative equity) is the real cause;
+there is no missing refresh or provider call that would change this.
+`shareholder_return` being `NO_EVIDENCE` for AAL is the same shape:
+confirmed live that AAL pays no dividend (`dividendYield`/`dividendRate`
+both `None`, `payoutRatio` = 0.0) and has no buyback line in its
+quarterly cashflow statement -- genuinely no evidence exists, not a
+capture failure.
+
+**Market cap, precisely:** of the 11 tracked tickers, 3 (AAL/MA/NVDA)
+have it; the other 8 don't, for two different and both-correct reasons.
+6 (`CL=F`, `DX-Y.NYB`, `GC=F`, `^IRX`, `^TNX`, `^VIX`) are futures/
+currency-index/rate instruments that structurally have no market cap at
+all -- forcing a number here would be fabrication, not hardening. The
+remaining 2 (FTEC, GDX) are ETFs, for which Yahoo genuinely never
+reports `marketCap` (confirmed live: `None` for both) -- the correct
+size analog for a fund is AUM, already captured as `FundEvidence.
+total_net_assets`, and (per the self-correction above) was already
+present and correct.
+
+**Conclusion:** after tracing every apparent gap in this universe to
+verified root cause, none was fixable by more code, a fresh refresh, or
+a corrected calculation -- every one is either a genuine absence of real
+evidence (backed by a live check, never assumed) or this codebase's own
+deliberate refusal to compute a misleading ratio from a genuine negative
+input. The two items already on record from §35's first pass
+(`analyst_revisions` needing elapsed time; `ai_research` needing the
+still-unbuilt Document Evidence Engine) remain the only real, actionable
+gaps in this universe.
+
+**Validation:** none -- no code changed. Every claim in this subsection
+was checked against either the live database or a live Yahoo Finance
+call at investigation time, not assumed from code reading alone.
+
+## 36. Document Evidence Engine (SEC filing ingestion + local AI research)
+
+Closes the `ai_research` scoring gap §35 documented: `CompanyDocumentProvider`
+was declared as an interface in this project's very first PR and never
+implemented, so `AIResearchService.ensure_all` (which only ever *read*
+`CompanyDocument`, never wrote it) had nothing to analyze. This phase
+builds both missing halves -- real SEC filing ingestion, and a real
+analysis step -- deliberately **without any external LLM API**, per
+explicit direction: no OpenAI/Anthropic key is configured in this
+environment, and a $0, fully local, fully reproducible design was chosen
+over buying one. That reproducibility is itself a real advantage for this
+codebase's own point-in-time discipline: "given only documents filed by
+date X, what would this classifier have produced" is answerable exactly
+and deterministically, which a live LLM call never fully guarantees.
+
+**Ingestion: `alpha_lab.providers.sec_filings.SECFilingDocumentProvider`.**
+The `CompanyDocumentProvider` implementation, reusing infrastructure that
+already existed rather than duplicating it: `SECClient`'s identity/pacing/
+caching (the same class `SECCompanyFactsProvider` already uses for XBRL
+facts) and `SECCompanyFactsProvider.company_tickers()`'s existing
+ticker->CIK resolution. Fetches `/submissions/CIK{cik}.json`, filters to
+`SUPPORTED_FORMS` (10-K/10-K-A/10-Q/10-Q-A, the same scope
+`SECCompanyFactsProvider` already uses -- 8-K, press releases, and any
+non-SEC source are deliberately out of scope for this first version),
+and extracts plain text from each filing's real HTML via a new,
+dependency-free `html_to_text` (stdlib `html.parser.HTMLParser` only, per
+this project's established preference for not adding a dependency when
+the standard library suffices -- see the Signal Predictive-Value phase's
+own scipy-avoidance). Bounded at `MAX_DOCUMENT_TEXT_CHARS` (500,000
+characters) as a defensive guard against a pathological filing, not a
+content judgement. One filing document failing to fetch skips just that
+one (mirrors `NewsService.refresh`'s "one item failing never aborts the
+batch"), and a ticker with no CIK or no supported filing at all returns
+`[]`, never a placeholder.
+
+Verified live against real SEC EDGAR data before writing any test:
+CIK resolution for AAL/MA/NVDA, a real filing index (NVDA's 7 most recent
+10-K/10-Q filings, correct forms/dates/accession numbers), a real ~2MB
+inline-XBRL 10-K fetched and reduced to ~340KB of genuinely readable
+plain text (`"...may negatively impact our gross margins and financial
+results. Factors that have caused ... to underestimate or overestimate
+demand..."` -- real NVDA 10-K language, not a fabricated example).
+
+**Persistence: `alpha_lab.ai.documents.ingest_company_documents`.** The
+half `AIResearchService` was always missing. Append-only and
+content-hash-deduplicated exactly like `NewsService.refresh` -- fetch
+happens entirely before any write, so a failed ingestion leaves prior
+documents untouched, and re-ingesting an unchanged filing is a no-op, not
+a duplicate row. `CompanyDocument` gained two columns via the established
+additive-migration pattern: `retrieved_at` (when AlphaLab itself fetched
+the document -- the same PIT-safety shape as every other evidence table's
+`retrieved_at`/`ingested_at`, never the filing's own `document_date`,
+which a historical read could otherwise leak) and `content_hash` (a
+unique index, `WHERE content_hash IS NOT NULL`, mirroring `estimates`'
+own `observation_hash` pattern). New `scripts/refresh_company_documents.py`
+mirrors `scripts/load_sec_facts.py`'s CLI shape exactly.
+
+**Analysis: `alpha_lab.ai.rule_based.RuleBasedFinancialResearchProvider`
+-- the new default.** A deterministic, phrase-lexicon classifier across
+all nine `AIResearchResult` score dimensions (guidance, demand, margin
+outlook, competitive position, management confidence, balance-sheet
+commentary, risk, sentiment, catalyst), extending the same lexicon-based
+approach `DeterministicAIResearchProvider` already used as a test fixture
+into a real per-dimension design meant for production use. Every excerpt
+in `evidence` is a verbatim slice of the real document text (never
+generated), tied to the real `document_id` it came from; `key_positives`/
+`key_risks` are the literal phrases matched, not a paraphrase. Confidence
+is tied to how much real signal was actually found (`total_matches / 10`,
+capped at 1.0) rather than merely how many documents were supplied -- a
+filing set containing none of these phrases is honestly reported as
+zero-confidence, not confidently "neutral" the way `DeterministicAIResearchProvider`'s
+own document-count-based confidence would report it.
+
+`configured_ai_research_provider()` now defaults to this provider rather
+than "disabled": unlike `OpenAIResearchProvider`, it needs no API key,
+makes no external call, and costs nothing to run, so unlike a paid
+provider it has no reason to require explicit opt-in.
+`ALPHALAB_AI_PROVIDER=disabled` still turns AI research off entirely, and
+`ALPHALAB_AI_PROVIDER=openai` still opts into the paid provider -- and,
+unchanged from before this phase, still fails closed (`None`) rather than
+silently substituting the local provider if `OPENAI_API_KEY` isn't also
+set. An explicit request for one provider is never silently satisfied by
+a different one.
+
+**Deliberately not done, per explicit scope decision:** no `scikit-learn`
+or trained-classifier step (would need a labeled dataset this phase does
+not build), no FinBERT or other pretrained model (adds a real, heavy
+dependency for a V1 that doesn't need one), no 8-K/press-release
+ingestion, and no change to `AIResearchAssessment`/Research Stance/the
+fundamental score's own weighting -- each is a separate decision for a
+later phase. The staged plan this phase's V1 belongs to (rules -> trained
+classifier -> pretrained financial-language model -> calibration against
+outcomes) is recorded here for that later phase to pick up, not started
+early.
+
+**Real-data validation (live database, real network calls, no
+fabrication):** `scripts/refresh_company_documents.py AAL MA NVDA`
+stored 45/30/25 real filing documents respectively (AAL back to 2015, MA
+to 2019, NVDA to 2020 -- whatever SEC's own "recent filings" index
+returns; FTEC/GDX and the macro-proxy tickers correctly yield zero, since
+ETFs and indices file different SEC forms, not 10-K/10-Q). Re-running
+`scripts/rebuild_research.py` (the same script that already calls
+`AIResearchService.ensure_all` via `MarketScreenerService` -- no new
+call site needed) then produced real `AIResearchAnalysis` rows: AAL
+rated 44.44, MA 38.89, NVDA 36.11, all at confidence 1.0, each citing
+both real strengths (`"strong demand"`, `"competitive advantage"`) and
+real risks (`"increased competition"`, `"margin decline"`) drawn from
+their own actual filings. Re-running `scripts/coverage_report.py`
+confirmed the fix directly: `ai_research` coverage for AAL/MA/NVDA moved
+from **0.0 to 1.0**, with `_ai_is_attributable` (the exact gate the
+screener's scoring category depends on) verified `True` against the real
+persisted analysis.
+
+**Validation:** `tests/test_sec_filings.py` (10 tests) -- `html_to_text`
+(visible-text extraction, script/style skipped, block-tag breaks, entity
+unescaping, the character bound), `SECFilingDocumentProvider` (unresolvable
+ticker returns `[]`, form filtering, `since` filtering, one failed fetch
+never aborts the batch, real extraction not raw HTML) via a fake SEC
+client -- no test talks to real EDGAR. `tests/test_company_document_ingestion.py`
+(6 tests) -- new documents stored with PIT fields set, idempotent re-ingestion,
+multiple distinct documents, empty-provider-result writes nothing, `since`
+passed through, ticker case normalized. `tests/test_rule_based_ai_research.py`
+(10 tests) -- determinism for identical input, positive/negative phrase
+detection, zero score and zero confidence with no matching phrases,
+confidence scaling with real signal density, `risk_score`'s distinct
+severity-count polarity, evidence excerpts verified verbatim against the
+source text, scores bounded to the schema's range even under repeated-phrase
+stress, graceful handling of zero documents and documents without an id.
+`tests/test_ai_search_phase3.py` gained four tests for
+`configured_ai_research_provider`'s selection logic (rule-based default,
+`disabled`, `openai` with a key, `openai` without one never silently
+falling back). Full test suite and all three established smoke tests
+pass -- the Phase 3 smoke test's own rating fluctuation between runs was
+independently confirmed unrelated to this phase (it uses its own explicit
+`DeterministicAIResearchProvider` fixture, untouched here; the drift
+traces to that smoke test's own `date.today()`-relative `Estimate`
+fixtures shifting real analyst-revision windows day to day, the same
+"needs real elapsed time" shape §35 already documented elsewhere).
+`git diff --check`: clean.
+
+### 36.1 Self-review findings, fixed before merge
+
+A `/code-review --diff high` pass against this phase's own diff (per
+explicit request: "bug check") found six real issues, all verified
+against actual code or live data before fixing, none requiring a design
+change:
+
+1. **A single unsafe excerpt silently zeroed an entire ticker's
+   analysis.** `EvidenceReference`'s own `no_price_target` validator
+   raises `ValueError` if an excerpt contains "price target"/"target
+   price" (a real 10-K/10-Q risk-factor section discussing analyst price
+   targets near an otherwise-real lexicon match), and
+   `analyze_documents` catches *any* exception from the whole `analyze()`
+   call and returns `None` for the whole result -- reproducing the exact
+   0% `ai_research` coverage this phase exists to fix, for any ticker
+   unlucky enough to have one such excerpt. Confirmed by directly
+   constructing the crash-triggering `EvidenceReference` and observing
+   the real `ValidationError`. Fixed in `RuleBasedFinancialResearchProvider._to_evidence`:
+   the `try/except ValueError` now wraps each individual excerpt, so one
+   unsafe excerpt is dropped from `evidence` while the phrase match still
+   counts toward the score (`test_analyze_survives_an_excerpt_that_would_trip_the_price_target_validator`).
+2. **The filing index was permanently cached after its first fetch.**
+   `SECFilingDocumentProvider.get_documents` called `client.get_json`
+   with the default `refresh=False` for `/submissions/CIK{cik}.json` --
+   correct for an individual filing document (immutable once filed) but
+   wrong for the index itself, which is exactly what tells a re-run
+   about filings made since the last one. Fixed by passing
+   `refresh=True` for that one call
+   (`test_get_documents_refreshes_the_submissions_index_every_call`).
+3. **Older filings were silently truncated.** `filings.recent` in SEC's
+   submissions JSON is capped at roughly the most recent ~1,000 filings
+   across *every* form type combined; a long-lived filer's older 10-Ks/
+   10-Qs live instead in paginated `filings.files` entries, fetchable at
+   `/submissions/{name}`. Confirmed live: NVDA has a paginated file
+   covering 1998-03-06 to 2020-08-17 (1,484 filings), MA one covering
+   2001-06-06 to 2019-03-02 (1,379 filings) -- matching this phase's own
+   earlier real-data validation's observed cutoffs exactly. Fixed by
+   adding `_filing_rows()` and merging every `filings.files` page into
+   the row set before filtering to `SUPPORTED_FORMS`
+   (`test_get_documents_merges_paginated_filing_history`).
+4. **No caching on the filing-document HTML fetch**, so every re-run
+   re-downloaded and re-parsed every already-ingested filing, not just
+   new ones. Fixed as a direct consequence of finding 6 below: routing
+   the fetch through `SECClient.get_text`, which shares `get_json`'s
+   disk-cache pattern, made previously-fetched filing text free on
+   subsequent runs.
+5. **N+1 dedup queries.** `ingest_company_documents` issued one
+   `SELECT` per candidate document to check `content_hash` membership,
+   so a ticker with dozens of already-ingested filings paid one round
+   trip per filing on every re-run just to discover it had nothing new.
+   Fixed by batching into a single
+   `SELECT content_hash WHERE content_hash IN (...)` before the loop,
+   with an in-loop `existing_hashes.add(...)` guard against duplicate
+   text within the same batch (no chunking needed: realistic per-ticker
+   filing counts are well under SQLite's ~999 bind-parameter limit,
+   unlike the ticker-universe case elsewhere in this codebase that does
+   need it). `test_ingest_deduplicates_identical_text_within_the_same_batch`
+   and `test_ingest_stores_only_the_new_documents_in_a_mixed_batch` cover,
+   respectively, the within-batch guard and the across-runs lookup.
+6. **Encapsulation violation.** The original filing-document fetch
+   reached into `SECClient`'s private `_last_request` attribute from
+   outside the class to implement its own second HTTP fetch path
+   instead of reusing `SECClient`'s shared identity/pacing/retry
+   handling. Fixed by adding a proper public `SECClient.get_text(url,
+   *, refresh=False) -> str | None` method (same disk-cache/pacing/retry
+   shape as `get_json`, returns `None` rather than raising on total
+   failure) and removing the provider's own fetch method entirely
+   (`tests/test_sec_edgar_client.py`, 4 tests;
+   `test_get_documents_uses_get_text_not_a_second_http_client`).
+
+`tests/test_sec_filings.py` was fully rewritten (13 tests, up from 10)
+to mock `get_json`/`get_text` instead of a since-removed method, and
+gained the three regression tests above (findings 2, 3, 6).
+`tests/test_company_document_ingestion.py` grew to 8 tests (finding 5).
+`tests/test_rule_based_ai_research.py` grew to 11 tests (finding 1).
+Full test suite, all three smoke tests, and `git diff --check` all
+re-run clean after these fixes (one unrelated pre-existing failure in
+`tests/test_dependency_lock.py`, confirmed via `git stash` to fail
+identically without this phase's changes -- installed package versions
+in this environment have drifted from `requirements.lock`, unrelated to
+this phase).
+
+### 36.2 External review: two real findings, fixed before merge
+
+A detailed external review of this PR verified every claim against real
+code before acting on it (this codebase's own established practice --
+see §33/§34's identical treatment of earlier reviews). Two findings were
+real and are fixed here; a third ("500K-char truncation could lose later
+sections of a very large 10-K") is a real, acknowledged limitation of the
+existing defensive bound, correctly flagged as future work rather than a
+merge blocker, and is left as-is per that same judgment.
+
+**1. Document identity was based on `(ticker, text)`, not the filing's
+own identity.** SEC filings carry their own unique submission identifier
+(accession number); a 10-K and a later 10-K/A amendment are two distinct
+information events with two distinct accessions, but could in principle
+carry byte-identical extracted text (a purely procedural amendment, or
+two exhibits sharing boilerplate). The old `_content_hash(ticker, text)`
+would have silently collided such a pair into one stored row, losing a
+real, distinct filing event. Fixed: `_content_hash` now prefers `source`
+-- for `SECFilingDocumentProvider`, a URL that already uniquely encodes
+CIK + accession + primary document -- falling back to `(ticker, text)`
+only when a provider supplies no source URL at all. New regression test:
+`test_ingest_treats_identical_text_from_a_different_source_as_a_distinct_document`
+(two documents, identical text, different `source` -> both stored); also
+added `test_content_hash_falls_back_to_text_when_no_source_is_supplied`.
+Two existing tests whose fixture data reused the same default `source`
+across logically-distinct documents were updated to give each its own
+source, matching how `SECFilingDocumentProvider` actually behaves (every
+real document it returns has a unique URL).
+
+**2. The new rule-based provider was scoring-eligible by default, with
+no validation behind that.** `ai_research` is a pre-existing scoring
+category (`rating_weights.ai_research: 0.10` in `config/default.yaml`,
+wired into `overall_score` since Phase 3) that was always empty before
+this PR, because `configured_ai_research_provider()` defaulted to
+`None`. This PR's real, load-bearing change is making that default
+return `RuleBasedFinancialResearchProvider()` instead -- which means the
+already-existing 10%-weighted category starts actually contributing a
+real number to `overall_score` the moment documents are ingested, using
+a brand-new, deterministic phrase-lexicon heuristic that has not been
+validated against real outcomes. §37's own calibration study
+independently found a near-zero real correlation between this exact
+signal and real forward returns (pearson +0.065, spearman +0.058, n=59)
+-- reinforcing rather than contradicting the concern.
+
+Fixed by separating *attributability* (real evidence, real fingerprint --
+`_ai_is_attributable`, unchanged) from *scoring eligibility* (a new,
+separate `_ai_is_scoring_eligible` check against an explicit
+`_SCORING_ELIGIBLE_AI_PROVIDERS` allowlist, currently `{"openai"}`).
+`RuleBasedFinancialResearchProvider`'s analysis is still computed,
+persisted, and shown everywhere it already was (Company Research,
+Evidence Coverage, the raw `AIResearchAnalysis` row) -- only
+`categories["ai_research"]` in the `overall_score` computation now
+requires both checks to pass, so an unvalidated provider's rating is
+excluded from the weighted score exactly the way any other missing
+category already is (automatically dropped from both the weighted sum
+and its denominator). This mirrors the precedent already established for
+`AIResearchAssessment`/AI Research Rating -- the newer, separate AI
+system whose own module docstring "explicitly forbids ever feeding
+scoring" -- extended to this older system's own new, unvalidated
+provider.
+
+Verified live against the real database: `MarketScreenerService.
+build_live_records()` for AAL/MA/NVDA now reports `category_scores
+["ai_research"] = None` for all three (correctly excluded from
+`overall_score`) while `ai_coverage = 1.0` for all three (real evidence
+still recognized and displayed) -- exactly the intended split. New
+regression test: `test_ai_scoring_eligibility_is_separate_from_
+attributability` (a `RuleBasedFinancialResearchProvider` analysis is
+attributable but not scoring-eligible; an `openai` analysis is both).
+`scripts/smoke_test_phase3.py`'s own printed ratings shifted slightly
+(e.g. 65.79 -> 66.67) as an expected, correct consequence: its
+`DeterministicAIResearchProvider` test fixture (`provider=
+"deterministic-fixture"`) is not on the allowlist either, so its
+`ai_research` contribution is now also correctly excluded -- the smoke
+test asserts on ethical/screening outcomes, not exact score values, so
+this is not a regression.
+
+**A structural gap in CI coverage, surfaced by the same review.** PR #41
+and PR #42 (both intentionally stacked directly on this PR's own branch,
+per explicit instruction, rather than on `main`) have zero GitHub Actions
+check runs -- confirmed via the API, not assumed. Root cause:
+`.github/workflows/ci.yml` triggers only on `pull_request: branches:
+[main]`; a PR whose base is another feature branch never matches that
+trigger. This is expected to self-resolve as the stack merges bottom-up
+(GitHub retargets a PR's base to its former base's own target once that
+base branch merges and is deleted, at which point the retargeted PR
+starts matching the trigger) -- but until then, every "full test suite
+green"/"smoke tests pass" claim for #41/#42 in this session has been a
+local run only, never independently confirmed by the repository's own
+CI. Left for the user to decide whether to also widen the workflow's
+trigger to cover stacked branches before that point, since that is a
+repo-wide CI cost/coverage tradeoff, not a code correctness question.
+
+**Validation:** full test suite, all three smoke tests, and `git diff
+--check` all re-run clean after these two fixes (same unrelated
+pre-existing `test_dependency_lock.py` failure as above).

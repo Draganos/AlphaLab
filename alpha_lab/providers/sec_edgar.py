@@ -112,6 +112,39 @@ class SECClient:
                     time.sleep(0.5 * (attempt + 1))
         raise RuntimeError(f"SEC request failed without modifying stored data: {url}") from error
 
+    def get_text(self, url: str, *, refresh: bool = False) -> str | None:
+        """Fetch and cache the raw text at an already-fully-qualified URL --
+        unlike `get_json`, this never assumes a `data.sec.gov`-relative
+        path, since filing documents live under `www.sec.gov/Archives`.
+        Shares the same identity/pacing/caching/retry behavior as
+        `get_json` (a caller must never reach into this class's private
+        pacing state to reimplement it, which is exactly what this method
+        exists to prevent). Returns `None` -- never raises, never a
+        fabricated empty string -- if every retry fails, since one filing
+        document failing must never abort ingestion of the rest (see
+        `SECFilingDocumentProvider.get_documents`)."""
+        cache = self.cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.txt"
+        if cache.exists() and not refresh:
+            return cache.read_text(encoding="utf-8")
+        error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                wait = self.minimum_interval - (time.monotonic() - self._last_request)
+                if wait > 0:
+                    time.sleep(wait)
+                request = Request(url, headers={"User-Agent": self.user_agent})
+                with urlopen(request, timeout=30) as response:  # noqa: S310
+                    text = response.read().decode("utf-8", errors="replace")
+                self._last_request = time.monotonic()
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(text, encoding="utf-8")
+                return text
+            except (HTTPError, URLError, TimeoutError) as exc:
+                error = exc
+                if attempt < self.retries:
+                    time.sleep(0.5 * (attempt + 1))
+        return None
+
 
 class SECCompanyFactsProvider:
     provider_name = "SECCompanyFactsProvider"

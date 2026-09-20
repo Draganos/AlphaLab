@@ -174,6 +174,48 @@ def test_optional_live_providers_default_closed(monkeypatch):
     assert isinstance(configured_query_interpreter(), DeterministicQueryInterpreter)
 
 
+def test_configured_ai_research_provider_defaults_to_the_rule_based_provider(monkeypatch):
+    """Unlike OpenAIResearchProvider, RuleBasedFinancialResearchProvider
+    needs no API key, makes no external call, and costs nothing to run --
+    it must be the default with ALPHALAB_AI_PROVIDER unset, not "disabled"
+    the way a paid provider correctly is."""
+    from alpha_lab.ai import RuleBasedFinancialResearchProvider, configured_ai_research_provider
+
+    monkeypatch.delenv("ALPHALAB_AI_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    provider = configured_ai_research_provider()
+    assert isinstance(provider, RuleBasedFinancialResearchProvider)
+
+
+def test_configured_ai_research_provider_disabled_returns_none(monkeypatch):
+    from alpha_lab.ai import configured_ai_research_provider
+
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    assert configured_ai_research_provider() is None
+
+
+def test_configured_ai_research_provider_openai_with_key_returns_openai_provider(monkeypatch):
+    from alpha_lab.ai import OpenAIResearchProvider, configured_ai_research_provider
+
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = configured_ai_research_provider()
+    assert isinstance(provider, OpenAIResearchProvider)
+
+
+def test_configured_ai_research_provider_openai_without_key_never_falls_back(monkeypatch):
+    """An explicit request for a specific provider must never be silently
+    substituted with a different one -- "openai" without a key is a
+    failure to configure, not an invitation to use the local default."""
+    from alpha_lab.ai import RuleBasedFinancialResearchProvider, configured_ai_research_provider
+
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    provider = configured_ai_research_provider()
+    assert provider is None
+    assert not isinstance(provider, RuleBasedFinancialResearchProvider)
+
+
 def test_all_structured_category_filters_execute_deterministically():
     criteria = ScreenCriteria(
         minimum_coverage=0.7,

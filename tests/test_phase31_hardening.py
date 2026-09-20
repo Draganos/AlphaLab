@@ -38,6 +38,7 @@ from alpha_lab.screener import LiveResearchRecord, MarketScreenerService
 from alpha_lab.screener.service import (
     _category_evidence_coverage,
     _ai_is_attributable,
+    _ai_is_scoring_eligible,
     _category_score,
     _live_data_quality_reason,
     _select_live_fundamental_values,
@@ -115,6 +116,36 @@ def test_ai_coverage_requires_complete_attributable_input_identity():
     incomplete.analyzed_document_ids = [1]
     incomplete.input_fingerprint = "fingerprint"
     assert _ai_is_attributable(incomplete)
+
+
+def test_ai_scoring_eligibility_is_separate_from_attributability():
+    """Regression test for a real architectural finding: an analysis can
+    be fully attributable (real evidence, real fingerprint -- everything
+    _ai_is_attributable checks) while still not being trusted to move the
+    weighted overall_score. RuleBasedFinancialResearchProvider -- the new
+    deterministic V1 default for the ai_research category -- is not yet
+    validated against real outcomes (see the Signal Predictive-Value
+    calibration study's own near-zero correlation result), so its output
+    must still compute/persist/display everywhere (Company Research,
+    Evidence Coverage) but must score as unavailable for overall_score."""
+    def _complete_analysis(provider: str) -> AIResearchAnalysis:
+        return AIResearchAnalysis(
+            ticker="X", source_document_ids=[1], analyzed_document_ids=[1],
+            input_fingerprint="fingerprint", component_scores={}, key_positives=[],
+            key_risks=[], evidence=[{"document_id": 1, "excerpt": "source"}],
+            provider=provider, model="m", prompt_version="v1", raw_output={},
+            ai_rating=50, confidence=1,
+        )
+
+    rule_based = _complete_analysis("RuleBasedFinancialResearchProvider")
+    assert _ai_is_attributable(rule_based)
+    assert not _ai_is_scoring_eligible(rule_based)
+
+    openai = _complete_analysis("openai")
+    assert _ai_is_attributable(openai)
+    assert _ai_is_scoring_eligible(openai)
+
+    assert not _ai_is_scoring_eligible(None)
 
 
 def test_sec_amendment_is_append_only_and_invisible_before_filed_date(tmp_path):
