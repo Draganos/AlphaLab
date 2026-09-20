@@ -2891,3 +2891,100 @@ re-run clean after these fixes (one unrelated pre-existing failure in
 identically without this phase's changes -- installed package versions
 in this environment have drifted from `requirements.lock`, unrelated to
 this phase).
+
+### 36.2 External review: two real findings, fixed before merge
+
+A detailed external review of this PR verified every claim against real
+code before acting on it (this codebase's own established practice --
+see §33/§34's identical treatment of earlier reviews). Two findings were
+real and are fixed here; a third ("500K-char truncation could lose later
+sections of a very large 10-K") is a real, acknowledged limitation of the
+existing defensive bound, correctly flagged as future work rather than a
+merge blocker, and is left as-is per that same judgment.
+
+**1. Document identity was based on `(ticker, text)`, not the filing's
+own identity.** SEC filings carry their own unique submission identifier
+(accession number); a 10-K and a later 10-K/A amendment are two distinct
+information events with two distinct accessions, but could in principle
+carry byte-identical extracted text (a purely procedural amendment, or
+two exhibits sharing boilerplate). The old `_content_hash(ticker, text)`
+would have silently collided such a pair into one stored row, losing a
+real, distinct filing event. Fixed: `_content_hash` now prefers `source`
+-- for `SECFilingDocumentProvider`, a URL that already uniquely encodes
+CIK + accession + primary document -- falling back to `(ticker, text)`
+only when a provider supplies no source URL at all. New regression test:
+`test_ingest_treats_identical_text_from_a_different_source_as_a_distinct_document`
+(two documents, identical text, different `source` -> both stored); also
+added `test_content_hash_falls_back_to_text_when_no_source_is_supplied`.
+Two existing tests whose fixture data reused the same default `source`
+across logically-distinct documents were updated to give each its own
+source, matching how `SECFilingDocumentProvider` actually behaves (every
+real document it returns has a unique URL).
+
+**2. The new rule-based provider was scoring-eligible by default, with
+no validation behind that.** `ai_research` is a pre-existing scoring
+category (`rating_weights.ai_research: 0.10` in `config/default.yaml`,
+wired into `overall_score` since Phase 3) that was always empty before
+this PR, because `configured_ai_research_provider()` defaulted to
+`None`. This PR's real, load-bearing change is making that default
+return `RuleBasedFinancialResearchProvider()` instead -- which means the
+already-existing 10%-weighted category starts actually contributing a
+real number to `overall_score` the moment documents are ingested, using
+a brand-new, deterministic phrase-lexicon heuristic that has not been
+validated against real outcomes. §37's own calibration study
+independently found a near-zero real correlation between this exact
+signal and real forward returns (pearson +0.065, spearman +0.058, n=59)
+-- reinforcing rather than contradicting the concern.
+
+Fixed by separating *attributability* (real evidence, real fingerprint --
+`_ai_is_attributable`, unchanged) from *scoring eligibility* (a new,
+separate `_ai_is_scoring_eligible` check against an explicit
+`_SCORING_ELIGIBLE_AI_PROVIDERS` allowlist, currently `{"openai"}`).
+`RuleBasedFinancialResearchProvider`'s analysis is still computed,
+persisted, and shown everywhere it already was (Company Research,
+Evidence Coverage, the raw `AIResearchAnalysis` row) -- only
+`categories["ai_research"]` in the `overall_score` computation now
+requires both checks to pass, so an unvalidated provider's rating is
+excluded from the weighted score exactly the way any other missing
+category already is (automatically dropped from both the weighted sum
+and its denominator). This mirrors the precedent already established for
+`AIResearchAssessment`/AI Research Rating -- the newer, separate AI
+system whose own module docstring "explicitly forbids ever feeding
+scoring" -- extended to this older system's own new, unvalidated
+provider.
+
+Verified live against the real database: `MarketScreenerService.
+build_live_records()` for AAL/MA/NVDA now reports `category_scores
+["ai_research"] = None` for all three (correctly excluded from
+`overall_score`) while `ai_coverage = 1.0` for all three (real evidence
+still recognized and displayed) -- exactly the intended split. New
+regression test: `test_ai_scoring_eligibility_is_separate_from_
+attributability` (a `RuleBasedFinancialResearchProvider` analysis is
+attributable but not scoring-eligible; an `openai` analysis is both).
+`scripts/smoke_test_phase3.py`'s own printed ratings shifted slightly
+(e.g. 65.79 -> 66.67) as an expected, correct consequence: its
+`DeterministicAIResearchProvider` test fixture (`provider=
+"deterministic-fixture"`) is not on the allowlist either, so its
+`ai_research` contribution is now also correctly excluded -- the smoke
+test asserts on ethical/screening outcomes, not exact score values, so
+this is not a regression.
+
+**A structural gap in CI coverage, surfaced by the same review.** PR #41
+and PR #42 (both intentionally stacked directly on this PR's own branch,
+per explicit instruction, rather than on `main`) have zero GitHub Actions
+check runs -- confirmed via the API, not assumed. Root cause:
+`.github/workflows/ci.yml` triggers only on `pull_request: branches:
+[main]`; a PR whose base is another feature branch never matches that
+trigger. This is expected to self-resolve as the stack merges bottom-up
+(GitHub retargets a PR's base to its former base's own target once that
+base branch merges and is deleted, at which point the retargeted PR
+starts matching the trigger) -- but until then, every "full test suite
+green"/"smoke tests pass" claim for #41/#42 in this session has been a
+local run only, never independently confirmed by the repository's own
+CI. Left for the user to decide whether to also widen the workflow's
+trigger to cover stacked branches before that point, since that is a
+repo-wide CI cost/coverage tradeoff, not a code correctness question.
+
+**Validation:** full test suite, all three smoke tests, and `git diff
+--check` all re-run clean after these two fixes (same unrelated
+pre-existing `test_dependency_lock.py` failure as above).
