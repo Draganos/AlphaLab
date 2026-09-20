@@ -2307,3 +2307,189 @@ PIT-testing pattern), and the external-review regression: a snapshot
 recorded mid-session is paired with the next trading day's close, never
 that same day's own close. Full test suite and all three established
 smoke tests pass. `git diff --check`: clean.
+
+## 34. Production-Scale Performance Diagnosis (main page + Universe Breakdown)
+
+A real deployment reported the main dashboard stuck on "Automatically
+refreshing 3931 stale ticker(s)..." for over 10 minutes, plus a separate
+report that the Evidence & Coverage Dashboard's Universe Breakdown tab was
+also slow. Both were diagnosed against the actual code paths (and, for
+the second, an actual profiling run) rather than guessed at.
+
+**Main page: expected, not a hang -- but a real design gap in §31's own
+safety intent.** At 3931 tickers, `run_core_refresh` makes one live
+provider round-trip per ticker (company info + price history +
+financials -- three HTTP calls each), entirely serial, with no
+backgrounding; realistically that alone is well over an hour at thousands
+of tickers, before `IngestionService.ingest`'s own per-row database
+upsert-check (one `SELECT` per stored price row, so up to ~500 more
+queries per ticker for a 2-year window) adds further time on top. So "10+
+minutes and still going" was not stuck -- it was working exactly as
+built, just at a scale the automatic trigger was never actually
+guarded against. §31 introduced this automatic on-session-start trigger
+specifically to keep cost "proportional to what is actually stale," but
+never anticipated *almost the entire universe* going stale at once (e.g.
+after the app sits unused past `stale_price_days`, or a freshly-loaded
+large universe) -- at that scale the trigger silently turns into a
+many-hour blocking page load, the opposite of its own design goal.
+Fixed with `alpha_lab.refresh.MAX_AUTO_REFRESH_TICKERS` (200): above this
+many stale tickers, the automatic trigger is skipped entirely -- the
+existing stale-data warning and manual Full Refresh button remain how to
+catch up on demand, refreshing everything is still possible, it is just
+never silently automatic at that scale. Below the cap, behavior is
+unchanged from §31.
+
+**Universe Breakdown: a real, separate N+1 query pattern -- but not the
+main page's own bottleneck.** `_load_universe_coverage_rows` (`app/
+dashboard/pages/8_Evidence_Coverage.py`) already correctly fetches the
+universe once (`list_current_research`) and avoided the documented O(n²)
+`get_stock_research`-per-ticker trap, but still called `NewsService.
+get_history(ticker)` -- one full database round-trip -- inside its
+per-ticker loop. Fixed with a new `NewsService.get_history_for_tickers`
+(one `ticker IN (...)` query, grouped by ticker in Python, same PIT
+semantics as `get_history`'s own `as_of`). A profiling run (`cProfile`
+against a synthetic 2,000-ticker universe, in-memory SQLite) confirmed
+this alone is not what a 10-minute complaint would be about: `build_
+research_for_record`'s own per-ticker enrichment (`SupplementalResearchService`'s
+four `Current*` lookups plus `AnalystEventsService`'s reads) dominates
+instead, at roughly ~2ms/ticker -- each read opens its own `Session`, so
+the fixed per-call overhead of session/connection setup, not the actual
+SQL, is what adds up. At ~4,000 tickers that is on the order of seconds,
+not minutes -- real and worth knowing, but not remotely the same order of
+magnitude as the main page's issue above. Deliberately not fixed in this
+pass: batching those five per-ticker reads the same way News was batched
+would need new multi-ticker read methods on `SupplementalResearchService`/
+`AnalystEventsService` and a corresponding `ResearchService` entry point,
+a larger, more invasive change than this diagnosis called for -- worth
+revisiting if it becomes the actual bottleneck at real production scale.
+
+**Self-review finding: `get_history_for_tickers` needed to chunk its
+`IN (...)` clause.** A second review pass on this diagnosis's own diff
+found that the new batched query builds one SQL bind parameter per
+ticker with no limit -- fine on this dev environment's SQLite (3.45.1,
+tested well past 100,000 bind parameters), but a real risk on any SQLite
+build still carrying the pre-3.32.0 default `SQLITE_MAX_VARIABLE_NUMBER`
+of 999 (some system-linked Python installs never raise it), which would
+raise `sqlite3.OperationalError: too many SQL variables` at exactly the
+~3,931-ticker scale this diagnosis was triggered by. Fixed by chunking
+the query at `_TICKER_CHUNK_SIZE` (500) tickers per round-trip, executed
+in a loop and accumulated before grouping by ticker -- concatenating
+chunks is safe because each ticker's articles are entirely contained in
+one chunk's already-ordered result, so grouping afterward cannot corrupt
+per-ticker ordering.
+
+**Validation:** `tests/test_dashboard_full_refresh_banner.py` gained a
+regression test seeding `MAX_AUTO_REFRESH_TICKERS + 1` stale tickers,
+confirming zero provider calls are made, the cap's warning is shown, and
+a later rerun does not retry. `tests/test_news_service.py` gained tests
+for `get_history_for_tickers` (matches per-ticker `get_history` exactly,
+omits tickers with no articles, respects `as_of`, empty ticker list
+returns `{}`, and -- for the chunking fix -- correctly returns complete,
+correctly-ordered per-ticker history when the ticker count spans multiple
+chunks, including tickers sitting right at a chunk boundary). New
+`tests/test_evidence_coverage_universe_breakdown.py` proves the page
+actually calls the batched method for the whole universe (not a
+per-ticker loop), while the separate Security Detail tab's own
+single-ticker `get_history` call is untouched. Full test suite and all
+three established smoke tests pass. `git diff --check`: clean.
+
+### 34.1 Follow-up: real incident evidence from the same production run
+
+The same production run surfaced two further, distinct problems while the
+automatic refresh above was live -- both diagnosed against real evidence
+(a live SQLite lock scenario reproduced locally, and live Yahoo Finance
+lookups), not guessed at.
+
+**"database is locked" during the automatic refresh.** The reported error
+-- `sqlite3.OperationalError: database is locked` on `UPDATE securities
+... WHERE ticker = 'BRK.B'` -- traced to `alpha_lab.database.session.
+make_engine` calling bare `create_engine(url)` for SQLite, which leaves
+Python's stdlib default: a 5-second busy timeout and the `DELETE` journal
+mode. Several write paths (the automatic refresh, the manual Full
+Refresh button, batch scripts) can genuinely overlap against the same
+database file, and once one write holds the file past 5 seconds, every
+other writer fails immediately rather than waiting. Reproduced locally: a
+writer holding the lock for 6 seconds against a bare `create_engine`
+database reliably raises the identical `OperationalError`; against
+`make_engine`'s fix, the same scenario succeeds. Fixed with a 30-second
+busy timeout (`connect_args={"timeout": 30}`, the standard SQLAlchemy/
+SQLite mitigation) plus `PRAGMA journal_mode=WAL` for file-based
+databases (`:memory:` databases skip this -- WAL isn't supported there,
+and nothing else can contend with their single in-process connection
+anyway). WAL additionally lets readers (e.g. a dashboard page rendering)
+proceed without blocking on the one writer.
+
+**Tickers permanently 404ing, forever, every refresh cycle.** The
+reported log spam (`HTTP Error 404 ... Quote not found`, `possibly
+delisted`) for tickers like `BRK.B`, `AGM.A`, `BF.A`, `AHL$D`, `ALL$B`,
+`DBRG$H` is not those tickers actually being delisted -- it's AlphaLab
+sending Yahoo Finance a symbol it has never recognized. AlphaLab's
+`Security.ticker` follows the universe listing's own share-class
+notation (a dot for a share class, e.g. `BRK.B`; a dollar sign for a
+preferred-share suffix, e.g. `AHL$D`), but Yahoo's own symbol convention
+uses a hyphen instead (`BRK-B`), and a hyphen-plus-`P` for the preferred
+form (`AHL-PD`) -- confirmed live against real Yahoo Finance data for
+every ticker in the reported log, both directions (the dot/dollar form
+404s, the translated form resolves with real quote data). Since this
+never succeeds, these tickers stay stale forever and get retried on
+*every single* stale-refresh pass -- automatic, manual, and scripted
+alike -- permanently wasting cycles and log noise, and permanently
+inflating the "stale ticker" count this diagnosis's §34 was originally
+about (some fraction of the reported ~3,931 is tickers like these that
+can never succeed, not tickers merely waiting their turn). Fixed with
+`alpha_lab.providers.yfinance_provider._yahoo_symbol`, applied at the
+provider's single `_ticker()` choke point that every method already
+shares -- so every one of `YFinanceProvider`'s methods is fixed at once,
+without touching each call site. Deliberately scoped to the outbound
+Yahoo request only: `Security.ticker` (and every value this provider
+itself returns, e.g. `get_company_info`'s own `"ticker"` field) keeps
+the original, canonical form -- this is a provider-side translation of
+what goes out over the wire, never a rewrite of AlphaLab's own identity
+for the ticker.
+
+**Validation:** `tests/test_database.py` gained a fast pragma-value check
+(`busy_timeout`/`journal_mode` on a file-based engine, and confirmation
+`:memory:` is left alone) plus a real concurrency regression test that
+holds a write lock for 6 seconds (longer than SQLite's old 5-second
+default, confirmed live to still fail that way) and asserts a second,
+concurrent writer succeeds rather than raising. `tests/
+test_yfinance_provider.py` gained a parametrized test of `_yahoo_symbol`
+covering every notation observed in the incident, plus a test proving
+the translated symbol -- not the canonical ticker -- is what actually
+reaches `yfinance.Ticker(...)`. Full test suite and all three established
+smoke tests pass. `git diff --check`: clean.
+
+### 34.2 External review: one more full-scan finding, one weak test
+
+An external review of this PR confirmed the diagnosis and fixes above,
+and raised two further points.
+
+**The main page's own Data Quality table still read every price row.**
+`app/dashboard/main.py`'s Data Quality section (unrelated to the
+automatic-refresh trigger in §34, but on the same page) selected
+`(ticker, date)` for **every** `Price` row in the database, ordered by
+ticker/date, and picked each ticker's latest row in Python -- a read that
+scales with total price rows (~500/ticker/year) rather than universe
+size, executed on every rerun of a page Streamlit re-executes on every
+widget interaction. At the reported ~3,931-ticker, ~2-year-history scale
+that is on the order of two million rows fetched into Python per render.
+Fixed with the same SQL `MAX(date) GROUP BY ticker` pattern `alpha_lab.
+refresh.stale_universe_tickers` already established (§30) -- a drop-in
+replacement, since the only thing this table ever needed from that read
+was each ticker's single latest date.
+
+**A weak test assertion in `tests/
+test_evidence_coverage_universe_breakdown.py`.**
+`test_universe_breakdown_flat_rows_include_both_tickers` asserted
+`tickers_seen or len(rows) > 0`, which passes even if only one ticker (or
+neither, so long as some other row exists) actually made it through.
+Since `flatten_coverage_rows` always sets `"ticker"` on every row (its own
+docstring), the test now asserts the exact set, `tickers_seen ==
+{"AAPL", "MSFT"}`, which actually fails if either ticker's rows are
+missing.
+
+**Validation:** new `tests/test_dashboard_data_quality.py` seeds several
+`Price` rows per ticker, inserted out of date order, and confirms
+`latest_by_ticker` reports each ticker's true latest date -- a regression
+guard against `GROUP BY`'s correctness, not just its existence. Full test
+suite and all three smoke tests pass. `git diff --check`: clean.

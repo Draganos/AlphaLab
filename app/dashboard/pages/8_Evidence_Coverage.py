@@ -91,18 +91,24 @@ def _load_universe_coverage_rows(
     docstring notes it re-reads and re-deserializes every persisted record
     to find the one matching ticker, so looping it here would cost O(n^2)
     in universe size instead of the O(n) this achieves via
-    `build_research_for_record`.
+    `build_research_for_record`. News history is likewise fetched once for
+    the whole universe (`get_history_for_tickers`) rather than one
+    `get_history` call per ticker -- at a large universe size, one query
+    per ticker measurably adds up even though each one individually is
+    fast; a single `ticker IN (...)` query costs the same regardless of
+    universe size.
     """
     records_by_ticker = {
         record.ticker: record for record in _research_service.list_current_research()
     }
+    news_by_ticker = _news_service.get_history_for_tickers(list(tickers))
     summaries = []
     for ticker in tickers:
         record = records_by_ticker.get(ticker)
         if record is None:
             continue
         research = _research_service.build_research_for_record(record)
-        news_articles = _news_service.get_history(ticker)
+        news_articles = news_by_ticker.get(ticker, [])
         summaries.append(
             build_security_coverage_summary(
                 research, news_articles=news_articles, macro_assessment=_macro_assessment

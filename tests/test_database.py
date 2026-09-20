@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import date
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -14,6 +16,7 @@ from alpha_lab.database.models import (
     Security,
 )
 from alpha_lab.database import create_schema, make_engine
+from alpha_lab.database.session import _SQLITE_BUSY_TIMEOUT_SECONDS
 from sqlalchemy import inspect
 
 
@@ -26,6 +29,84 @@ def test_database_crud(db_session: Session):
     assert price.close == 10
     assert price.provider == "test-fixture"
     assert price.ingested_at is not None
+
+
+# --- concurrent-write reliability: real production finding ------------
+# "database is locked" was observed live on the automatic stale-ticker
+# refresh (UPDATE securities ... for BRK.B). Root cause: make_engine used
+# SQLite's default connection (a 5-second busy timeout, journal mode
+# DELETE), which fails immediately once two writers overlap for longer
+# than that -- an ordinary occurrence once several refresh paths
+# (automatic on-session-start, manual Full Refresh, batch scripts) can
+# all touch the same database file. Fixed with a longer busy timeout and
+# WAL mode, which lets a writer wait instead of failing.
+
+
+def test_make_engine_configures_a_busy_timeout_and_wal_mode_for_file_based_sqlite(tmp_path):
+    db_path = tmp_path / "pragmas.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        busy_timeout_ms = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+    assert busy_timeout_ms == _SQLITE_BUSY_TIMEOUT_SECONDS * 1000
+    assert journal_mode == "wal"
+    engine.dispose()
+
+
+def test_make_engine_does_not_apply_wal_mode_to_an_in_memory_database():
+    """:memory: databases don't support WAL (nothing else could ever
+    contend with their single in-process connection anyway) -- make_engine
+    must not attempt to set it there."""
+    engine = make_engine("sqlite:///:memory:")
+    with engine.connect() as connection:
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+    assert journal_mode != "wal"
+    engine.dispose()
+
+
+def test_a_writer_holding_the_lock_past_sqlites_old_default_timeout_no_longer_fails(tmp_path):
+    """Regression test reproducing the exact reported failure: a second
+    writer that must wait for a slow first writer must wait (up to the
+    configured busy timeout), not fail immediately. Holds the lock for 6
+    seconds -- longer than SQLite's old 5-second default timeout (which
+    this exact scenario was confirmed, live, to still raise
+    `sqlite3.OperationalError: database is locked` against), well under
+    the new `_SQLITE_BUSY_TIMEOUT_SECONDS` (30s) this fix configures."""
+    db_path = tmp_path / "concurrent.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+
+    first = engine.raw_connection()
+    first.driver_connection.isolation_level = None
+    first.execute("BEGIN IMMEDIATE")
+    first.execute("INSERT INTO securities (ticker, country, currency) VALUES ('LOCKED', 'US', 'USD')")
+
+    second_writer_errors: list[Exception] = []
+
+    def _second_writer() -> None:
+        try:
+            connection = engine.raw_connection()
+            connection.driver_connection.isolation_level = None
+            connection.execute(
+                "INSERT INTO securities (ticker, country, currency) VALUES ('OTHER', 'US', 'USD')"
+            )
+            connection.commit()
+            connection.close()
+        except Exception as error:  # noqa: BLE001 - captured for the assertion below
+            second_writer_errors.append(error)
+
+    thread = threading.Thread(target=_second_writer)
+    thread.start()
+    time.sleep(6)
+    first.commit()
+    first.close()
+    thread.join(timeout=15)
+
+    assert second_writer_errors == []
+    with Session(engine) as session:
+        tickers = {row.ticker for row in session.scalars(select(Security))}
+    assert tickers == {"LOCKED", "OTHER"}
+    engine.dispose()
 
 
 def test_schema_initialization_is_idempotent():

@@ -10,7 +10,7 @@ import pytest
 import yfinance.exceptions as yf_exceptions
 
 from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
-from alpha_lab.providers.yfinance_provider import YFinanceProvider
+from alpha_lab.providers.yfinance_provider import YFinanceProvider, _yahoo_symbol
 
 
 class _FakeTicker:
@@ -105,3 +105,55 @@ def test_get_financials_propagates_classified_error_from_any_of_the_three_statem
     with pytest.raises(ProviderError) as excinfo:
         provider.get_financials("AAPL")
     assert excinfo.value.kind == ProviderErrorKind.RATE_LIMITED
+
+
+# --- _yahoo_symbol: real-production finding -- Yahoo 404s AlphaLab's own
+# canonical dot/dollar share-class notation forever, every refresh, until
+# translated to the hyphen notation Yahoo actually recognizes -----------
+
+
+@pytest.mark.parametrize(
+    ("ticker", "expected"),
+    [
+        ("BRK.B", "BRK-B"),
+        ("BRK.A", "BRK-A"),
+        ("AGM.A", "AGM-A"),
+        ("BF.A", "BF-A"),
+        ("BF.B", "BF-B"),
+        ("AHL$D", "AHL-PD"),
+        ("ALL$B", "ALL-PB"),
+        ("BAC$L", "BAC-PL"),
+        ("DBRG$H", "DBRG-PH"),
+        # No special notation: passed through unchanged.
+        ("AAPL", "AAPL"),
+        ("NVDA", "NVDA"),
+    ],
+)
+def test_yahoo_symbol_translates_dot_and_dollar_share_class_notation(ticker, expected):
+    """Verified live against real Yahoo Finance data (not guessed): the dot
+    form 404s while the hyphen form resolves, and the dollar form 404s
+    while hyphen-plus-P resolves, for every ticker reported stuck
+    permanently stale in production."""
+    assert _yahoo_symbol(ticker) == expected
+
+
+def test_ticker_construction_uses_the_translated_yahoo_symbol_not_the_canonical_ticker(monkeypatch):
+    """The canonical ticker (as stored/displayed everywhere else in
+    AlphaLab) must never itself be rewritten -- only what actually goes
+    out over the wire to Yahoo. Confirms this at the single choke point
+    (_ticker) all provider methods share."""
+    captured_symbols: list[str] = []
+
+    class _FakeYFModule:
+        @staticmethod
+        def Ticker(symbol):
+            captured_symbols.append(symbol)
+            return _FakeTicker(info={"longName": "Berkshire Hathaway"})
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance", _FakeYFModule())
+    provider = YFinanceProvider()
+
+    info = provider.get_company_info("BRK.B")
+
+    assert captured_symbols == ["BRK-B"]
+    assert info["ticker"] == "BRK.B"  # the canonical ticker, unchanged

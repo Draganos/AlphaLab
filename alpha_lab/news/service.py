@@ -37,6 +37,12 @@ from alpha_lab.news.article import NewsArticle, parse_news_article
 from alpha_lab.providers.errors import ProviderError
 from alpha_lab.providers.interfaces import ResearchNewsProvider
 
+# Conservative chunk size for get_history_for_tickers' IN (...) clause --
+# well under even pre-3.32.0 SQLite's default SQLITE_MAX_VARIABLE_NUMBER
+# (999), which some system-linked Python installs still have regardless
+# of this project's own dev environment.
+_TICKER_CHUNK_SIZE = 500
+
 
 class NewsRefreshResult:
     """Observable outcome of one `NewsService.refresh` call -- explicit
@@ -92,6 +98,51 @@ class NewsService:
             rows = session.scalars(statement).all()
             session.expunge_all()
             return list(rows)
+
+    def get_history_for_tickers(
+        self, tickers: list[str], *, as_of: date | None = None
+    ) -> dict[str, list[NewsArticleRecord]]:
+        """Same point-in-time-safe filtering as `get_history`, for many
+        tickers in one query instead of one call per ticker -- for a
+        caller building something universe-wide (e.g. the Evidence
+        Coverage page's Universe Breakdown), calling `get_history` in a
+        per-ticker loop costs one full round-trip per ticker for no
+        reason; a single `ticker IN (...)` query costs the same either
+        way regardless of how large the universe is. Does not support
+        `since`/`until`/`limit` -- no current caller needs them here;
+        add them if a future one does. A ticker with no articles is
+        simply absent from the returned dict, never an empty-list-vs-
+        missing-key ambiguity to disambiguate -- use `.get(ticker, [])`.
+
+        Chunks the `IN (...)` clause at `_TICKER_CHUNK_SIZE` tickers per
+        query rather than one query for the whole list -- some SQLite
+        builds (pre-3.32.0's default `SQLITE_MAX_VARIABLE_NUMBER=999`;
+        still the case for some system-linked Python installs even though
+        this project's own dev environment allows far more) reject a
+        query with more bind parameters than that limit, and this is
+        specifically meant to be called with the whole configured
+        universe -- exactly the scenario the limit would otherwise bite.
+        """
+        if not tickers:
+            return {}
+        normalized = list(tickers)
+        rows = []
+        with Session(self.engine) as session:
+            for start in range(0, len(normalized), _TICKER_CHUNK_SIZE):
+                chunk = normalized[start : start + _TICKER_CHUNK_SIZE]
+                statement = select(NewsArticleRecord).where(NewsArticleRecord.ticker.in_(chunk))
+                if as_of is not None:
+                    upper_bound = datetime.combine(as_of, time.max)
+                    statement = statement.where(NewsArticleRecord.retrieved_at <= upper_bound)
+                statement = statement.order_by(
+                    NewsArticleRecord.published_at.desc(), NewsArticleRecord.content_hash.desc()
+                )
+                rows.extend(session.scalars(statement).all())
+            session.expunge_all()
+        history_by_ticker: dict[str, list[NewsArticleRecord]] = {}
+        for row in rows:
+            history_by_ticker.setdefault(row.ticker, []).append(row)
+        return history_by_ticker
 
     # --- refresh: explicit, provider call happens before any DB write ------
 

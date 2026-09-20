@@ -8,14 +8,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
 from alpha_lab.database.models import Price
 from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
-from alpha_lab.refresh import is_universe_price_stale, run_core_refresh_guarded, stale_universe_tickers
+from alpha_lab.refresh import (
+    MAX_AUTO_REFRESH_TICKERS,
+    is_universe_price_stale,
+    run_core_refresh_guarded,
+    stale_universe_tickers,
+)
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.search import ScreenCriteria, ScreenRecord, apply_screen
 
@@ -148,7 +153,23 @@ if not st.session_state.get("auto_stale_refresh_attempted"):
     # even if a subsequent auto-refresh attempt failed.
     st.session_state["auto_stale_refresh_attempted"] = True
     _stale_tickers = stale_universe_tickers(engine, _stale_price_days)
-    if _stale_tickers:
+    if len(_stale_tickers) > MAX_AUTO_REFRESH_TICKERS:
+        # Safety cap (see alpha_lab.refresh's own docstring on
+        # MAX_AUTO_REFRESH_TICKERS): a stale count this large -- the whole
+        # universe going stale at once, or a freshly-loaded large universe
+        # -- would turn this trigger's "loading time doesn't increase
+        # substantially" design goal into a multi-hour blocking page load
+        # (one live provider round-trip per ticker, none of it
+        # backgrounded). Skip the automatic attempt entirely; the warning
+        # below and the manual Full Refresh button remain the way to
+        # catch up on demand.
+        st.warning(
+            f"{len(_stale_tickers)} tickers are stale -- above the automatic "
+            f"refresh's safety limit of {MAX_AUTO_REFRESH_TICKERS}, so it was "
+            "skipped this session to avoid a very long page load. Use Full "
+            "Refresh below to update the whole universe on demand."
+        )
+    elif _stale_tickers:
         with st.spinner(
             f"Automatically refreshing {len(_stale_tickers)} stale ticker(s) "
             f"(price/fundamental data), then rebuilding research..."
@@ -265,10 +286,15 @@ else:
 st.header("Data Quality")
 st.write("Unavailable fields remain blank and are excluded with visible coverage; no missing factor is silently converted to a positive signal.")
 with Session(engine) as session:
-    latest_prices = session.execute(select(Price.ticker, Price.date).order_by(Price.ticker, Price.date.desc())).all()
-latest_by_ticker: dict[str, date] = {}
-for ticker, observed in latest_prices:
-    latest_by_ticker.setdefault(ticker, observed)
+    # One SQL MAX(date) per ticker, not every price row ever ingested --
+    # the same fix (and the same reason) as alpha_lab.refresh.
+    # stale_universe_tickers's own GROUP BY: this page reruns on every
+    # widget interaction, so pulling the whole universe's full price
+    # history into Python just to find each ticker's latest row is real,
+    # avoidable cost that scales with total price rows (~500/ticker/year),
+    # not with the universe size this table actually needs.
+    latest_prices = session.execute(select(Price.ticker, func.max(Price.date)).group_by(Price.ticker)).all()
+latest_by_ticker: dict[str, date] = dict(latest_prices)
 quality_rows = []
 for ticker, observed in latest_by_ticker.items():
     issue = assess_freshness("price", observed, date.today(), settings.data_quality["stale_price_days"])
