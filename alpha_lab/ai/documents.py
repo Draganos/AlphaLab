@@ -20,12 +20,20 @@ from alpha_lab.database.models import CompanyDocument
 from alpha_lab.providers.interfaces import CompanyDocumentProvider
 
 
-def _content_hash(ticker: str, text: str) -> str:
-    """Identifies an exact (ticker, document text) pair -- if SEC ever
-    re-serves the identical filing text, this is what makes a re-run a
-    no-op instead of a duplicate row."""
-    payload = f"{ticker}\x00{text}".encode()
-    return hashlib.sha256(payload).hexdigest()
+def _content_hash(ticker: str, *, source: str | None, text: str) -> str:
+    """Identifies one distinct filing/document event, not merely one block
+    of text. Prefers `source` -- for `SECFilingDocumentProvider`, a URL
+    that already uniquely encodes the filing's own CIK, accession number,
+    and primary document (SEC's own unique submission identifiers) -- over
+    raw text: two genuinely distinct filings (e.g. a 10-K and a later
+    10-K/A amendment, or two exhibits sharing boilerplate) can carry
+    byte-identical extracted text but are still two separate information
+    events, and must never collide into a single stored row just because
+    their text happens to match. Falls back to `(ticker, text)` only when
+    a provider supplies no source URL at all (not true for
+    `SECFilingDocumentProvider`, which always does)."""
+    identity = f"{ticker}\x00{source}" if source else f"{ticker}\x00{text}"
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 def ingest_company_documents(
@@ -41,7 +49,10 @@ def ingest_company_documents(
         return 0
     retrieved_at = datetime.now(UTC).replace(tzinfo=None)
     stored = 0
-    content_hashes = {raw["text"]: _content_hash(normalized, raw["text"]) for raw in raw_documents}
+    content_hashes = [
+        _content_hash(normalized, source=raw.get("source"), text=raw["text"])
+        for raw in raw_documents
+    ]
     with Session(engine) as session:
         # One batched lookup for every candidate hash rather than one
         # SELECT per document -- a ticker with dozens of already-ingested
@@ -50,12 +61,11 @@ def ingest_company_documents(
         existing_hashes = set(
             session.scalars(
                 select(CompanyDocument.content_hash).where(
-                    CompanyDocument.content_hash.in_(content_hashes.values())
+                    CompanyDocument.content_hash.in_(content_hashes)
                 )
             )
         )
-        for raw in raw_documents:
-            content_hash = content_hashes[raw["text"]]
+        for raw, content_hash in zip(raw_documents, content_hashes, strict=True):
             if content_hash in existing_hashes:
                 continue
             existing_hashes.add(content_hash)  # guards against duplicate rows within this same batch

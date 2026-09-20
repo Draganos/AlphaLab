@@ -72,8 +72,14 @@ def test_ingest_is_idempotent_for_identical_documents(engine):
 
 def test_ingest_stores_multiple_distinct_documents(engine):
     provider = _FakeDocumentProvider([
-        _raw_document(text="First filing text.", document_type="10-K"),
-        _raw_document(text="Second filing text.", document_type="10-Q"),
+        _raw_document(
+            text="First filing text.", document_type="10-K",
+            source="https://www.sec.gov/example/10k",
+        ),
+        _raw_document(
+            text="Second filing text.", document_type="10-Q",
+            source="https://www.sec.gov/example/10q",
+        ),
     ])
     stored = ingest_company_documents(engine, provider, "NVDA")
     assert stored == 2
@@ -106,8 +112,10 @@ def test_ingest_deduplicates_identical_text_within_the_same_batch(engine):
     """Regression test for a self-review finding: the dedup check was
     refactored from one SELECT per document to a single batched SELECT
     over all candidate hashes up front. That batching must not let two
-    documents with identical text in the SAME call both slip past the
-    (now snapshot-in-time) existing_hashes set and get stored twice."""
+    documents with identical text AND identical source in the SAME call
+    both slip past the (now snapshot-in-time) existing_hashes set and get
+    stored twice -- e.g. the provider genuinely returning the same filing
+    twice in one response."""
     provider = _FakeDocumentProvider([
         _raw_document(text="Duplicated filing text.", document_type="10-K"),
         _raw_document(text="Duplicated filing text.", document_type="10-K"),
@@ -120,18 +128,70 @@ def test_ingest_deduplicates_identical_text_within_the_same_batch(engine):
 
 def test_ingest_stores_only_the_new_documents_in_a_mixed_batch(engine):
     """A second run against a provider that returns one already-stored
-    document plus one genuinely new one must store only the new one --
-    proving the batched existing-hash lookup still catches previously
-    persisted rows, not just duplicates within a single call."""
-    first_provider = _FakeDocumentProvider([_raw_document(text="Already stored.", document_type="10-K")])
+    document (same source) plus one genuinely new one (a distinct source)
+    must store only the new one -- proving the batched existing-hash
+    lookup still catches previously persisted rows, not just duplicates
+    within a single call."""
+    first_provider = _FakeDocumentProvider([
+        _raw_document(
+            text="Already stored.", document_type="10-K",
+            source="https://www.sec.gov/example/10k",
+        ),
+    ])
     ingest_company_documents(engine, first_provider, "NVDA")
 
     second_provider = _FakeDocumentProvider([
-        _raw_document(text="Already stored.", document_type="10-K"),
-        _raw_document(text="Brand new filing.", document_type="10-Q"),
+        _raw_document(
+            text="Already stored.", document_type="10-K",
+            source="https://www.sec.gov/example/10k",
+        ),
+        _raw_document(
+            text="Brand new filing.", document_type="10-Q",
+            source="https://www.sec.gov/example/10q",
+        ),
     ])
     stored = ingest_company_documents(engine, second_provider, "NVDA")
     assert stored == 1
     with Session(engine) as session:
         texts = set(session.scalars(select(CompanyDocument.text)).all())
     assert texts == {"Already stored.", "Brand new filing."}
+
+
+def test_ingest_treats_identical_text_from_a_different_source_as_a_distinct_document(engine):
+    """Regression test for a real correctness finding: two genuinely
+    distinct SEC filings (e.g. a 10-K and a later 10-K/A amendment, each
+    with its own accession number and its own `source` URL) can carry
+    byte-identical extracted text -- a purely procedural amendment, or
+    two exhibits sharing boilerplate -- but are still two separate real
+    information events and must not collide into a single stored row
+    just because their text happens to match. Dedup identity must be
+    anchored on `source` (which already encodes SEC's own unique
+    accession number/primary document), not on text alone."""
+    provider = _FakeDocumentProvider([
+        _raw_document(
+            text="Same text, different filing.", document_type="10-K",
+            source="https://www.sec.gov/example/10k-original",
+        ),
+        _raw_document(
+            text="Same text, different filing.", document_type="10-K/A",
+            source="https://www.sec.gov/example/10k-amendment",
+        ),
+    ])
+    stored = ingest_company_documents(engine, provider, "NVDA")
+    assert stored == 2
+    with Session(engine) as session:
+        types = set(session.scalars(select(CompanyDocument.document_type)).all())
+    assert types == {"10-K", "10-K/A"}
+
+
+def test_content_hash_falls_back_to_text_when_no_source_is_supplied(engine):
+    """A provider that (unlike SECFilingDocumentProvider) supplies no
+    source URL at all must still dedupe correctly, on text alone -- the
+    fallback this codebase's own CompanyDocumentProvider interface
+    doesn't strictly require every field to be present for."""
+    provider = _FakeDocumentProvider([
+        _raw_document(text="No source at all.", source=None),
+        _raw_document(text="No source at all.", source=None),
+    ])
+    stored = ingest_company_documents(engine, provider, "NVDA")
+    assert stored == 1
