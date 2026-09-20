@@ -62,6 +62,7 @@ class _FakeClient:
         self, submissions: dict, *, tickers: dict[str, str] | None = None,
         pages: dict[str, dict] | None = None, document_html: dict[str, str] | None = None,
         document_html_sequence: list[str | None] | None = None,
+        failing_pages: set[str] | None = None,
     ):
         self.user_agent = "AlphaLab Test test@example.com"
         self.minimum_interval = 0.0
@@ -71,6 +72,7 @@ class _FakeClient:
         self._pages = pages or {}
         self._document_html = document_html or {}
         self._document_html_sequence = list(document_html_sequence or [])
+        self._failing_pages = failing_pages or set()
         self.get_json_calls: list[tuple[str, bool]] = []
         self.get_text_calls: list[str] = []
 
@@ -81,6 +83,9 @@ class _FakeClient:
                 str(i): {"ticker": ticker, "cik_str": int(cik)}
                 for i, (ticker, cik) in enumerate(self._tickers.items())
             }
+        for name in self._failing_pages:
+            if name in path:
+                raise RuntimeError(f"SEC request failed without modifying stored data: {path}")
         for name, payload in self._pages.items():
             if name in path:
                 return payload
@@ -114,6 +119,23 @@ def test_get_documents_returns_empty_list_for_an_unresolvable_ticker():
     client = _FakeClient({}, tickers={})
     provider = SECFilingDocumentProvider(client)
     assert provider.get_documents("NOPE") == []
+
+
+def test_get_documents_resolves_a_dotted_share_class_ticker():
+    """Regression test for a live-confirmed hardening finding: SEC EDGAR's
+    own company_tickers.json keys "BRK.B" as "BRK-B", the identical
+    mismatch already fixed for Yahoo Finance -- a plain dict lookup by the
+    canonical dotted ticker silently returned None (indistinguishable from
+    "not a real company") for every dual-class/preferred-share ticker."""
+    submissions = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001067983-26-000021"], primary_documents=["brk-10k.htm"],
+    )
+    client = _FakeClient({"0001067983": submissions}, tickers={"BRK-B": "0001067983"})
+    provider = SECFilingDocumentProvider(client)
+    documents = provider.get_documents("BRK.B")
+    assert len(documents) == 1
+    assert documents[0]["document_date"] == date(2026, 2, 25)
 
 
 def test_get_documents_filters_to_supported_forms_only():
@@ -218,6 +240,78 @@ def test_get_documents_merges_paginated_filing_history():
     provider = SECFilingDocumentProvider(client)
     documents = provider.get_documents("NVDA")
     assert {doc["document_date"] for doc in documents} == {date(2026, 2, 25), date(2015, 2, 20)}
+
+
+def test_get_documents_survives_a_failed_paginated_page_without_losing_recent_filings():
+    """Regression test for a hardening finding: a page fetch failure (SEC
+    request timeout, transient 5xx) previously propagated straight out of
+    get_documents, discarding the "recent" rows already collected -- the
+    most recent filings are the ones that matter most, so one unreachable
+    older-history page must never cost the ticker its recent filings too."""
+    recent = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001045810-26-000021"], primary_documents=["recent-10k.htm"],
+        files=[
+            {"name": "CIK0001045810-submissions-001.json", "filingCount": 1, "filingFrom": "2015-01-01", "filingTo": "2020-01-01"},
+        ],
+    )
+    client = _FakeClient({"0001045810": recent}, failing_pages={"CIK0001045810-submissions-001.json"})
+    provider = SECFilingDocumentProvider(client)
+    documents = provider.get_documents("NVDA")
+    assert {doc["document_date"] for doc in documents} == {date(2026, 2, 25)}
+
+
+def test_get_documents_survives_one_malformed_page_and_keeps_the_others():
+    """Regression test: a page whose parallel arrays don't line up (the
+    strict=True guard in _filing_rows) must skip only that page, not abort
+    the whole ticker -- a second, well-formed page's filings are still real
+    evidence and must not be discarded because of an unrelated bad page."""
+    recent = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001045810-26-000021"], primary_documents=["recent-10k.htm"],
+        files=[
+            {"name": "CIK0001045810-submissions-001.json", "filingCount": 1, "filingFrom": "2010-01-01", "filingTo": "2015-01-01"},
+            {"name": "CIK0001045810-submissions-002.json", "filingCount": 1, "filingFrom": "2015-01-01", "filingTo": "2020-01-01"},
+        ],
+    )
+    malformed_page = {  # accessionNumber is one entry short of the other arrays
+        "form": ["10-K"],
+        "filingDate": ["2012-02-20"],
+        "accessionNumber": [],
+        "primaryDocument": ["old-10k.htm"],
+    }
+    good_page = {
+        "form": ["10-K"],
+        "filingDate": ["2016-02-20"],
+        "accessionNumber": ["0001045810-16-000010"],
+        "primaryDocument": ["older-10k.htm"],
+    }
+    client = _FakeClient(
+        {"0001045810": recent},
+        pages={
+            "CIK0001045810-submissions-001.json": malformed_page,
+            "CIK0001045810-submissions-002.json": good_page,
+        },
+    )
+    provider = SECFilingDocumentProvider(client)
+    documents = provider.get_documents("NVDA")
+    assert {doc["document_date"] for doc in documents} == {date(2026, 2, 25), date(2016, 2, 20)}
+
+
+def test_filing_rows_raises_loudly_on_mismatched_array_lengths():
+    """_filing_rows itself must not silently misalign a form with the wrong
+    filing date/accession/document when SEC's own arrays don't line up --
+    reporting a real filing under the wrong metadata is worse than raising."""
+    from alpha_lab.providers.sec_filings import _filing_rows
+
+    payload = {
+        "form": ["10-K", "10-Q"],
+        "filingDate": ["2026-02-25"],  # one short
+        "accessionNumber": ["0001045810-26-000021", "0001045810-26-000005"],
+        "primaryDocument": ["a.htm", "b.htm"],
+    }
+    with pytest.raises(ValueError):
+        _filing_rows(payload)
 
 
 def test_get_documents_uses_get_text_not_a_second_http_client():

@@ -18,6 +18,7 @@ from alpha_lab.analytics.signal_predictive_value import (  # noqa: E402
     InsufficientSnapshotHistory,
     correlate_ai_research_assessment_with_forward_returns,
     correlate_analyst_consensus_with_forward_returns,
+    correlate_rule_based_ai_research_with_forward_returns,
     correlate_technical_summary_with_forward_returns,
 )
 from alpha_lab.config import load_settings  # noqa: E402
@@ -66,6 +67,12 @@ def main() -> int:
         engine, tickers, forward_days=args.forward_days, sample_interval_days=args.sample_interval_days,
     )
     _report(technical)
+    print()
+
+    rule_based_ai_research = correlate_rule_based_ai_research_with_forward_returns(
+        engine, tickers, forward_days=args.forward_days,
+    )
+    _report(rule_based_ai_research)
     print()
 
     for label, correlate in (

@@ -11,6 +11,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from alpha_lab.providers.ticker_notation import to_hyphenated_symbol
 
 SEC_BASE = "https://data.sec.gov"
 SUPPORTED_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A"}
@@ -158,6 +159,16 @@ class SECCompanyFactsProvider:
             str(row["ticker"]).upper(): str(row["cik_str"]).zfill(10)
             for row in payload.values()
         }
+
+    def resolve_cik(self, ticker: str) -> str | None:
+        """CIK lookup that accounts for SEC's own ticker notation differing
+        from AlphaLab's canonical share-class/preferred notation --
+        confirmed live: `company_tickers()` keys "BRK.B" as "BRK-B", so a
+        plain `.get(ticker)` silently returns None (indistinguishable from
+        "not a real company") for any dual-class or preferred-share ticker.
+        The exact same mismatch already fixed for Yahoo Finance; see
+        `alpha_lab.providers.ticker_notation`."""
+        return self.company_tickers().get(to_hyphenated_symbol(ticker.strip().upper()))
 
     def get_facts(self, ticker: str, cik: str, *, as_of: date | None = None) -> list[SECFact]:
         path = f"/api/xbrl/companyfacts/CIK{cik.zfill(10)}.json"

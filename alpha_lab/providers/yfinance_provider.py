@@ -24,6 +24,7 @@ from alpha_lab.providers.interfaces import (
     EstimateProvider,
     ResearchNewsProvider,
 )
+from alpha_lab.providers.ticker_notation import to_hyphenated_symbol
 
 
 class YFinanceProvider(
@@ -527,17 +528,10 @@ def _yahoo_symbol(ticker: str) -> str:
     symbol.
 
     Two real notations were confirmed live to 404 permanently against
-    Yahoo, every single refresh, until translated: a dot-separated share
-    class (e.g. "BRK.B", "AGM.A") resolves on Yahoo as a hyphen ("BRK-B",
-    "AGM-A"), and a dollar-sign preferred-share suffix (e.g. "AHL$D",
-    "EPR$E") resolves as a hyphen plus "P" ("AHL-PD", "EPR-PE") -- both
-    verified against live Yahoo data across a sample of tickers reported
-    stuck in this state in production.
-    """
-    if "$" in ticker:
-        base, _, suffix = ticker.partition("$")
-        return f"{base}-P{suffix}"
-    return ticker.replace(".", "-")
+    Yahoo, every single refresh, until translated -- see
+    `alpha_lab.providers.ticker_notation` (shared with SEC EDGAR, which
+    turned out to need the identical translation)."""
+    return to_hyphenated_symbol(ticker)
 
 
 def _normalize_news_item(item: dict[str, Any]) -> dict[str, Any] | None:
