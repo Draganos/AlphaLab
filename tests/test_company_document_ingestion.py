@@ -100,3 +100,38 @@ def test_ingest_normalizes_ticker_case(engine):
     with Session(engine) as session:
         row = session.scalars(select(CompanyDocument)).one()
     assert row.ticker == "NVDA"
+
+
+def test_ingest_deduplicates_identical_text_within_the_same_batch(engine):
+    """Regression test for a self-review finding: the dedup check was
+    refactored from one SELECT per document to a single batched SELECT
+    over all candidate hashes up front. That batching must not let two
+    documents with identical text in the SAME call both slip past the
+    (now snapshot-in-time) existing_hashes set and get stored twice."""
+    provider = _FakeDocumentProvider([
+        _raw_document(text="Duplicated filing text.", document_type="10-K"),
+        _raw_document(text="Duplicated filing text.", document_type="10-K"),
+    ])
+    stored = ingest_company_documents(engine, provider, "NVDA")
+    assert stored == 1
+    with Session(engine) as session:
+        assert len(session.scalars(select(CompanyDocument)).all()) == 1
+
+
+def test_ingest_stores_only_the_new_documents_in_a_mixed_batch(engine):
+    """A second run against a provider that returns one already-stored
+    document plus one genuinely new one must store only the new one --
+    proving the batched existing-hash lookup still catches previously
+    persisted rows, not just duplicates within a single call."""
+    first_provider = _FakeDocumentProvider([_raw_document(text="Already stored.", document_type="10-K")])
+    ingest_company_documents(engine, first_provider, "NVDA")
+
+    second_provider = _FakeDocumentProvider([
+        _raw_document(text="Already stored.", document_type="10-K"),
+        _raw_document(text="Brand new filing.", document_type="10-Q"),
+    ])
+    stored = ingest_company_documents(engine, second_provider, "NVDA")
+    assert stored == 1
+    with Session(engine) as session:
+        texts = set(session.scalars(select(CompanyDocument.text)).all())
+    assert texts == {"Already stored.", "Brand new filing."}

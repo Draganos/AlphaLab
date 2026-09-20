@@ -41,14 +41,24 @@ def ingest_company_documents(
         return 0
     retrieved_at = datetime.now(UTC).replace(tzinfo=None)
     stored = 0
+    content_hashes = {raw["text"]: _content_hash(normalized, raw["text"]) for raw in raw_documents}
     with Session(engine) as session:
-        for raw in raw_documents:
-            content_hash = _content_hash(normalized, raw["text"])
-            existing = session.scalar(
-                select(CompanyDocument.id).where(CompanyDocument.content_hash == content_hash)
+        # One batched lookup for every candidate hash rather than one
+        # SELECT per document -- a ticker with dozens of already-ingested
+        # filings would otherwise pay one round trip per filing on every
+        # re-run just to discover it has nothing new to store.
+        existing_hashes = set(
+            session.scalars(
+                select(CompanyDocument.content_hash).where(
+                    CompanyDocument.content_hash.in_(content_hashes.values())
+                )
             )
-            if existing is not None:
+        )
+        for raw in raw_documents:
+            content_hash = content_hashes[raw["text"]]
+            if content_hash in existing_hashes:
                 continue
+            existing_hashes.add(content_hash)  # guards against duplicate rows within this same batch
             session.add(CompanyDocument(
                 ticker=normalized,
                 document_date=raw["document_date"],

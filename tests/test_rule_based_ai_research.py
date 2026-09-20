@@ -101,3 +101,21 @@ def test_analyze_ignores_documents_without_an_id():
     documents = [{"text": "Strong demand.", "title": "T", "source": "x", "document_date": "2026-01-01"}]
     result = provider.analyze("NVDA", documents)
     assert result.evidence == []
+
+
+def test_analyze_survives_an_excerpt_that_would_trip_the_price_target_validator():
+    """Regression test for a self-review finding: a real 10-K/10-Q
+    risk-factor section discussing analyst price targets anywhere near a
+    matched lexicon phrase used to raise inside EvidenceReference's own
+    validator, and analyze_documents' blanket exception handler would
+    then discard the ENTIRE result -- silently reproducing the exact 0%
+    ai_research coverage this module exists to fix. The phrase match must
+    still count toward the score; only that one unsafe excerpt is
+    dropped from evidence."""
+    text = "Even after analysts lowered their price target, we saw strong demand for our products."
+    provider = RuleBasedFinancialResearchProvider()
+    result = provider.analyze("NVDA", [_document(1, text)])
+    assert result.demand_score > 0  # the match still counts toward the score
+    for reference in result.evidence:
+        assert "price target" not in reference.excerpt.lower()
+        assert "target price" not in reference.excerpt.lower()

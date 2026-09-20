@@ -16,10 +16,7 @@ missing, never invented" pattern applied to filings instead of articles.
 from datetime import date
 from html.parser import HTMLParser
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 import re
-import time
 
 from alpha_lab.providers.interfaces import CompanyDocumentProvider
 from alpha_lab.providers.sec_edgar import SUPPORTED_FORMS, SECClient, SECCompanyFactsProvider
@@ -113,20 +110,34 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
         cik = self._facts_provider.company_tickers().get(normalized)
         if cik is None:
             return []
-        submissions = self.client.get_json(f"/submissions/CIK{cik}.json")
-        recent = submissions.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        filed_dates = recent.get("filingDate", [])
-        accessions = recent.get("accessionNumber", [])
-        primary_documents = recent.get("primaryDocument", [])
+        # refresh=True: unlike XBRL facts (used for backtesting, where a
+        # cached snapshot is fine), the filing INDEX is what tells this
+        # method about a filing made since the last run -- caching it
+        # forever would permanently blind every future refresh to new
+        # 10-Ks/10-Qs. The filing documents themselves (fetched below via
+        # get_text, default refresh=False) are immutable once filed, so
+        # caching those forever is correct and desirable.
+        submissions = self.client.get_json(f"/submissions/CIK{cik}.json", refresh=True)
+        rows = list(_filing_rows(submissions.get("filings", {}).get("recent", {})))
+        # SEC caps "recent" at roughly the most recent 1,000 filings across
+        # every form type (8-K, Form 4, proxies, ... not just 10-K/10-Q),
+        # so a long-lived or actively-filing issuer's older 10-Ks/10-Qs
+        # live in one or more paginated `filings.files` entries instead --
+        # confirmed live: NVDA and MA (both filing since the late 1990s/
+        # early 2000s) each have exactly one such page. Skipping these
+        # would silently truncate filing history for exactly the tickers
+        # most worth having deep history for.
+        for page in submissions.get("filings", {}).get("files", []):
+            name = page.get("name")
+            if not name:
+                continue
+            page_payload = self.client.get_json(f"/submissions/{name}")
+            rows.extend(_filing_rows(page_payload))
 
         documents: list[dict[str, Any]] = []
-        for form, filed_date_raw, accession, primary_document in zip(
-            forms, filed_dates, accessions, primary_documents
-        ):
+        for form, filed_date, accession, primary_document in rows:
             if form not in SUPPORTED_FORMS:
                 continue
-            filed_date = date.fromisoformat(filed_date_raw)
             if since is not None and filed_date < since:
                 continue
             accession_nodash = accession.replace("-", "")
@@ -135,7 +146,15 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
                 f"https://www.sec.gov/Archives/edgar/data/"
                 f"{cik_nodash}/{accession_nodash}/{primary_document}"
             )
-            html = self._fetch_document_html(source_url)
+            # A single filing document failing (network, a 404 for a
+            # primary document SEC's own index listed but no longer
+            # serves) skips just that one document -- mirrors
+            # NewsService.refresh's "one item failing never aborts the
+            # batch" rule -- rather than aborting every other filing for
+            # this ticker. get_text also caches each real filing to disk
+            # (a filing's own text is immutable once filed), so a later
+            # re-run never re-downloads one already fetched.
+            html = self.client.get_text(source_url)
             if html is None:
                 continue
             documents.append({
@@ -147,20 +166,18 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
             })
         return documents
 
-    def _fetch_document_html(self, url: str) -> str | None:
-        """A single filing document fetch failing (network, a 404 for a
-        primary document SEC's own index listed but no longer serves) skips
-        just that one document -- mirrors `NewsService.refresh`'s "one item
-        failing never aborts the batch" rule -- rather than aborting every
-        other filing for this ticker."""
-        wait = self.client.minimum_interval - (time.monotonic() - self.client._last_request)
-        if wait > 0:
-            time.sleep(wait)
-        request = Request(url, headers={"User-Agent": self.client.user_agent})
-        try:
-            with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed SEC EDGAR host
-                html = response.read().decode("utf-8", errors="replace")
-        except (HTTPError, URLError, TimeoutError):
-            return None
-        self.client._last_request = time.monotonic()
-        return html
+
+def _filing_rows(payload: dict[str, Any]) -> list[tuple[str, date, str, str]]:
+    """(form, filed_date, accession, primary_document) rows from either the
+    top-level `filings.recent` object or a paginated `filings.files` page --
+    both share the same parallel-array shape, just at different nesting."""
+    forms = payload.get("form", [])
+    filed_dates = payload.get("filingDate", [])
+    accessions = payload.get("accessionNumber", [])
+    primary_documents = payload.get("primaryDocument", [])
+    return [
+        (form, date.fromisoformat(filed_date_raw), accession, primary_document)
+        for form, filed_date_raw, accession, primary_document in zip(
+            forms, filed_dates, accessions, primary_documents
+        )
+    ]

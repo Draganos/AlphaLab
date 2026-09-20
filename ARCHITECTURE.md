@@ -2809,3 +2809,85 @@ traces to that smoke test's own `date.today()`-relative `Estimate`
 fixtures shifting real analyst-revision windows day to day, the same
 "needs real elapsed time" shape §35 already documented elsewhere).
 `git diff --check`: clean.
+
+### 36.1 Self-review findings, fixed before merge
+
+A `/code-review --diff high` pass against this phase's own diff (per
+explicit request: "bug check") found six real issues, all verified
+against actual code or live data before fixing, none requiring a design
+change:
+
+1. **A single unsafe excerpt silently zeroed an entire ticker's
+   analysis.** `EvidenceReference`'s own `no_price_target` validator
+   raises `ValueError` if an excerpt contains "price target"/"target
+   price" (a real 10-K/10-Q risk-factor section discussing analyst price
+   targets near an otherwise-real lexicon match), and
+   `analyze_documents` catches *any* exception from the whole `analyze()`
+   call and returns `None` for the whole result -- reproducing the exact
+   0% `ai_research` coverage this phase exists to fix, for any ticker
+   unlucky enough to have one such excerpt. Confirmed by directly
+   constructing the crash-triggering `EvidenceReference` and observing
+   the real `ValidationError`. Fixed in `RuleBasedFinancialResearchProvider._to_evidence`:
+   the `try/except ValueError` now wraps each individual excerpt, so one
+   unsafe excerpt is dropped from `evidence` while the phrase match still
+   counts toward the score (`test_analyze_survives_an_excerpt_that_would_trip_the_price_target_validator`).
+2. **The filing index was permanently cached after its first fetch.**
+   `SECFilingDocumentProvider.get_documents` called `client.get_json`
+   with the default `refresh=False` for `/submissions/CIK{cik}.json` --
+   correct for an individual filing document (immutable once filed) but
+   wrong for the index itself, which is exactly what tells a re-run
+   about filings made since the last one. Fixed by passing
+   `refresh=True` for that one call
+   (`test_get_documents_refreshes_the_submissions_index_every_call`).
+3. **Older filings were silently truncated.** `filings.recent` in SEC's
+   submissions JSON is capped at roughly the most recent ~1,000 filings
+   across *every* form type combined; a long-lived filer's older 10-Ks/
+   10-Qs live instead in paginated `filings.files` entries, fetchable at
+   `/submissions/{name}`. Confirmed live: NVDA has a paginated file
+   covering 1998-03-06 to 2020-08-17 (1,484 filings), MA one covering
+   2001-06-06 to 2019-03-02 (1,379 filings) -- matching this phase's own
+   earlier real-data validation's observed cutoffs exactly. Fixed by
+   adding `_filing_rows()` and merging every `filings.files` page into
+   the row set before filtering to `SUPPORTED_FORMS`
+   (`test_get_documents_merges_paginated_filing_history`).
+4. **No caching on the filing-document HTML fetch**, so every re-run
+   re-downloaded and re-parsed every already-ingested filing, not just
+   new ones. Fixed as a direct consequence of finding 6 below: routing
+   the fetch through `SECClient.get_text`, which shares `get_json`'s
+   disk-cache pattern, made previously-fetched filing text free on
+   subsequent runs.
+5. **N+1 dedup queries.** `ingest_company_documents` issued one
+   `SELECT` per candidate document to check `content_hash` membership,
+   so a ticker with dozens of already-ingested filings paid one round
+   trip per filing on every re-run just to discover it had nothing new.
+   Fixed by batching into a single
+   `SELECT content_hash WHERE content_hash IN (...)` before the loop,
+   with an in-loop `existing_hashes.add(...)` guard against duplicate
+   text within the same batch (no chunking needed: realistic per-ticker
+   filing counts are well under SQLite's ~999 bind-parameter limit,
+   unlike the ticker-universe case elsewhere in this codebase that does
+   need it). `test_ingest_deduplicates_identical_text_within_the_same_batch`
+   and `test_ingest_stores_only_the_new_documents_in_a_mixed_batch` cover,
+   respectively, the within-batch guard and the across-runs lookup.
+6. **Encapsulation violation.** The original filing-document fetch
+   reached into `SECClient`'s private `_last_request` attribute from
+   outside the class to implement its own second HTTP fetch path
+   instead of reusing `SECClient`'s shared identity/pacing/retry
+   handling. Fixed by adding a proper public `SECClient.get_text(url,
+   *, refresh=False) -> str | None` method (same disk-cache/pacing/retry
+   shape as `get_json`, returns `None` rather than raising on total
+   failure) and removing the provider's own fetch method entirely
+   (`tests/test_sec_edgar_client.py`, 4 tests;
+   `test_get_documents_uses_get_text_not_a_second_http_client`).
+
+`tests/test_sec_filings.py` was fully rewritten (13 tests, up from 10)
+to mock `get_json`/`get_text` instead of a since-removed method, and
+gained the three regression tests above (findings 2, 3, 6).
+`tests/test_company_document_ingestion.py` grew to 8 tests (finding 5).
+`tests/test_rule_based_ai_research.py` grew to 11 tests (finding 1).
+Full test suite, all three smoke tests, and `git diff --check` all
+re-run clean after these fixes (one unrelated pre-existing failure in
+`tests/test_dependency_lock.py`, confirmed via `git stash` to fail
+identically without this phase's changes -- installed package versions
+in this environment have drifted from `requirements.lock`, unrelated to
+this phase).

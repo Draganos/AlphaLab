@@ -163,10 +163,24 @@ def _find_all(
 
 
 def _to_evidence(hits: list[tuple[str, int, str]]) -> list[EvidenceReference]:
-    return [
-        EvidenceReference(document_id=document_id, excerpt=excerpt)
-        for _phrase, document_id, excerpt in hits
-    ]
+    """One real 10-K/10-Q risk-factor section discussing analyst price
+    targets anywhere near a matched phrase would otherwise raise inside
+    `EvidenceReference`'s own `no_price_target` validator -- and since
+    `analyze_documents` catches any exception from the whole `analyze()`
+    call and discards the entire result, one such excerpt would silently
+    zero out every dimension's real score for that ticker, reproducing
+    the exact 0% coverage this module exists to fix. A hit whose excerpt
+    trips that validator is skipped as evidence (it already contributed
+    to the phrase count that drives the score above, via `_find_all`'s
+    caller) rather than rewriting the real filing text to route around
+    it, which would misrepresent what the filing actually says."""
+    evidence: list[EvidenceReference] = []
+    for _phrase, document_id, excerpt in hits:
+        try:
+            evidence.append(EvidenceReference(document_id=document_id, excerpt=excerpt))
+        except ValueError:
+            continue
+    return evidence
 
 
 def _confidence(total_matches: int) -> float:

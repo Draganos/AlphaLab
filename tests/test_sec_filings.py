@@ -1,13 +1,11 @@
 """Offline tests for the SEC filing-text ingestion provider (Document
-Evidence Engine). No test here talks to real SEC EDGAR -- SECClient.get_json
-and the raw document fetch are both replaced with fakes."""
+Evidence Engine). No test here talks to real SEC EDGAR -- SECClient's
+get_json/get_text are both replaced with a fake."""
 
 from datetime import date
-from unittest.mock import patch
 
 import pytest
 
-from alpha_lab.providers.sec_edgar import SECClient
 from alpha_lab.providers.sec_filings import (
     MAX_DOCUMENT_TEXT_CHARS,
     SECFilingDocumentProvider,
@@ -56,30 +54,49 @@ def test_html_to_text_is_bounded_by_max_document_text_chars():
 
 
 class _FakeClient:
-    """Stands in for SECClient -- provides get_json and the identity/pacing
-    attributes SECFilingDocumentProvider reads, without any real network
-    access."""
+    """Stands in for SECClient -- provides get_json/get_text and the
+    identity attributes SECFilingDocumentProvider reads, without any real
+    network access."""
 
-    def __init__(self, submissions: dict, *, tickers: dict[str, str] | None = None):
+    def __init__(
+        self, submissions: dict, *, tickers: dict[str, str] | None = None,
+        pages: dict[str, dict] | None = None, document_html: dict[str, str] | None = None,
+        document_html_sequence: list[str | None] | None = None,
+    ):
         self.user_agent = "AlphaLab Test test@example.com"
         self.minimum_interval = 0.0
         self._last_request = 0.0
         self._submissions = submissions
         self._tickers = tickers or {"NVDA": "0001045810"}
+        self._pages = pages or {}
+        self._document_html = document_html or {}
+        self._document_html_sequence = list(document_html_sequence or [])
+        self.get_json_calls: list[tuple[str, bool]] = []
+        self.get_text_calls: list[str] = []
 
     def get_json(self, path: str, *, refresh: bool = False):
+        self.get_json_calls.append((path, refresh))
         if "company_tickers.json" in path:
             return {
                 str(i): {"ticker": ticker, "cik_str": int(cik)}
                 for i, (ticker, cik) in enumerate(self._tickers.items())
             }
+        for name, payload in self._pages.items():
+            if name in path:
+                return payload
         for cik, payload in self._submissions.items():
             if cik in path:
                 return payload
         raise AssertionError(f"Unexpected SEC path requested: {path}")
 
+    def get_text(self, url: str, *, refresh: bool = False) -> str | None:
+        self.get_text_calls.append(url)
+        if self._document_html_sequence:
+            return self._document_html_sequence.pop(0)
+        return self._document_html.get(url, "<p>Filing text.</p>")
 
-def _submissions_payload(*, forms, filed_dates, accessions, primary_documents):
+
+def _submissions_payload(*, forms, filed_dates, accessions, primary_documents, files=None):
     return {
         "filings": {
             "recent": {
@@ -87,7 +104,8 @@ def _submissions_payload(*, forms, filed_dates, accessions, primary_documents):
                 "filingDate": filed_dates,
                 "accessionNumber": accessions,
                 "primaryDocument": primary_documents,
-            }
+            },
+            "files": files or [],
         }
     }
 
@@ -107,8 +125,7 @@ def test_get_documents_filters_to_supported_forms_only():
     )
     client = _FakeClient({"0001045810": submissions})
     provider = SECFilingDocumentProvider(client)
-    with patch.object(SECFilingDocumentProvider, "_fetch_document_html", return_value="<p>Filing text.</p>"):
-        documents = provider.get_documents("NVDA")
+    documents = provider.get_documents("NVDA")
     assert {doc["document_type"] for doc in documents} == {"10-K", "10-Q"}
     assert len(documents) == 2
 
@@ -122,8 +139,7 @@ def test_get_documents_respects_since():
     )
     client = _FakeClient({"0001045810": submissions})
     provider = SECFilingDocumentProvider(client)
-    with patch.object(SECFilingDocumentProvider, "_fetch_document_html", return_value="<p>Filing text.</p>"):
-        documents = provider.get_documents("NVDA", since=date(2025, 1, 1))
+    documents = provider.get_documents("NVDA", since=date(2025, 1, 1))
     assert len(documents) == 1
     assert documents[0]["document_date"] == date(2026, 2, 25)
 
@@ -135,10 +151,9 @@ def test_get_documents_skips_a_single_failed_fetch_without_aborting_the_rest():
         accessions=["0001045810-26-000021", "0001045810-25-000230"],
         primary_documents=["nvda-10k.htm", "nvda-10q.htm"],
     )
-    client = _FakeClient({"0001045810": submissions})
+    client = _FakeClient({"0001045810": submissions}, document_html_sequence=[None, "<p>OK</p>"])
     provider = SECFilingDocumentProvider(client)
-    with patch.object(SECFilingDocumentProvider, "_fetch_document_html", side_effect=[None, "<p>OK</p>"]):
-        documents = provider.get_documents("NVDA")
+    documents = provider.get_documents("NVDA")
     assert len(documents) == 1
     assert "OK" in documents[0]["text"]
 
@@ -148,15 +163,75 @@ def test_get_documents_produces_real_extracted_text_not_raw_html():
         forms=["10-K"], filed_dates=["2026-02-25"],
         accessions=["0001045810-26-000021"], primary_documents=["nvda-10k.htm"],
     )
-    client = _FakeClient({"0001045810": submissions})
+    expected_url = "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-10k.htm"
+    client = _FakeClient(
+        {"0001045810": submissions},
+        document_html={expected_url: "<html><body><p>Revenue grew 20% year over year.</p></body></html>"},
+    )
     provider = SECFilingDocumentProvider(client)
-    with patch.object(
-        SECFilingDocumentProvider, "_fetch_document_html",
-        return_value="<html><body><p>Revenue grew 20% year over year.</p></body></html>",
-    ):
-        documents = provider.get_documents("NVDA")
+    documents = provider.get_documents("NVDA")
     assert documents[0]["text"] == "Revenue grew 20% year over year."
     assert "<p>" not in documents[0]["text"]
-    assert documents[0]["source"] == (
-        "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-10k.htm"
+    assert documents[0]["source"] == expected_url
+
+
+def test_get_documents_refreshes_the_submissions_index_every_call():
+    """The filing index must never be served from a stale cache -- unlike
+    the filing documents themselves (immutable once filed), the index is
+    exactly what tells this method about a filing made since the last
+    run. Regression test for a self-review finding: the first version
+    fetched it with the default refresh=False, permanently blinding every
+    future refresh to new filings after the first cache write."""
+    submissions = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001045810-26-000021"], primary_documents=["nvda-10k.htm"],
     )
+    client = _FakeClient({"0001045810": submissions})
+    provider = SECFilingDocumentProvider(client)
+    provider.get_documents("NVDA")
+    submission_calls = [call for call in client.get_json_calls if "submissions/CIK" in call[0]]
+    assert submission_calls == [("/submissions/CIK0001045810.json", True)]
+
+
+def test_get_documents_merges_paginated_filing_history():
+    """Regression test for a self-review finding: SEC caps `filings.recent`
+    at roughly the most recent 1,000 filings across every form type, so a
+    long-lived filer's older 10-Ks/10-Qs live in a paginated `filings.
+    files` entry instead -- confirmed live against real NVDA/MA data.
+    Skipping these silently truncated filing history for exactly the
+    tickers most worth having deep history for."""
+    recent = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001045810-26-000021"], primary_documents=["recent-10k.htm"],
+        files=[{"name": "CIK0001045810-submissions-001.json", "filingCount": 1, "filingFrom": "2015-01-01", "filingTo": "2020-01-01"}],
+    )
+    page = {
+        "form": ["10-K"],
+        "filingDate": ["2015-02-20"],
+        "accessionNumber": ["0001045810-15-000010"],
+        "primaryDocument": ["old-10k.htm"],
+    }
+    client = _FakeClient(
+        {"0001045810": recent},
+        pages={"CIK0001045810-submissions-001.json": page},
+    )
+    provider = SECFilingDocumentProvider(client)
+    documents = provider.get_documents("NVDA")
+    assert {doc["document_date"] for doc in documents} == {date(2026, 2, 25), date(2015, 2, 20)}
+
+
+def test_get_documents_uses_get_text_not_a_second_http_client():
+    """Regression test for a self-review finding: filing document fetches
+    must go through SECClient's own shared identity/pacing/caching
+    (get_text), never a second, independently-implemented HTTP fetch that
+    reaches into the client's private pacing state from outside."""
+    submissions = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001045810-26-000021"], primary_documents=["nvda-10k.htm"],
+    )
+    client = _FakeClient({"0001045810": submissions})
+    provider = SECFilingDocumentProvider(client)
+    provider.get_documents("NVDA")
+    assert client.get_text_calls == [
+        "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-10k.htm"
+    ]
