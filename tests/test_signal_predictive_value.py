@@ -366,6 +366,30 @@ def test_collect_rule_based_ai_research_observations_pairs_cumulative_documents_
     assert all(isinstance(o.forward_return, float) for o in observations)
 
 
+def test_collect_rule_based_ai_research_observations_windows_out_old_filings(engine):
+    """Regression test for the real score-saturation finding this fix
+    addresses: a filing from more than DOCUMENT_ANALYSIS_WINDOW_DAYS
+    before as_of must not be fed into the reconstruction just because it
+    predates as_of -- only the trailing window, matching what
+    AIResearchService.ensure_all actually does in production."""
+    _seed_prices(engine, "NVDA", [100.0 + i for i in range(760)], start=date(2024, 1, 1))
+    _seed_document(engine, "NVDA", date(2024, 1, 5), "Strong demand for our products this quarter.", doc_id=1)
+    _seed_document(engine, "NVDA", date(2026, 1, 5), "Margin decline continued in the period.", doc_id=2)
+
+    observations = collect_rule_based_ai_research_observations(engine, ["NVDA"], forward_days=5)
+
+    as_of_2026 = next(o for o in observations if o.as_of == date(2026, 1, 5))
+    # Only the second (2026) filing is inside the window at that as_of --
+    # its own phrase ("margin decline") should dominate, not a mix with
+    # the 2024 filing's "strong demand".
+    from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
+    solo_result = RuleBasedFinancialResearchProvider().analyze(
+        "NVDA", [{"id": 2, "text": "Margin decline continued in the period.",
+                   "title": "t", "source": "s", "document_date": "2026-01-05"}],
+    )
+    assert as_of_2026.signal_value == solo_result.ai_rating
+
+
 def test_collect_rule_based_ai_research_observations_skips_tickers_with_no_documents(engine):
     _seed_prices(engine, "NVDA", [100.0 + i for i in range(30)], start=date(2026, 1, 1))
     assert collect_rule_based_ai_research_observations(engine, ["NVDA"], forward_days=5) == []
