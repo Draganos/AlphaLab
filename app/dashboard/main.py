@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
@@ -286,10 +286,15 @@ else:
 st.header("Data Quality")
 st.write("Unavailable fields remain blank and are excluded with visible coverage; no missing factor is silently converted to a positive signal.")
 with Session(engine) as session:
-    latest_prices = session.execute(select(Price.ticker, Price.date).order_by(Price.ticker, Price.date.desc())).all()
-latest_by_ticker: dict[str, date] = {}
-for ticker, observed in latest_prices:
-    latest_by_ticker.setdefault(ticker, observed)
+    # One SQL MAX(date) per ticker, not every price row ever ingested --
+    # the same fix (and the same reason) as alpha_lab.refresh.
+    # stale_universe_tickers's own GROUP BY: this page reruns on every
+    # widget interaction, so pulling the whole universe's full price
+    # history into Python just to find each ticker's latest row is real,
+    # avoidable cost that scales with total price rows (~500/ticker/year),
+    # not with the universe size this table actually needs.
+    latest_prices = session.execute(select(Price.ticker, func.max(Price.date)).group_by(Price.ticker)).all()
+latest_by_ticker: dict[str, date] = dict(latest_prices)
 quality_rows = []
 for ticker, observed in latest_by_ticker.items():
     issue = assess_freshness("price", observed, date.today(), settings.data_quality["stale_price_days"])

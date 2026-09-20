@@ -2393,7 +2393,7 @@ per-ticker loop), while the separate Security Detail tab's own
 single-ticker `get_history` call is untouched. Full test suite and all
 three established smoke tests pass. `git diff --check`: clean.
 
-### 33.1 Follow-up: real incident evidence from the same production run
+### 34.1 Follow-up: real incident evidence from the same production run
 
 The same production run surfaced two further, distinct problems while the
 automatic refresh above was live -- both diagnosed against real evidence
@@ -2434,7 +2434,7 @@ every ticker in the reported log, both directions (the dot/dollar form
 never succeeds, these tickers stay stale forever and get retried on
 *every single* stale-refresh pass -- automatic, manual, and scripted
 alike -- permanently wasting cycles and log noise, and permanently
-inflating the "stale ticker" count this diagnosis's §33 was originally
+inflating the "stale ticker" count this diagnosis's §34 was originally
 about (some fraction of the reported ~3,931 is tickers like these that
 can never succeed, not tickers merely waiting their turn). Fixed with
 `alpha_lab.providers.yfinance_provider._yahoo_symbol`, applied at the
@@ -2458,3 +2458,38 @@ covering every notation observed in the incident, plus a test proving
 the translated symbol -- not the canonical ticker -- is what actually
 reaches `yfinance.Ticker(...)`. Full test suite and all three established
 smoke tests pass. `git diff --check`: clean.
+
+### 34.2 External review: one more full-scan finding, one weak test
+
+An external review of this PR confirmed the diagnosis and fixes above,
+and raised two further points.
+
+**The main page's own Data Quality table still read every price row.**
+`app/dashboard/main.py`'s Data Quality section (unrelated to the
+automatic-refresh trigger in §34, but on the same page) selected
+`(ticker, date)` for **every** `Price` row in the database, ordered by
+ticker/date, and picked each ticker's latest row in Python -- a read that
+scales with total price rows (~500/ticker/year) rather than universe
+size, executed on every rerun of a page Streamlit re-executes on every
+widget interaction. At the reported ~3,931-ticker, ~2-year-history scale
+that is on the order of two million rows fetched into Python per render.
+Fixed with the same SQL `MAX(date) GROUP BY ticker` pattern `alpha_lab.
+refresh.stale_universe_tickers` already established (§30) -- a drop-in
+replacement, since the only thing this table ever needed from that read
+was each ticker's single latest date.
+
+**A weak test assertion in `tests/
+test_evidence_coverage_universe_breakdown.py`.**
+`test_universe_breakdown_flat_rows_include_both_tickers` asserted
+`tickers_seen or len(rows) > 0`, which passes even if only one ticker (or
+neither, so long as some other row exists) actually made it through.
+Since `flatten_coverage_rows` always sets `"ticker"` on every row (its own
+docstring), the test now asserts the exact set, `tickers_seen ==
+{"AAPL", "MSFT"}`, which actually fails if either ticker's rows are
+missing.
+
+**Validation:** new `tests/test_dashboard_data_quality.py` seeds several
+`Price` rows per ticker, inserted out of date order, and confirms
+`latest_by_ticker` reports each ticker's true latest date -- a regression
+guard against `GROUP BY`'s correctness, not just its existence. Full test
+suite and all three smoke tests pass. `git diff --check`: clean.

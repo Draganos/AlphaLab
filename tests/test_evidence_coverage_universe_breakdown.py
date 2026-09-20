@@ -85,7 +85,10 @@ def test_universe_breakdown_flat_rows_include_both_tickers(tmp_path, monkeypatch
         rows = module._load_universe_coverage_rows(
             module.research_service, module.news_service, module.macro_assessment, ("AAPL", "MSFT")
         )
-        tickers_seen = {row["ticker"] for row in rows if "ticker" in row}
-        assert tickers_seen or len(rows) > 0
+        # flatten_coverage_rows always sets "ticker" on every row (see its
+        # own docstring), so this proves both tickers actually made it
+        # through the batched read, not merely that some rows exist.
+        tickers_seen = {row["ticker"] for row in rows}
+        assert tickers_seen == {"AAPL", "MSFT"}
     finally:
         module.engine.dispose()
