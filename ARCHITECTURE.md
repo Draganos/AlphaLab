@@ -2493,3 +2493,82 @@ missing.
 `latest_by_ticker` reports each ticker's true latest date -- a regression
 guard against `GROUP BY`'s correctness, not just its existence. Full test
 suite and all three smoke tests pass. `git diff --check`: clean.
+
+## 35. Evidence Coverage Hardening: Investigation (no code change)
+
+Prompted by a direct question -- "which point do we work on hardening
+coverage" -- rather than a reported bug. `scripts/coverage_report.py`
+against the live 11-ticker universe (3 individual equities -- AAL, MA,
+NVDA -- 2 ETFs, 6 macro-proxy indices/commodities) showed two scoring
+categories, `analyst_revisions` and `ai_research`, at **0% coverage
+across every single ticker**, including MA and NVDA, which are at 100%
+on every other category. Both were traced to root cause against the
+real database rather than guessed at; neither needed a code change.
+
+**`analyst_revisions`: working as designed, needs elapsed time, not
+code.** Real `Estimate` snapshots exist for AAL/MA/NVDA, but only two per
+fiscal period, 3 days apart (this environment's estimates were captured
+2026-09-14 and 2026-09-17). `alpha_lab.ratings.estimates.
+calculate_revision_factors` needs an observation at least 7 days older
+than the current one to compute even its shortest window, so every
+revision metric correctly returns `None` today. The same "needs real
+elapsed time, not more code" shape as §32/§33's own findings -- this
+resolves itself as ingestion keeps running day over day.
+
+**`ai_research`: a real, pre-existing capability gap -- not a bug, and
+not a case for wiring in the newer AI system.** The screener's
+`ai_research` scoring category (`alpha_lab.screener.service`) is fed by
+`alpha_lab.ai`'s `AIResearchAnalysis`/`AIResearchService.ensure_all()` --
+an "attributable to source documents" design gated by `_ai_is_attributable`
+requiring, among other fields, non-empty `analyzed_document_ids`. That
+pipeline needs `CompanyDocument` rows (actual filing/press-release text)
+to analyze, and `company_documents` has **zero rows in this database**.
+Tracing further: `alpha_lab.providers.interfaces.CompanyDocumentProvider`
+is declared but has no concrete implementation anywhere in the codebase
+-- the existing `SECCompanyFactsProvider` only fetches structured XBRL
+numeric facts (revenue, EPS, ...), never narrative filing text. This
+feature was scaffolded (interface + consumer service) back in the
+project's first PR and never completed with a real document source --
+an honest gap the coverage report is correctly surfacing, not a defect
+in what exists.
+
+Separately, `alpha_lab.research.ai_rating`'s `AIResearchAssessment` --
+the system behind the Company Research page's AI Research Rating --
+*does* have real data in this environment (verified: POSITIVE/68.75 for
+MA, POSITIVE/75.0 for NVDA, NEUTRAL/43.75 for AAL). It would be tempting
+to wire this into the empty `ai_research` scoring category, but its own
+module docstring explicitly forbids exactly that: it "interprets
+already-validated AlphaLab evidence" and "must not be blended into
+[`overall_score`]... or the existing `ai_research` rating category...
+which is a different, pre-existing system left completely untouched by
+this module." That boundary is deliberate, not an oversight -- it keeps
+the objective fundamental score and AI qualitative synthesis
+architecturally separate. Blending them to make one coverage number look
+better would be exactly the kind of fabricated-looking improvement this
+project's evidence-first principle exists to prevent.
+
+**Conclusion, recorded rather than acted on:**
+
+| Finding | Status |
+|---|---|
+| `analyst_revisions` coverage | Working correctly; needs elapsed time, not code |
+| `ai_research` scoring coverage | Known unimplemented capability (no document-ingestion provider exists) |
+| `AIResearchAssessment` (AI Research Rating) | Working correctly and independently, by design |
+| Coverage report itself | Correctly surfacing a real gap, not miscomputing anything |
+| Fundamental score / `ai_research` category boundary | Correct as designed; not touched |
+
+**Next roadmap phase, scoped but not started: Document Evidence Engine
+(SEC filing ingestion → legacy `ai_research` scoring).** The narrowest
+version that would close this specific gap: SEC EDGAR 10-K/10-Q filing
+text ingestion into `CompanyDocument` (CIK resolution, filing/accession
+metadata, filed date for PIT, content hash/dedup, source URL), feeding
+the `AIResearchService`/`AIResearchAnalysis` pipeline that already exists
+and is already wired into scoring -- no scoring-architecture change
+needed, only the missing data source. Deliberately out of scope for a
+first version: 8-K filings, press releases, arbitrary web scraping, and
+any change to `AIResearchAssessment`, Research Stance, or the fundamental
+score's own weighting -- each is a separate decision for a later phase,
+not bundled into closing this one gap.
+
+**Validation:** none -- no code changed. This section documents a live-
+database investigation and its conclusion.
