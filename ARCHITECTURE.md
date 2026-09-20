@@ -2572,3 +2572,100 @@ not bundled into closing this one gap.
 
 **Validation:** none -- no code changed. This section documents a live-
 database investigation and its conclusion.
+
+### 35.1 Follow-up: per-ticker sweep against the real dashboard code path
+
+Continued at explicit request ("GDX only has data for momentum, many
+market caps are missing") -- a full sweep of every evidence domain for
+every real ticker (AAL, MA, NVDA, FTEC, GDX), using `build_security_
+coverage_summary` (the exact function the Evidence & Coverage Dashboard
+itself calls), not ad hoc queries. Every apparent gap traced to a
+verified, correct reason; none needed a code change, and none was
+"fixed" by inserting a number.
+
+**Self-correction, recorded rather than hidden.** The first pass of this
+sweep queried `current_fund_evidence`'s JSON payload for a top-level
+`total_net_assets` key and found it `None` for GDX/FTEC, and reported
+that as a bug. It was not one -- `build_fund_evidence` correctly nests
+that field under `payload["operations"]["total_net_assets"]`, and it was
+there all along: GDX `total_net_assets=23608.55`, `expense_ratio=0.0051`;
+FTEC `total_net_assets=691876.75`, `expense_ratio=0.00084` -- both
+persisted values matched a fresh live `funds_data.fund_operations` pull
+exactly. (Yahoo's reporting units for this specific field were not
+independently reconciled against its own separate `info["totalAssets"]`
+figure -- the two don't share a clean scale factor for FTEC -- so this
+records that the persisted value faithfully matches the source, not a
+verified real-world dollar amount; that ambiguity belongs to yfinance's
+own API, not to anything AlphaLab computes.) The mistake here was
+querying the wrong JSON path, not a defect in the persisted data.
+Re-running `scripts/refresh_supplemental_research.py GDX FTEC` (the
+correct, legitimate way to refresh this domain) confirmed the same real
+values were already present before that run. Recorded here so this
+false alarm isn't repeated.
+
+**GDX/FTEC have materially more real coverage than the 8-category
+scoring view alone suggests.** That view correctly shows 5 of 8
+categories `NOT_APPLICABLE` for an ETF (`business_quality`, `earnings_
+growth`, `financial_strength`, `valuation`, `shareholder_return`,
+`analyst_revisions`) and only `momentum` populated -- which reads as
+"only momentum" if that is the only view consulted. The fuller Evidence
+Coverage view (16 rows, not 8) shows real, populated evidence for
+Technical (`FULL`, 1.0), Fund Evidence (`FULL`, 1.0), News (`FULL`, 1.0,
+20 real articles), Macro Regime (`FULL`, 1.0), and AI Evidence
+(`PARTIAL`, 0.87, 2/3 required dimensions assessable) -- five domains
+with genuine data the narrower scoring-category view doesn't surface.
+Only Analyst Consensus/History/Revisions (`NO_EVIDENCE`/`NOT_COMPUTED`
+-- confirmed live: `yf.Ticker("GDX"/"FTEC").get_recommendations()` and
+`.get_analyst_price_targets()` both return empty, genuinely no sell-side
+analyst coverage exists for either ETF on Yahoo) and the `ai_research`
+scoring category (§35's already-documented CompanyDocument gap) are
+without evidence -- both real, both already explained, neither a defect.
+
+**AAL's four "missing" valuation/quality metrics are correct, deliberate
+refusals to compute a misleading ratio -- verified against live data,
+not assumed:**
+
+| Metric | Guard | Verified live |
+|---|---|---|
+| `roe` (Business Quality) | `_positive(total_equity)` | AAL's `total_equity` = **-$3.97B** (real, confirmed in `fundamentals`) |
+| `debt_equity` (Financial Strength) | same negative-equity guard | same |
+| `price_fcf` (Valuation) | `_positive(free_cash_flow)` | AAL's latest-quarter FCF = **-$351M** |
+| `forward_pe` (Valuation) | `_positive(forward_eps)` | AAL's consensus forward EPS = **-$0.17** (confirmed in `raw_metrics["current_consensus_eps"]`) |
+
+Net income divided by negative equity, or price divided by negative FCF
+or negative forward EPS, produces a number that looks like a ratio but
+means nothing (a "negative P/E" convention issue well known in equity
+research) -- `alpha_lab.ratings.quality`/`alpha_lab.ratings.valuation`
+correctly return `None` rather than publish it. AAL's own well-documented
+post-2020 balance sheet (heavy debt, negative equity) is the real cause;
+there is no missing refresh or provider call that would change this.
+`shareholder_return` being `NO_EVIDENCE` for AAL is the same shape:
+confirmed live that AAL pays no dividend (`dividendYield`/`dividendRate`
+both `None`, `payoutRatio` = 0.0) and has no buyback line in its
+quarterly cashflow statement -- genuinely no evidence exists, not a
+capture failure.
+
+**Market cap, precisely:** of the 11 tracked tickers, 3 (AAL/MA/NVDA)
+have it; the other 8 don't, for two different and both-correct reasons.
+6 (`CL=F`, `DX-Y.NYB`, `GC=F`, `^IRX`, `^TNX`, `^VIX`) are futures/
+currency-index/rate instruments that structurally have no market cap at
+all -- forcing a number here would be fabrication, not hardening. The
+remaining 2 (FTEC, GDX) are ETFs, for which Yahoo genuinely never
+reports `marketCap` (confirmed live: `None` for both) -- the correct
+size analog for a fund is AUM, already captured as `FundEvidence.
+total_net_assets`, and (per the self-correction above) was already
+present and correct.
+
+**Conclusion:** after tracing every apparent gap in this universe to
+verified root cause, none was fixable by more code, a fresh refresh, or
+a corrected calculation -- every one is either a genuine absence of real
+evidence (backed by a live check, never assumed) or this codebase's own
+deliberate refusal to compute a misleading ratio from a genuine negative
+input. The two items already on record from §35's first pass
+(`analyst_revisions` needing elapsed time; `ai_research` needing the
+still-unbuilt Document Evidence Engine) remain the only real, actionable
+gaps in this universe.
+
+**Validation:** none -- no code changed. Every claim in this subsection
+was checked against either the live database or a live Yahoo Finance
+call at investigation time, not assumed from code reading alone.
