@@ -56,10 +56,22 @@ each sampled historical date and the ticker's own actual forward return
 starting from that date, using AlphaLab's own stored `Price` history for
 the (already-happened, ground-truth) forward return -- no PIT filtering
 needed on that side, since it asks "what actually happened next in
-reality", not "what did AlphaLab know". Significance uses the standard
-`|r| > 2/sqrt(n)` large-sample approximate threshold for a zero-correlation
-null hypothesis (no `scipy` dependency; this codebase does not otherwise
-depend on it) rather than an exact p-value.
+reality", not "what did AlphaLab know".
+
+Deliberately reported descriptively only (`pearson`/`spearman`/
+`sample_size`), never with a computed "significant" verdict. The standard
+`|r| > 2/sqrt(n)` large-sample threshold assumes `n` independent
+observations; the Analyst Consensus/AI Research Rating domains sample
+every persisted `ResearchSnapshot` for a ticker regardless of how close
+together in time they were recorded, so overlapping forward-return
+windows from snapshots taken days (or less) apart are not independent of
+each other -- treating that raw count as `n` in the threshold would
+overstate confidence. Rather than build the clustering-aware correction
+this would need (e.g. requiring minimum snapshot spacing, or a
+cluster-robust estimator) for what is still a near-zero-history,
+exploratory phase, this module reports the correlation and the sample
+size it came from and leaves the judgment of whether that is compelling
+to whoever reads the result.
 """
 
 from dataclasses import dataclass, field
@@ -74,16 +86,14 @@ from alpha_lab.database.models import Price
 from alpha_lab.research.service import ResearchService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 
-# A correlation computed from fewer real observations than this is never
-# reported as significant -- below this, a spurious-looking |r| close to
-# 1 is far too easy to get by chance alone. Applied two ways: `_correlate`
-# uses it directly to gate `approx_significant` for every domain,
-# including Technical Summary (which never raises -- it always reports
-# whatever it computed, just never flags a tiny sample as significant);
-# Analyst Consensus/AI Research Rating use the *same* value as the
-# default threshold for `InsufficientSnapshotHistory` below, since for
+# The default threshold for `InsufficientSnapshotHistory` below: Analyst
+# Consensus/AI Research Rating raise rather than report a correlation
+# computed from fewer real (ticker, snapshot) pairs than this, since for
 # them the honest answer below this many observations is "not yet
-# testable at all" rather than "computed, but not significant".
+# testable at all". Technical Summary never raises -- it always reports
+# whatever it computed, however small `sample_size` is; see this module's
+# own docstring for why no domain reports a computed "significant"
+# verdict regardless of `n`.
 MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE = 30
 
 
@@ -112,7 +122,6 @@ class CorrelationResult:
     pearson: float | None
     spearman: float | None
     sample_size: int
-    approx_significant: bool
     observations: list[SignalObservation] = field(repr=False, default_factory=list)
 
 
@@ -139,8 +148,7 @@ def _correlate(observations: list[SignalObservation], *, forward_days: int, sign
     if n < 3:
         return CorrelationResult(
             signal_name=signal_name, forward_days=forward_days,
-            pearson=None, spearman=None, sample_size=n,
-            approx_significant=False, observations=observations,
+            pearson=None, spearman=None, sample_size=n, observations=observations,
         )
     frame = pd.DataFrame(
         {
@@ -157,22 +165,9 @@ def _correlate(observations: list[SignalObservation], *, forward_days: int, sign
     spearman = frame["signal"].rank().corr(frame["forward_return"].rank(), method="pearson")
     pearson = None if pd.isna(pearson) else float(pearson)
     spearman = None if pd.isna(spearman) else float(spearman)
-    threshold = 2 / (n**0.5)
-    # Never flag a tiny sample as significant regardless of how large |r|
-    # happens to look -- with few observations a large-looking correlation
-    # is easy to get by chance alone (see MINIMUM_OBSERVATIONS_FOR_
-    # SIGNIFICANCE's own docstring). This applies to every domain,
-    # including Technical Summary, which never raises
-    # InsufficientSnapshotHistory the way the snapshot-based domains do --
-    # without this gate it would report a spurious "significant" result
-    # instead of just under-reporting sample size.
-    approx_significant = (
-        pearson is not None and n >= MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE and abs(pearson) > threshold
-    )
     return CorrelationResult(
         signal_name=signal_name, forward_days=forward_days,
-        pearson=pearson, spearman=spearman, sample_size=n,
-        approx_significant=approx_significant, observations=observations,
+        pearson=pearson, spearman=spearman, sample_size=n, observations=observations,
     )
 
 
@@ -248,7 +243,16 @@ def _collect_snapshot_domain_observations(
     identical rationale). `extract_signal_value(StockResearch) -> float |
     None` isolates the one field each domain differs on; returning `None`
     skips that snapshot (the domain was not computed/available at that
-    point) rather than fabricating a value."""
+    point) rather than fabricating a value.
+
+    The entry price is the first trading day's close *strictly after*
+    `entry.created_at`'s own date, never that same day's close: unlike
+    `collect_technical_summary_observations`'s `as_of` (a deliberate
+    end-of-day reconstruction boundary), `entry.created_at` is a real,
+    uncontrolled intraday timestamp -- a snapshot recorded mid-session
+    could otherwise be paired with a same-day closing price that plainly
+    was not yet known at that moment.
+    """
     service = ResearchService(engine, settings)
     observations: list[SignalObservation] = []
     for ticker in tickers:
@@ -257,8 +261,8 @@ def _collect_snapshot_domain_observations(
             continue
         for entry in service.get_research_history(ticker):
             as_of = entry.created_at.date()
-            position = prices.index.searchsorted(pd.Timestamp(as_of))
-            if position + forward_days >= len(prices):
+            position = prices.index.searchsorted(pd.Timestamp(as_of), side="right")
+            if position >= len(prices) or position + forward_days >= len(prices):
                 continue
             current_price = prices.iloc[position]
             future_price = prices.iloc[position + forward_days]

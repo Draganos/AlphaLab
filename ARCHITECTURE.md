@@ -2189,15 +2189,13 @@ the forward return -- no PIT filtering needed on that side, since it asks
 "what actually happened next in reality" (already-established fact),
 never "what did AlphaLab know" (which is what the *signal* side must
 still get right, via the same PIT-safe `as_of` reads §30-32 established).
-Significance uses the standard `|r| > 2/sqrt(n)` large-sample approximate
-threshold, gated additionally on `n >= MINIMUM_OBSERVATIONS_FOR_
-SIGNIFICANCE` -- both are needed; per the self-review finding below, a
-technically-large `|r|` from a handful of points is not evidence of
-anything. No `scipy` dependency (not otherwise used in this codebase):
-Spearman is computed as Pearson correlation of the rank-transformed
-values (`Series.rank()`, pure pandas/numpy), which is mathematically
-identical to pandas' own `method="spearman"` but avoids the transitive
-scipy dependency that path silently pulls in.
+Reported descriptively only (`pearson`/`spearman`/`sample_size`), never
+with a computed "significant" verdict -- see the external review finding
+below for why. No `scipy` dependency (not otherwise used in this
+codebase): Spearman is computed as Pearson correlation of the
+rank-transformed values (`Series.rank()`, pure pandas/numpy), which is
+mathematically identical to pandas' own `method="spearman"` but avoids
+the transitive scipy dependency that path silently pulls in.
 
 **Self-review findings, fixed before this PR:**
 
@@ -2222,6 +2220,39 @@ scipy dependency that path silently pulls in.
    rank-transform approach above (verified correct against pandas' own
    Spearman on a hand-checked example, and verified to still work with
    scipy's import actively blocked).
+
+**External review findings, fixed after opening this PR:**
+
+3. **The significance flag treated repeated snapshots as independent
+   observations.** `|r| > 2/sqrt(n)` assumes `n` independent samples, but
+   `_collect_snapshot_domain_observations` counts every persisted
+   `ResearchSnapshot` for a ticker as one observation regardless of how
+   close together in time they were recorded -- two snapshots a day apart
+   have forward-return windows overlapping in all but one day, which is
+   the classic clustered/repeated-measures problem (see e.g.
+   `statsmodels`' GEE estimator, built for exactly this). Treating that
+   raw count as `n` in the threshold overstates confidence. Rather than
+   build the clustering-aware correction this would need (minimum
+   snapshot spacing, or a cluster-robust estimator) for what is still a
+   near-zero-history, exploratory phase, `approx_significant` was removed
+   entirely -- `CorrelationResult` now reports `pearson`/`spearman`/
+   `sample_size` descriptively and leaves the judgment of whether that is
+   compelling to whoever reads the result, for every domain including
+   Technical Summary (which has no clustering concern of its own, since
+   `sample_interval_days` already keeps its own samples non-overlapping,
+   but shares the same reporting shape for consistency).
+4. **The snapshot-domain forward-return anchor could use a price not yet
+   known at snapshot time.** `_collect_snapshot_domain_observations` used
+   `entry.created_at.date()`'s own closing price as the entry price for
+   the forward return -- but unlike Technical Summary's `as_of` (a
+   deliberate end-of-day reconstruction boundary), `entry.created_at` is a
+   real, uncontrolled intraday timestamp: a snapshot recorded mid-session
+   (e.g. 11:00) could be paired with that same day's own close, which
+   plainly was not yet known at that moment. Fixed by anchoring on the
+   first trading day's close strictly after the snapshot date instead
+   (`prices.index.searchsorted(..., side="right")`) -- Technical Summary's
+   own sampling is untouched, since its `as_of` already represents "known
+   by end of this day" by construction, not a raw event timestamp.
 
 **Real-data run** (live database, read-only, no network call) -- an
 important, genuine finding discovered by actually running the study, not
@@ -2258,18 +2289,21 @@ and re-deserializes the same payloads twice; not worth the added
 complexity while both return zero real observations in every environment
 that has run this so far.
 
-**Validation:** `tests/test_signal_predictive_value.py` (11 tests) --
-`_correlate`'s own math (perfect positive/negative correlation, pure
-noise reported as not significant, too few observations returns `None`
-not a crash, and the self-review regression: a perfect `|r|=1.0` from 5
-points is never flagged significant), `collect_technical_summary_
-observations`' pairing/skip logic (correct forward-return pairing via a
-hand-computed example, REVIEW samples skipped, short-history and
-untracked tickers produce zero observations without crashing) via a
-monkeypatched `SupplementalResearchService` isolating this module's own
-logic from indicator computation (already exhaustively tested in `tests/
-test_technical_summary.py`), and `collect_analyst_consensus_observations`
+**Validation:** `tests/test_signal_predictive_value.py` (12 tests) --
+`_correlate`'s own math (perfect positive/negative correlation, a small
+pearson for pure noise, too few observations returns `None` not a crash,
+and confirmation `CorrelationResult` reports its true `sample_size`
+without any `approx_significant` attribute even for a technically-perfect
+correlation from 5 points), `collect_technical_summary_observations`'
+pairing/skip logic (correct forward-return pairing via a hand-computed
+example, REVIEW samples skipped, short-history and untracked tickers
+produce zero observations without crashing) via a monkeypatched
+`SupplementalResearchService` isolating this module's own logic from
+indicator computation (already exhaustively tested in `tests/
+test_technical_summary.py`), `collect_analyst_consensus_observations`
 raising below the threshold / succeeding once enough real snapshots exist
 (seeded directly, mirroring this session's established `_set_created_at`
-PIT-testing pattern). Full test suite and all three established smoke
-tests pass. `git diff --check`: clean.
+PIT-testing pattern), and the external-review regression: a snapshot
+recorded mid-session is paired with the next trading day's close, never
+that same day's own close. Full test suite and all three established
+smoke tests pass. `git diff --check`: clean.

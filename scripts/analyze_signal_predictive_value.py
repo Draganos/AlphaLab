@@ -44,7 +44,6 @@ def _report(result: CorrelationResult) -> None:
         return
     print(f"  pearson:  {result.pearson:+.3f}")
     print(f"  spearman: {result.spearman:+.3f}")
-    print(f"  approximately significant (|r| > 2/sqrt(n)): {result.approx_significant}")
 
 
 def main() -> int:

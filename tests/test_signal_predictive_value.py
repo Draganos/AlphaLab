@@ -66,7 +66,6 @@ def test_correlate_reports_perfect_positive_correlation():
     assert result.pearson == pytest.approx(1.0)
     assert result.spearman == pytest.approx(1.0)
     assert result.sample_size == MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE
-    assert result.approx_significant is True
 
 
 def test_correlate_reports_perfect_negative_correlation():
@@ -76,15 +75,16 @@ def test_correlate_reports_perfect_negative_correlation():
     ]
     result = _correlate(observations, forward_days=20, signal_name="test")
     assert result.pearson == pytest.approx(-1.0)
-    assert result.approx_significant is True
 
 
-def test_correlate_never_flags_a_tiny_sample_as_significant_even_with_perfect_correlation():
-    """Self-review finding: a technically-perfect |r|=1.0 from a handful
-    of points is exactly the spurious-significance trap
-    MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE exists to prevent -- this must
-    hold for every domain, not just the ones that raise
-    InsufficientSnapshotHistory below the same threshold."""
+def test_correlate_reports_the_true_sample_size_even_for_a_tiny_sample():
+    """CorrelationResult never claims a "significant" verdict (see this
+    module's own docstring for why -- repeated/clustered snapshots for the
+    same ticker are not independent observations, so a naive |r| >
+    2/sqrt(n) threshold would overstate confidence). A technically-perfect
+    |r|=1.0 from a handful of points is reported plainly, with its real
+    sample_size, for the reader to judge -- never silently upgraded or
+    downgraded."""
     observations = [
         SignalObservation(ticker="NVDA", as_of=date(2026, 1, i + 1), signal_value=float(i), forward_return=float(i) * 0.01)
         for i in range(5)
@@ -92,7 +92,7 @@ def test_correlate_never_flags_a_tiny_sample_as_significant_even_with_perfect_co
     result = _correlate(observations, forward_days=20, signal_name="test")
     assert result.pearson == pytest.approx(1.0)
     assert result.sample_size == 5
-    assert result.approx_significant is False
+    assert not hasattr(result, "approx_significant")
 
 
 def test_correlate_with_fewer_than_three_observations_returns_none_not_a_crash():
@@ -102,13 +102,13 @@ def test_correlate_with_fewer_than_three_observations_returns_none_not_a_crash()
     result = _correlate(observations, forward_days=20, signal_name="test")
     assert result.pearson is None
     assert result.spearman is None
-    assert result.approx_significant is False
     assert result.sample_size == 1
 
 
-def test_correlate_reports_no_significance_for_pure_noise():
-    """A signal genuinely uncorrelated with the outcome must not be
-    reported as significant just because some small |r| came out nonzero."""
+def test_correlate_reports_a_small_pearson_for_pure_noise():
+    """A signal genuinely uncorrelated with the outcome should come out
+    with a small |r| -- this is a math sanity check, not a significance
+    claim (this module never computes one; see its own docstring)."""
     signal_values = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
     forward_returns = [0.01, 0.01, -0.01, -0.01, 0.01, -0.01, -0.01, 0.01]
     observations = [
@@ -118,7 +118,6 @@ def test_correlate_reports_no_significance_for_pure_noise():
     result = _correlate(observations, forward_days=20, signal_name="test")
     assert result.pearson is not None
     assert abs(result.pearson) < 0.5
-    assert result.approx_significant is False
 
 
 # --- collect_technical_summary_observations: pairing + skip logic ----------
@@ -273,3 +272,30 @@ def test_collect_analyst_consensus_observations_succeeds_once_enough_snapshots_e
     observations = collect_analyst_consensus_observations(engine, settings, ["NVDA"], forward_days=5)
     assert len(observations) >= MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE
     assert all(o.ticker == "NVDA" for o in observations)
+
+
+def test_collect_analyst_consensus_observations_never_anchors_on_the_same_days_close(engine):
+    """Regression test for a real PIT concern: entry.created_at is a real,
+    uncontrolled intraday timestamp (unlike Technical Summary's own as_of,
+    a deliberate end-of-day reconstruction boundary) -- a snapshot recorded
+    mid-session must never be paired with that same day's own closing
+    price, which plainly was not yet known at that moment. The entry price
+    must be the first trading day's close strictly after the snapshot."""
+    settings = load_settings()
+    n = MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE + 5
+    closes = [100.0 + i for i in range(n + 10)]
+    _seed_prices(engine, "NVDA", closes)
+    for i in range(n):
+        # Recorded mid-session (11:00), not at a day boundary.
+        _seed_snapshot(
+            engine, settings, "NVDA",
+            datetime(2026, 1, 1, 11, 0) + timedelta(days=i), rating_score=float(i % 3),
+        )
+
+    observations = collect_analyst_consensus_observations(engine, settings, ["NVDA"], forward_days=5)
+    first_day_observation = next(o for o in observations if o.as_of == date(2026, 1, 1))
+
+    same_day_return = closes[5] / closes[0] - 1
+    next_day_return = closes[1 + 5] / closes[1] - 1
+    assert first_day_observation.forward_return == pytest.approx(next_day_return)
+    assert first_day_observation.forward_return != pytest.approx(same_day_return)
