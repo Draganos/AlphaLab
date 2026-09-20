@@ -26,10 +26,9 @@ def main() -> None:
     try:
         create_schema(engine)
         provider = SECCompanyFactsProvider(SECClient(args.user_agent))
-        mapping = provider.company_tickers()
         service = SECIngestionService(provider, engine)
         for ticker in (value.upper() for value in args.tickers):
-            cik = mapping.get(ticker)
+            cik = provider.resolve_cik(ticker)
             if cik is None:
                 print(f"{ticker}: SEC CIK unavailable; no data changed")
                 continue

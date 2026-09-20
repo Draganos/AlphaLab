@@ -107,7 +107,7 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
 
     def get_documents(self, ticker: str, since: date | None = None) -> list[dict[str, Any]]:
         normalized = ticker.strip().upper()
-        cik = self._facts_provider.company_tickers().get(normalized)
+        cik = self._facts_provider.resolve_cik(normalized)
         if cik is None:
             return []
         # refresh=True: unlike XBRL facts (used for backtesting, where a
@@ -127,12 +127,23 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
         # early 2000s) each have exactly one such page. Skipping these
         # would silently truncate filing history for exactly the tickers
         # most worth having deep history for.
+        #
+        # A single page failing (network, a malformed/truncated payload)
+        # must not discard the "recent" rows already collected above, nor
+        # abort the other pages -- the most recent filings are the ones
+        # that matter most, and one bad older-history page is never a
+        # reason to lose them. Mirrors this method's own "one filing
+        # document failing skips just that one" rule below, applied to a
+        # page of the filing index instead of a single document.
         for page in submissions.get("filings", {}).get("files", []):
             name = page.get("name")
             if not name:
                 continue
-            page_payload = self.client.get_json(f"/submissions/{name}")
-            rows.extend(_filing_rows(page_payload))
+            try:
+                page_payload = self.client.get_json(f"/submissions/{name}")
+                rows.extend(_filing_rows(page_payload))
+            except (RuntimeError, ValueError):
+                continue
 
         documents: list[dict[str, Any]] = []
         for form, filed_date, accession, primary_document in rows:
@@ -170,7 +181,14 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
 def _filing_rows(payload: dict[str, Any]) -> list[tuple[str, date, str, str]]:
     """(form, filed_date, accession, primary_document) rows from either the
     top-level `filings.recent` object or a paginated `filings.files` page --
-    both share the same parallel-array shape, just at different nesting."""
+    both share the same parallel-array shape, just at different nesting.
+
+    `strict=True`: these four arrays must be the same length, since each
+    index is one filing's (form, date, accession, document) tuple. Silently
+    zipping mismatched-length arrays (the default) would misalign a form
+    with the wrong filing date or accession rather than fail loudly --
+    reporting a real filing under the wrong metadata is worse than raising,
+    since nothing downstream could tell the two apart."""
     forms = payload.get("form", [])
     filed_dates = payload.get("filingDate", [])
     accessions = payload.get("accessionNumber", [])
@@ -178,6 +196,6 @@ def _filing_rows(payload: dict[str, Any]) -> list[tuple[str, date, str, str]]:
     return [
         (form, date.fromisoformat(filed_date_raw), accession, primary_document)
         for form, filed_date_raw, accession, primary_document in zip(
-            forms, filed_dates, accessions, primary_documents
+            forms, filed_dates, accessions, primary_documents, strict=True
         )
     ]

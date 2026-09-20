@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
-from alpha_lab.database.models import Price, ResearchSnapshot, Security
+from alpha_lab.database.models import CompanyDocument, Price, ResearchSnapshot, Security
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.research import CATEGORY_ORDER, ResearchService
 from alpha_lab.research.ai_rating import AIDimensionValue, AIEvidenceCoverage, AIResearchAssessment
@@ -29,7 +29,10 @@ from alpha_lab.analytics.signal_predictive_value import (
     InsufficientSnapshotHistory,
     SignalObservation,
     _correlate,
+    _forward_return_from,
+    _price_series,
     collect_analyst_consensus_observations,
+    collect_rule_based_ai_research_observations,
     collect_technical_summary_observations,
 )
 
@@ -299,3 +302,75 @@ def test_collect_analyst_consensus_observations_never_anchors_on_the_same_days_c
     next_day_return = closes[1 + 5] / closes[1] - 1
     assert first_day_observation.forward_return == pytest.approx(next_day_return)
     assert first_day_observation.forward_return != pytest.approx(same_day_return)
+
+
+# --- _forward_return_from: the shared PIT-safe forward-return lookup -------
+
+
+def test_forward_return_from_skips_when_as_of_predates_all_stored_price_history(engine):
+    """Regression test for a real bug found while building the rule-based
+    AI research calibration study: NVDA's own SEC filing history starts
+    2020-08-19, but its stored Price history only starts 2021-09-15 --
+    searchsorted's side="right" silently resolves any as_of before the
+    whole series to position 0, which used to get paired with that single
+    2021-09-15 price as if it were "the next trading day after" a filing
+    from over a year earlier. Must be skipped, not silently misattributed."""
+    _seed_prices(engine, "NVDA", [100.0 + i for i in range(30)], start=date(2021, 9, 15))
+    prices = _price_series(engine, "NVDA")
+    assert _forward_return_from(prices, date(2020, 8, 19), forward_days=5) is None
+
+
+def test_forward_return_from_computes_correctly_for_a_normal_gap(engine):
+    _seed_prices(engine, "NVDA", [100.0 + i for i in range(30)], start=date(2026, 1, 1))
+    prices = _price_series(engine, "NVDA")
+    # as_of is the same day as the first stored price -- the resolved
+    # position is the very next day, a one-day gap, well within bounds.
+    forward_return = _forward_return_from(prices, date(2026, 1, 1), forward_days=5)
+    assert forward_return == pytest.approx(prices.iloc[6] / prices.iloc[1] - 1)
+
+
+def test_forward_return_from_none_when_not_enough_future_history(engine):
+    _seed_prices(engine, "NVDA", [100.0, 101.0, 102.0], start=date(2026, 1, 1))
+    prices = _price_series(engine, "NVDA")
+    assert _forward_return_from(prices, date(2026, 1, 1), forward_days=20) is None
+
+
+# --- collect_rule_based_ai_research_observations: real filing-date replay --
+
+
+def _seed_document(engine, ticker: str, document_date: date, text: str, *, doc_id: int | None = None) -> None:
+    with Session(engine) as session:
+        if session.get(Security, ticker) is None:
+            session.add(Security(ticker=ticker))
+            session.commit()
+        document = CompanyDocument(
+            ticker=ticker, document_date=document_date, document_type="10-K",
+            title=f"{ticker} 10-K filed {document_date.isoformat()}", text=text,
+            source="https://example.test", content_hash=f"{ticker}-{document_date.isoformat()}-{doc_id}",
+        )
+        session.add(document)
+        session.commit()
+
+
+def test_collect_rule_based_ai_research_observations_pairs_cumulative_documents_with_forward_return(engine):
+    _seed_prices(engine, "NVDA", [100.0 + i for i in range(60)], start=date(2026, 1, 1))
+    _seed_document(engine, "NVDA", date(2026, 1, 5), "Strong demand for our products this quarter.", doc_id=1)
+    _seed_document(engine, "NVDA", date(2026, 2, 10), "Margin expansion continued in the period.", doc_id=2)
+
+    observations = collect_rule_based_ai_research_observations(engine, ["NVDA"], forward_days=5)
+
+    assert [o.as_of for o in observations] == [date(2026, 1, 5), date(2026, 2, 10)]
+    # The second observation's document set is cumulative (both filings),
+    # so its ai_rating differs from the first (one real filing only).
+    assert observations[0].signal_value != observations[1].signal_value
+    assert all(isinstance(o.forward_return, float) for o in observations)
+
+
+def test_collect_rule_based_ai_research_observations_skips_tickers_with_no_documents(engine):
+    _seed_prices(engine, "NVDA", [100.0 + i for i in range(30)], start=date(2026, 1, 1))
+    assert collect_rule_based_ai_research_observations(engine, ["NVDA"], forward_days=5) == []
+
+
+def test_collect_rule_based_ai_research_observations_skips_tickers_with_no_prices(engine):
+    _seed_document(engine, "NVDA", date(2026, 1, 5), "Strong demand.", doc_id=1)
+    assert collect_rule_based_ai_research_observations(engine, ["NVDA"], forward_days=5) == []

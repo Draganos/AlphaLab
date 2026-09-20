@@ -2891,3 +2891,155 @@ re-run clean after these fixes (one unrelated pre-existing failure in
 identically without this phase's changes -- installed package versions
 in this environment have drifted from `requirements.lock`, unrelated to
 this phase).
+
+## 37. Document ingestion hardening + rule-based AI research calibration
+
+Explicit direction after §36: harden the Document Evidence Engine's real
+ingestion path further, then calibrate `RuleBasedFinancialResearchProvider`'s
+own scores against real forward returns rather than trusting a phrase
+lexicon's design intent alone. Branched directly off §36's PR rather than
+off `main`, so this phase never needs a later rebase across it.
+
+### 37.1 Ingestion hardening
+
+Three real robustness gaps, all found by reading the ingestion code with
+an adversarial eye and confirmed against live behavior, none hypothetical:
+
+1. **A single failed paginated filing-index page aborted the whole
+   ticker.** `SECFilingDocumentProvider.get_documents` already treats one
+   failed *filing document* fetch as skip-just-that-one (`get_text`
+   returns `None`, never raises) -- but a failed *page* fetch
+   (`get_json` for a `filings.files` entry) still propagated straight
+   out, discarding the "recent" filings already collected too. Fixed:
+   each page fetch is now wrapped in `try/except (RuntimeError,
+   ValueError)` and skipped on failure, exactly mirroring the existing
+   per-document rule -- the most recent filings are the ones that matter
+   most, and one unreachable older-history page must never cost a ticker
+   its recent filings as well.
+2. **`_filing_rows` silently misaligned mismatched-length arrays.** Its
+   `zip(forms, filed_dates, accessions, primary_documents)` had no
+   `strict=True`, so a malformed SEC payload (arrays of different
+   lengths) would have quietly zipped a form with the wrong filing date,
+   accession, or document -- reporting a real filing under fabricated
+   metadata, which is worse than failing loudly. Now raises `ValueError`
+   on a length mismatch, caught per-page by fix 1 above so a malformed
+   page still can't take down the rest of the ticker's real filings.
+3. **SEC EDGAR uses different ticker notation than AlphaLab's own
+   canonical tickers -- confirmed live.** `SECCompanyFactsProvider.
+   company_tickers()` keys tickers exactly as SEC's `company_tickers.
+   json` spells them: `"BRK-B"`, not AlphaLab's canonical `"BRK.B"`. A
+   plain `.get(ticker)` therefore silently returned `None` --
+   indistinguishable from "not a real company" -- for every dual-class or
+   preferred-share ticker, exactly the same mismatch already fixed for
+   Yahoo Finance earlier this session (`yfinance_provider._yahoo_symbol`).
+   Verified live: `provider.get_documents("BRK.B")` returned 0 documents
+   before the fix, 112 real Berkshire Hathaway 10-K/10-Q filings after
+   it; `scripts/load_sec_facts.py BRK.B` (the pre-existing SEC facts
+   pipeline, which has carried this exact bug since before this session)
+   went from "SEC CIK unavailable" to 1,379 real facts and 273 filing
+   snapshots. Fixed by extracting the translation into a new shared
+   `alpha_lab.providers.ticker_notation.to_hyphenated_symbol` (both
+   providers were confirmed to need the identical dot->hyphen,
+   `$X`->`-PX` mapping) and adding `SECCompanyFactsProvider.resolve_cik`,
+   now used by both `SECFilingDocumentProvider.get_documents` and
+   `scripts/load_sec_facts.py` in place of a raw dict lookup.
+   `yfinance_provider._yahoo_symbol` now delegates to the same shared
+   function rather than duplicating it.
+
+New `tests/test_ticker_notation.py` (6 cases) and a
+`test_get_documents_resolves_a_dotted_share_class_ticker` regression test
+in `tests/test_sec_filings.py`, which also gained
+`test_get_documents_survives_a_failed_paginated_page_without_losing_recent_filings`,
+`test_get_documents_survives_one_malformed_page_and_keeps_the_others`, and
+`test_filing_rows_raises_loudly_on_mismatched_array_lengths` for findings
+1 and 2.
+
+### 37.2 Calibration: does the rule-based signal predict anything?
+
+`alpha_lab.analytics.signal_predictive_value` gained
+`collect_rule_based_ai_research_observations`/
+`correlate_rule_based_ai_research_with_forward_returns`, extending the
+module's existing signal/forward-return correlation study (§33 Signal
+Predictive-Value Study) to the Document Evidence Engine's own output --
+still read-only, never wired into scoring or backtesting.
+
+Unlike Analyst Consensus/AI Research Rating (gated on `ResearchSnapshot`
+accumulation, near-zero today), this domain is testable immediately for
+a structural reason: its own historical record is each ticker's real SEC
+filing history (`CompanyDocument.document_date`), which already spans
+years, not an accumulating snapshot count -- the same "history that
+already exists regardless of what ran today" shape Technical Summary has
+via `Price`. At each real filing date, the study reconstructs, PIT-safe,
+exactly what `RuleBasedFinancialResearchProvider` would have scored using
+only documents filed on or before that date (never the persisted
+`AIResearchAnalysis` row, which stores only the latest full-history
+analysis), and correlates `AIResearchResult.ai_rating` -- the same 0..100
+composite the `ai_research` scoring category is actually built from --
+against the ticker's own real forward return.
+
+**A real PIT bug found and fixed while building this, affecting
+pre-existing code too.** The first live run produced several NVDA
+observations with an *identical* forward return regardless of filing
+date. Root cause: NVDA's real SEC filing history starts 2020-08-19, but
+its stored `Price` history only starts 2021-09-15 (a live, environment-
+specific fact, not a code bug in isolation) -- `prices.index.searchsorted
+(as_of, side="right")` silently resolves any `as_of` before the whole
+Price series to position 0, so every filing date before 2021-09-15 was
+being paired with that same single 2021-09-15 price as if it were "the
+first trading day after" a filing from over a year earlier. This exact
+`searchsorted` call, with the exact same blind spot, already existed in
+`_collect_snapshot_domain_observations` (used by Analyst Consensus/AI
+Research Rating) -- it had simply never been exercised by a real `as_of`
+old enough to trigger it. Fixed once, shared: a new
+`_forward_return_from(prices, as_of, forward_days)` helper adds a
+`_MAX_NEXT_TRADING_DAY_GAP_DAYS = 10` bound -- if the resolved position's
+own date is more than 10 calendar days after `as_of` (a real weekend or
+holiday cluster is a few days; anything past that means Price history
+simply doesn't cover this era yet), the pairing is skipped as untestable
+rather than silently misattributed. Both `_collect_snapshot_domain_observations`
+and the new `collect_rule_based_ai_research_observations` now share this
+one helper. Regression tests: `test_forward_return_from_skips_when_as_of_predates_all_stored_price_history`,
+`test_forward_return_from_computes_correctly_for_a_normal_gap`,
+`test_forward_return_from_none_when_not_enough_future_history`.
+
+**Real result, reported plainly (not spun toward a predetermined
+conclusion):** `scripts/analyze_signal_predictive_value.py AAL MA NVDA
+--forward-days 20` against the real, live-ingested filing history (45/
+30/25 documents respectively) and real `Price` history produced 59 real
+observations: **pearson +0.065, spearman +0.058** -- both near zero. At
+this sample size and horizon, `RuleBasedFinancialResearchProvider`'s
+`ai_rating` shows no meaningful correlation with subsequent 20-trading-
+day returns for these three tickers. This is an honest, expected result
+for a simple phrase-lexicon heuristic over a 3-ticker sample, not a
+failure to "make the calibration work" -- exactly the module's own
+existing "never spin toward a significance claim the sample doesn't
+support" convention (see its docstring).
+
+**A secondary, real observation worth recording for future work, not
+fixed in this pass:** `ai_rating` trended upward for NVDA across the
+sampled dates (27.78 in 2021 to 36.11 in 2026) as more filings
+accumulated. Each per-dimension score is `max(-2, min(2, positive_count -
+negative_count))` over the *entire* cumulative document set -- so as
+real filing history grows, a dimension with a persistent net-positive
+tilt (ordinary corporate boilerplate skews positive far more often than
+negative) tends toward the +2 cap and stays there, regardless of what
+the most recent filing actually says. This is a real characteristic of
+the production system today (`AIResearchService.ensure_all` also scores
+against the full cumulative document set, not a rolling window) -- not
+unique to this calibration study, and not addressed here; a future phase
+could window the analysis (e.g. trailing N filings) if the cumulative
+scoring turns out to matter for calibration quality once more tickers
+and more history are available for a larger-sample re-run.
+
+New tests in `tests/test_signal_predictive_value.py` (18 total, up from
+12): the three `_forward_return_from` tests above, plus
+`test_collect_rule_based_ai_research_observations_pairs_cumulative_documents_with_forward_return`,
+`test_collect_rule_based_ai_research_observations_skips_tickers_with_no_documents`,
+`test_collect_rule_based_ai_research_observations_skips_tickers_with_no_prices`.
+
+**Validation:** full test suite, all three smoke tests, and `git diff
+--check` all clean (the same unrelated, pre-existing `test_dependency_lock.py`
+environment-drift failure as §36.1, reconfirmed unrelated). Real-data
+validation used live SEC EDGAR and Yahoo/live `Price` data already in
+this environment's database; no fixture or synthetic data anywhere in
+this phase's own findings.

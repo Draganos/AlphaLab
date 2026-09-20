@@ -40,6 +40,21 @@ Scope, decided explicitly rather than assumed:
   it as if it meant something. No code change is needed to "enable" them
   later -- they start working correctly the moment enough real history has
   accumulated; see `MINIMUM_OBSERVATIONS_FOR_SIGNIFICANCE`.
+- **AI Research (rule-based, document-grounded)** is testable today, unlike
+  Analyst Consensus/AI Research Rating above, for a structural reason: its
+  own historical record is each ticker's real SEC filing history
+  (`CompanyDocument.document_date`), not an accumulating `ResearchSnapshot`
+  count -- the exact same "history that already exists regardless of
+  whether anything was refreshed today" shape Technical Summary has via
+  `Price`. `collect_rule_based_ai_research_observations` walks each real
+  filing date and reconstructs, PIT-safe, what `RuleBasedFinancialResearchProvider`
+  would have scored using only documents filed on or before that date --
+  never the persisted `AIResearchAnalysis` row, which stores only the
+  latest full-history analysis, not a point-in-time series. Correlates
+  `AIResearchResult.ai_rating` -- the same 0..100 composite the
+  `ai_research` scoring category itself is built from (see
+  `alpha_lab.ai.research.AIResearchResult.ai_rating`), not a bespoke
+  aggregate invented for this study alone.
 - **Fund Evidence is excluded by design, not by data depth.** Unlike the
   other three, it has no ordinal rating/score field at all (see
   `alpha_lab.research.fund_evidence.FundEvidence`) -- it is purely
@@ -81,8 +96,9 @@ import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
 from alpha_lab.config import Settings
-from alpha_lab.database.models import Price
+from alpha_lab.database.models import CompanyDocument, Price
 from alpha_lab.research.service import ResearchService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 
@@ -141,6 +157,38 @@ def _price_series(engine: Engine, ticker: str) -> pd.Series:
         return pd.Series(dtype=float)
     dates, closes = zip(*rows)
     return pd.Series(list(closes), index=pd.DatetimeIndex(dates).normalize(), dtype=float)
+
+
+# A weekend or a short holiday cluster is a few calendar days; beyond this,
+# the "first trading day strictly after as_of" that searchsorted resolves
+# to is not really that -- it means as_of predates this ticker's entire
+# stored Price history, so side="right" silently resolves to position 0,
+# pairing as_of with whatever price happens to be the EARLIEST stored row,
+# however many months or years later that actually is. Confirmed live:
+# NVDA's own SEC filing history starts 2020-08-19, but its stored Price
+# history only starts 2021-09-15 -- every filing date before that was
+# being silently paired with the same single 2021-09-15 price, producing
+# several identical, misattributed "observations" instead of an honest
+# skip. This bound is what turns that into a skip.
+_MAX_NEXT_TRADING_DAY_GAP_DAYS = 10
+
+
+def _forward_return_from(prices: pd.Series, as_of: date, forward_days: int) -> float | None:
+    """The forward return starting from the first trading day strictly
+    after `as_of`, using `prices` (see `_price_series`) -- or `None` if
+    that can't be computed honestly (see `_MAX_NEXT_TRADING_DAY_GAP_DAYS`
+    for why a resolved position is not always a real answer)."""
+    position = prices.index.searchsorted(pd.Timestamp(as_of), side="right")
+    if position >= len(prices) or position + forward_days >= len(prices):
+        return None
+    resolved_date = prices.index[position].date()
+    if (resolved_date - as_of).days > _MAX_NEXT_TRADING_DAY_GAP_DAYS:
+        return None
+    current_price = prices.iloc[position]
+    if current_price <= 0:
+        return None
+    future_price = prices.iloc[position + forward_days]
+    return float(future_price / current_price - 1)
 
 
 def _correlate(observations: list[SignalObservation], *, forward_days: int, signal_name: str) -> CorrelationResult:
@@ -261,12 +309,8 @@ def _collect_snapshot_domain_observations(
             continue
         for entry in service.get_research_history(ticker):
             as_of = entry.created_at.date()
-            position = prices.index.searchsorted(pd.Timestamp(as_of), side="right")
-            if position >= len(prices) or position + forward_days >= len(prices):
-                continue
-            current_price = prices.iloc[position]
-            future_price = prices.iloc[position + forward_days]
-            if current_price <= 0:
+            forward_return = _forward_return_from(prices, as_of, forward_days)
+            if forward_return is None:
                 continue
             research = service.get_research_snapshot(entry.snapshot_id)
             if research is None:
@@ -277,7 +321,7 @@ def _collect_snapshot_domain_observations(
             observations.append(
                 SignalObservation(
                     ticker=ticker, as_of=as_of, signal_value=signal_value,
-                    forward_return=float(future_price / current_price - 1),
+                    forward_return=forward_return,
                 )
             )
     return observations
@@ -351,3 +395,80 @@ def correlate_ai_research_assessment_with_forward_returns(
 ) -> CorrelationResult:
     observations = collect_ai_research_assessment_observations(engine, settings, tickers, forward_days=forward_days)
     return _correlate(observations, forward_days=forward_days, signal_name="ai_research_assessment.score")
+
+
+def collect_rule_based_ai_research_observations(
+    engine: Engine,
+    tickers: list[str],
+    *,
+    forward_days: int = 20,
+) -> list[SignalObservation]:
+    """Walk each ticker's own real SEC filing history (`CompanyDocument.
+    document_date`) and, at each distinct filing date, reconstruct what
+    `RuleBasedFinancialResearchProvider` would have scored using only
+    documents filed on or before that date -- a real point-in-time replay,
+    never the persisted `AIResearchAnalysis` row (which holds only the
+    latest full-history analysis). Pairs `AIResearchResult.ai_rating` --
+    the same composite the `ai_research` scoring category is built from --
+    with the ticker's own actual forward return starting from the first
+    trading day strictly after the filing date (same PIT-safety rationale
+    as `_collect_snapshot_domain_observations`: a filing's own `filed`
+    date is a real, uncontrolled date, not a deliberate end-of-day
+    boundary like Technical Summary's `as_of`).
+
+    A ticker with no ingested documents, or no `Price` history, is skipped
+    entirely -- this never raises `InsufficientSnapshotHistory` the way
+    Analyst Consensus/AI Research Rating do, since filing history is not
+    gated on elapsed wall-clock time the way `ResearchSnapshot`
+    accumulation is; whatever real filing history already exists is
+    already testable today."""
+    provider = RuleBasedFinancialResearchProvider()
+    observations: list[SignalObservation] = []
+    for ticker in tickers:
+        normalized = ticker.strip().upper()
+        prices = _price_series(engine, normalized)
+        if prices.empty:
+            continue
+        with Session(engine) as session:
+            documents = list(
+                session.scalars(
+                    select(CompanyDocument)
+                    .where(CompanyDocument.ticker == normalized)
+                    .order_by(CompanyDocument.document_date)
+                )
+            )
+        if not documents:
+            continue
+        filing_dates = sorted({document.document_date for document in documents})
+        for as_of in filing_dates:
+            forward_return = _forward_return_from(prices, as_of, forward_days)
+            if forward_return is None:
+                continue
+            as_of_documents = [document for document in documents if document.document_date <= as_of]
+            result = provider.analyze(
+                normalized,
+                [
+                    {
+                        "id": document.id,
+                        "text": document.text,
+                        "title": document.title,
+                        "source": document.source,
+                        "document_date": document.document_date.isoformat(),
+                    }
+                    for document in as_of_documents
+                ],
+            )
+            observations.append(
+                SignalObservation(
+                    ticker=normalized, as_of=as_of, signal_value=result.ai_rating,
+                    forward_return=forward_return,
+                )
+            )
+    return observations
+
+
+def correlate_rule_based_ai_research_with_forward_returns(
+    engine: Engine, tickers: list[str], *, forward_days: int = 20,
+) -> CorrelationResult:
+    observations = collect_rule_based_ai_research_observations(engine, tickers, forward_days=forward_days)
+    return _correlate(observations, forward_days=forward_days, signal_name="rule_based_ai_research.ai_rating")
