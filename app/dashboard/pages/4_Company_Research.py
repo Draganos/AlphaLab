@@ -1,6 +1,10 @@
 """Evidence-oriented company drill-down, driven by the canonical StockResearch object."""
 
 from datetime import date
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import streamlit as st
 from sqlalchemy import select

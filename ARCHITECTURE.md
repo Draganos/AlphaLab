@@ -3043,3 +3043,126 @@ environment-drift failure as §36.1, reconfirmed unrelated). Real-data
 validation used live SEC EDGAR and Yahoo/live `Price` data already in
 this environment's database; no fixture or synthetic data anywhere in
 this phase's own findings.
+
+## 38. External Calibration / Macro Regime / Alignment: three real bugs found live
+
+User request: "Check if the pages are functioning correctly as i feel
+like the infrastructure is functional but works in an incorrect order.
+Certain refreshes should trigger certain things," pointing at
+`External_Calibration`, `Macro_Regime`, and `Alignment`. Investigated by
+reading every service/page in the chain, then actually running the
+dashboard (`streamlit run app/dashboard/main.py`) in a real browser
+(Playwright + the sandbox's pre-installed Chromium) rather than
+theorizing from code alone. Found three real, distinct bugs -- the
+user's instinct was correct on both counts named in the request.
+
+### 38.1 Six dashboard pages crashed on a cold direct page load
+
+`app/dashboard/pages/1_Backtests.py` and `2_Experiments.py` each start
+with their own `sys.path.insert(0, str(Path(__file__).resolve().parents[3]))`
+so `alpha_lab` is importable regardless of how Streamlit reached them.
+Pages 3 through 8 (`Market_Screener`, `Company_Research`,
+`External_Calibration`, `Macro_Regime`, `Alignment`, `Evidence_Coverage`)
+had no such line -- they relied entirely on `app/dashboard/main.py`
+having already executed at least once in the same server process (which
+carries its own `sys.path.insert` and mutates the process-global
+`sys.path`).
+
+Reproduced live: a fresh `streamlit run` process, with a browser
+navigating directly to `/Alignment` (exactly the kind of URL the user's
+own request linked to) without visiting `/` first, crashed with
+`ModuleNotFoundError: No module named 'alpha_lab'` at the page's own
+`from alpha_lab.alignment import ...` line. The same fresh-process
+navigation to `/External_Calibration` and `/Macro_Regime` would fail
+identically (same missing line, same root cause). This is a real
+"infrastructure works but in an incorrect order" bug in the literal
+sense: these six pages only work if `main.py`'s own module-level code
+happens to have run first in that process -- an ordering dependency
+Streamlit's own multipage routing does not guarantee (a bookmarked deep
+link, a shared URL, or the first page hit after a server restart can all
+land on a subpage before `main.py` ever executes).
+
+Fixed by adding the identical `sys.path.insert` line (matching pages 1-2's
+own pattern) to all six affected pages. Verified live: a fresh server
+process navigating directly to `/External_Calibration`, `/Macro_Regime`,
+and `/Alignment` (in that order, no prior visit to `/`) rendered all
+three correctly with no crash.
+
+### 38.2 A live regression in this session's own ticker-notation fix: `DX-Y.NYB`
+
+While live-testing Macro Regime's refresh to validate 38.1's fix, the
+real refresh logged `HTTP Error 404 ... Quote not found for symbol:
+DX-Y-NYB` and reported reduced coverage. Root cause: `MACRO_PROXY_TICKERS`
+uses `"DX-Y.NYB"` (the US Dollar Index) as its canonical ticker --
+already Yahoo's own real symbol, dot included -- but PR #41's new
+`alpha_lab.providers.ticker_notation.to_hyphenated_symbol` (extracted
+from `yfinance_provider._yahoo_symbol`) blindly replaced every `.` with
+`-`, turning it into `"DX-Y-NYB"`, which 404s. Confirmed live both ways:
+`yf.Ticker("DX-Y.NYB").history()` returns real rows; `yf.Ticker("DX-Y-NYB").history()`
+returns none.
+
+The share-class notation this function exists to translate (`"BRK.B"`,
+`"AGM.A"`) always has a one-or-two-letter suffix after the dot; `"NYB"`
+does not. Fixed by only translating a dot when the text after the last
+`.` matches `^[A-Z]{1,2}$` -- `"DX-Y.NYB"` is now left completely
+unchanged, while every existing share-class case (`BRK.B`, `BRK.A`,
+`AGM.A`, `BF.A`, `BF.B`) still translates exactly as before. Verified
+live: Macro Regime's refresh now reports 100% coverage (5/5 indicators
+AVAILABLE, including "US Dollar Index (DXY) trend"), confirmed both via
+a direct script call and in the actual rendered dashboard page.
+`tests/test_ticker_notation.py` gained
+`test_to_hyphenated_symbol_leaves_a_non_share_class_dot_unchanged`.
+
+### 38.3 Alignment silently displays stale evidence with no visible warning
+
+The second half of the user's report -- "certain refreshes should
+trigger certain things" -- is real, though not a bug in the sense of
+incorrect computation: `AlignmentService.refresh()` only recomputes from
+whatever Macro Regime / Donatien Calibration evidence is *already
+stored*; it is never called automatically by either of those two pages'
+own refresh buttons (`MacroRegimeService.refresh()` /
+`ExternalCalibrationService.refresh()`), by explicit, documented design
+throughout this codebase (each domain's own refresh is "meant to be
+triggered explicitly... never from an ordinary page render," and
+`alpha_lab.refresh.run_core_refresh` deliberately excludes all three of
+these supplemental domains). That design choice is sound -- but the
+Alignment page itself gave no visible signal, at the point where its
+result is displayed, that its stored comparison might already be stale
+relative to newer evidence sitting right there in the same database.
+
+Reproduced live: refreshed Macro Regime (real ingestion, `computed_at`
+advanced from 2026-09-14 to 2026-09-20) without touching Alignment.
+`AlignmentService.get_current()` still returned the 2026-09-14 result,
+with nothing on the page's own top-of-page display indicating this (only
+a caption near the unrelated "Recompute alignment" button, easy to miss,
+said to refresh the other two pages first).
+
+Fixed by adding `_staleness_reasons` to `7_Alignment.py`: a pure,
+read-only comparison (no network, no write -- safe on every render, like
+every other read in this codebase) between the stored
+`AlignmentAssessment`'s own recorded input timestamps
+(`market_as_of`/`donatien_retrieved_at`) and whatever `MacroRegimeService`/
+`ExternalCalibrationService.get_current()` report right now. When either
+source is newer, the page now shows an explicit `st.warning` naming which
+source moved and pointing at "Recompute alignment" -- this never
+recomputes anything by itself (preserving the "explicit refresh only, no
+hidden side effects" architecture), it only makes an already-real gap
+visible instead of silent. Verified live: the real database's Alignment
+page (still holding the pre-fix 2026-09-14 result after the Macro Regime
+refresh above) now shows "This alignment is stale relative to newer
+evidence already stored: Macro Regime has newer evidence (as of
+2026-09-20) than this alignment used (as of 2026-09-14)."
+
+New `tests/test_dashboard_alignment_staleness.py` (4 tests, importing the
+page module directly per this codebase's own established
+`test_dashboard_data_quality.py` pattern): a newer Macro Regime is
+flagged, a newer Donatien Calibration is flagged, an already-current
+alignment is not flagged, and a database where neither source has ever
+been refreshed is not flagged (nothing to compare against).
+
+**Validation:** full test suite, all three smoke tests, and `git diff
+--check` all clean (same unrelated pre-existing `test_dependency_lock.py`
+failure). All three fixes verified against the real, running dashboard in
+a real browser (Playwright against the sandbox's pre-installed Chromium),
+not just unit tests -- both the crash-on-cold-load fix and the staleness
+warning were visually confirmed rendering correctly.

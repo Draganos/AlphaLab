@@ -12,6 +12,11 @@ was last persisted by an explicit refresh (this page's button, or
 scripts/refresh_donatien_calibration.py).
 """
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 import streamlit as st
 
 from alpha_lab.calibration import ExternalCalibrationService
