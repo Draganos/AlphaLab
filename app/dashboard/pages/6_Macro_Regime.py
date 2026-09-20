@@ -12,6 +12,11 @@ persisted by an explicit refresh (this page's button, or
 scripts/refresh_macro_regime.py).
 """
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 import streamlit as st
 
 from alpha_lab.config import load_settings

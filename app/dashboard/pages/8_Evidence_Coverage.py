@@ -13,6 +13,11 @@ Macro Regime has already been persisted by other explicit refresh actions
 elsewhere in the app.
 """
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 import pandas as pd
 import streamlit as st
 

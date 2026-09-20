@@ -15,11 +15,18 @@ alignment" action below (or scripts/refresh_alignment.py) after refreshing
 Macro Regime and/or External Calibration on their own pages.
 """
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 import streamlit as st
 
 from alpha_lab.alignment import Alignment, AlignmentAssessment, AlignmentService
+from alpha_lab.calibration import ExternalCalibrationService
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
+from alpha_lab.macro import MacroRegimeService
 
 st.set_page_config(page_title="AlphaLab Alignment", layout="wide")
 st.title("Donatien ↔ Market Regime Alignment")
@@ -99,6 +106,39 @@ def _render_assessment(assessment: AlignmentAssessment) -> None:
             st.info("Why INSUFFICIENT_DATA: " + "; ".join(reasons) + ".")
 
 
+def _staleness_reasons(assessment: AlignmentAssessment, engine) -> list[str]:
+    """Pure database reads (no network, no write) comparing this stored
+    assessment's own recorded inputs against whatever Macro Regime /
+    Donatien Calibration is currently stored -- safe to call on every
+    render, exactly like every other read in this codebase. Each of those
+    two pages requires its own explicit refresh, and this page's own
+    "Recompute alignment" only re-reads what is already stored (see this
+    page's own docstring/caption) -- so a refresh on either of those pages
+    leaves this page showing a stale comparison until it is explicitly
+    told to recompute. This never recomputes anything by itself; it only
+    makes that already-real gap visible instead of silent."""
+    reasons = []
+    current_macro = MacroRegimeService(engine).get_current()
+    if current_macro is not None and (
+        assessment.market_as_of is None or current_macro.as_of > assessment.market_as_of
+    ):
+        reasons.append(
+            f"Macro Regime has newer evidence (as of {current_macro.as_of}) than this "
+            f"alignment used (as of {_dash(assessment.market_as_of)})"
+        )
+    current_calibration = ExternalCalibrationService(engine).get_current()
+    if current_calibration is not None and (
+        assessment.donatien_retrieved_at is None
+        or current_calibration.retrieved_at > assessment.donatien_retrieved_at
+    ):
+        reasons.append(
+            f"Donatien External Calibration has a newer retrieval "
+            f"({current_calibration.retrieved_at} UTC) than this alignment used "
+            f"({_dash(assessment.donatien_retrieved_at)})"
+        )
+    return reasons
+
+
 settings = load_settings()
 engine = make_engine(settings.database_url)
 create_schema(engine)
@@ -114,6 +154,14 @@ if current is None:
 else:
     assessment = AlignmentAssessment.model_validate(current.payload)
     st.caption(f"As of {current.as_of} · computed {current.computed_at} UTC")
+    stale_reasons = _staleness_reasons(assessment, engine)
+    if stale_reasons:
+        st.warning(
+            "This alignment is stale relative to newer evidence already stored: "
+            + "; ".join(stale_reasons)
+            + '. Click "Recompute alignment" below to update it -- refreshing '
+            "Macro Regime or External Calibration never does this automatically."
+        )
     _render_assessment(assessment)
 
     with st.expander("Raw alignment payload (audit view)"):
