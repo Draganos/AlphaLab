@@ -51,6 +51,22 @@ from alpha_lab.screener import MarketScreenerService
 
 DEFAULT_INGESTION_YEARS = 2
 
+# Safety cap on the dashboard's automatic on-session-start refresh (see
+# app/dashboard/main.py): if more tickers are stale than this, the
+# automatic trigger is skipped entirely rather than silently attempting
+# to ingest all of them. Each ticker costs one live provider round-trip
+# (company info + price history + financials) plus, inside
+# IngestionService.ingest, one database query per stored price row for
+# its upsert check -- neither is backgrounded or parallelized, so a
+# stale count in the thousands (e.g. the whole universe going stale at
+# once, or a freshly-loaded large universe) can turn what was meant to be
+# a quick, proportional top-up into a multi-hour blocking page load, the
+# opposite of this trigger's own "loading time doesn't increase
+# substantially" design goal. Above this cap, the existing stale-data
+# warning and manual Full Refresh button remain the way to catch up --
+# refreshing everything is still possible, just never silently automatic.
+MAX_AUTO_REFRESH_TICKERS = 200
+
 
 def _latest_price_by_ticker(engine: Engine) -> dict[str, date]:
     """One row per ticker via SQL `MAX(date)` -- this runs unconditionally

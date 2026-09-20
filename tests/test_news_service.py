@@ -172,3 +172,89 @@ def test_get_history_is_deterministic_across_repeated_calls(engine):
     first = [row.content_hash for row in service.get_history("XOM")]
     second = [row.content_hash for row in service.get_history("XOM")]
     assert first == second
+
+
+# --- get_history_for_tickers: batched read, same PIT/ordering guarantees ---
+
+
+def test_get_history_for_tickers_matches_per_ticker_get_history(engine):
+    """The whole point of the batched read: identical results to calling
+    get_history once per ticker, for a universe-wide caller that would
+    otherwise pay one query per ticker (see app/dashboard/pages/
+    8_Evidence_Coverage.py's Universe Breakdown, which used to do that)."""
+    with Session(engine) as session:
+        session.add(Security(ticker="CVX", country="US", currency="USD"))
+        session.commit()
+    _insert_article(engine, content_hash="xom-old", published_at=datetime(2024, 1, 1), retrieved_at=datetime(2024, 1, 1), ticker="XOM")
+    _insert_article(engine, content_hash="xom-new", published_at=datetime(2024, 2, 1), retrieved_at=datetime(2024, 2, 1), ticker="XOM")
+    _insert_article(engine, content_hash="cvx-only", published_at=datetime(2024, 1, 15), retrieved_at=datetime(2024, 1, 15), ticker="CVX")
+
+    service = NewsService(engine)
+    batched = service.get_history_for_tickers(["XOM", "CVX"])
+
+    assert [row.content_hash for row in batched["XOM"]] == [row.content_hash for row in service.get_history("XOM")]
+    assert [row.content_hash for row in batched["CVX"]] == [row.content_hash for row in service.get_history("CVX")]
+
+
+def test_get_history_for_tickers_omits_tickers_with_no_articles(engine):
+    with Session(engine) as session:
+        session.add(Security(ticker="CVX", country="US", currency="USD"))
+        session.commit()
+    _insert_article(engine, content_hash="xom-only", published_at=datetime(2024, 1, 1), retrieved_at=datetime(2024, 1, 1), ticker="XOM")
+
+    batched = NewsService(engine).get_history_for_tickers(["XOM", "CVX"])
+
+    assert "XOM" in batched
+    assert "CVX" not in batched
+    assert batched.get("CVX", []) == []
+
+
+def test_get_history_for_tickers_respects_as_of(engine):
+    """Same PIT-safety guarantee as get_history's own as_of -- retrieved_at
+    is the sole eligibility boundary, applied identically in the batched
+    query."""
+    _insert_article(engine, content_hash="early", published_at=datetime(2024, 3, 1), retrieved_at=datetime(2024, 3, 1))
+    _insert_article(engine, content_hash="late", published_at=datetime(2024, 3, 1), retrieved_at=datetime(2024, 3, 5))
+
+    as_of_before = NewsService(engine).get_history_for_tickers(["XOM"], as_of=date(2024, 3, 3))
+    assert [row.content_hash for row in as_of_before["XOM"]] == ["early"]
+
+
+def test_get_history_for_tickers_with_empty_ticker_list_returns_empty_dict(engine):
+    assert NewsService(engine).get_history_for_tickers([]) == {}
+
+
+def test_get_history_for_tickers_chunks_beyond_the_single_query_limit(engine):
+    """Regression test for a self-review finding: get_history_for_tickers
+    used to build one IN (...) clause with a bind parameter per ticker,
+    which some SQLite builds (pre-3.32.0's default
+    SQLITE_MAX_VARIABLE_NUMBER=999) reject once the ticker count is large
+    -- exactly the scale (thousands of tickers) the Universe Breakdown page
+    calls this with. Seeds tickers spanning multiple _TICKER_CHUNK_SIZE
+    (500) chunks, with articles on both sides of at least one chunk
+    boundary, and confirms every ticker's history still comes back complete
+    and correctly ordered -- chunking must never drop or misorder results."""
+    from alpha_lab.news.service import _TICKER_CHUNK_SIZE
+
+    ticker_count = _TICKER_CHUNK_SIZE + 250  # spans three chunks
+    tickers = [f"T{i:05d}" for i in range(ticker_count)]
+    with Session(engine) as session:
+        for ticker in tickers:
+            session.add(Security(ticker=ticker, country="US", currency="USD"))
+        session.commit()
+
+    # One article each for a ticker in the first chunk, right at the first
+    # chunk boundary, and in the last (partial) chunk.
+    boundary_tickers = [tickers[0], tickers[_TICKER_CHUNK_SIZE - 1], tickers[_TICKER_CHUNK_SIZE], tickers[-1]]
+    for ticker in boundary_tickers:
+        _insert_article(
+            engine, content_hash=f"{ticker}-a", published_at=datetime(2024, 1, 1),
+            retrieved_at=datetime(2024, 1, 1), ticker=ticker,
+        )
+
+    service = NewsService(engine)
+    batched = service.get_history_for_tickers(tickers)
+
+    assert set(batched.keys()) == set(boundary_tickers)
+    for ticker in boundary_tickers:
+        assert [row.content_hash for row in batched[ticker]] == [row.content_hash for row in service.get_history(ticker)]

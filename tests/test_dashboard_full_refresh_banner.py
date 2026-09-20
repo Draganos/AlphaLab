@@ -31,6 +31,7 @@ from streamlit.testing.v1 import AppTest
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import Price, Security
 from alpha_lab.providers.base import MarketDataProvider
+from alpha_lab.refresh import MAX_AUTO_REFRESH_TICKERS
 from sqlalchemy.orm import Session
 
 _MAIN_PATH = "app/dashboard/main.py"
@@ -153,6 +154,43 @@ def test_automatic_refresh_only_ingests_the_stale_subset_not_the_full_universe(t
 
     assert not at.exception
     assert fake.calls == ["NVDA"]  # AAPL was already fresh -- never touched
+
+
+def test_a_stale_count_above_the_safety_cap_skips_the_automatic_refresh(tmp_path, monkeypatch):
+    """Real-world finding: a stale count in the thousands (the whole
+    universe going stale at once) would turn the automatic trigger's
+    "loading time doesn't increase substantially" design goal into a
+    many-hour blocking page load -- one live provider round-trip per
+    ticker, none of it backgrounded. Above MAX_AUTO_REFRESH_TICKERS, the
+    trigger must skip entirely rather than attempt it."""
+    db_path = tmp_path / "dashboard.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    stale_date = date.today() - timedelta(days=30)
+    with Session(engine) as session:
+        for i in range(MAX_AUTO_REFRESH_TICKERS + 1):
+            ticker = f"T{i:05d}"
+            session.add(Security(ticker=ticker, country="US", currency="USD"))
+            session.add(Price(
+                ticker=ticker, date=stale_date, close=100.0,
+                high=101.0, low=99.0, provider="fixture", currency="USD", source="test",
+            ))
+        session.commit()
+    engine.dispose()
+    monkeypatch.setenv("ALPHALAB_DATABASE_URL", f"sqlite:///{db_path}")
+    fake = _FakeProvider()
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: fake)
+
+    at = AppTest.from_file(_MAIN_PATH)
+    at.run(timeout=60)
+
+    assert not at.exception
+    assert fake.calls == []  # never attempted -- no provider round-trips at all
+    assert any("above the automatic refresh's safety limit" in warning.value for warning in at.warning)
+    assert at.session_state["auto_stale_refresh_attempted"] is True
+    # A later rerun must not retry it either.
+    at.run(timeout=60)
+    assert fake.calls == []
 
 
 def test_a_fully_fresh_universe_never_triggers_the_automatic_refresh(tmp_path, monkeypatch):
