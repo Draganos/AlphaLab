@@ -32,7 +32,7 @@ class YFinanceProvider(
     def _ticker(self, symbol: str):
         import yfinance as yf
 
-        return yf.Ticker(symbol)
+        return yf.Ticker(_yahoo_symbol(symbol))
 
     def get_price_history(self, ticker: str, start: date, end: date) -> pd.DataFrame:
         frame = call_with_classification(
@@ -515,6 +515,29 @@ class YFinanceProvider(
                 }
             )
         return observations
+
+
+def _yahoo_symbol(ticker: str) -> str:
+    """Translate AlphaLab's canonical ticker (as stored in `Security.ticker`,
+    following the universe listing's own share-class notation) into the
+    symbol Yahoo Finance actually recognizes. Only the outbound request
+    to Yahoo is affected -- every value this provider returns still uses
+    the original `ticker` (see e.g. `get_company_info`'s `"ticker":
+    ticker.upper()`), so callers never see anything but the canonical
+    symbol.
+
+    Two real notations were confirmed live to 404 permanently against
+    Yahoo, every single refresh, until translated: a dot-separated share
+    class (e.g. "BRK.B", "AGM.A") resolves on Yahoo as a hyphen ("BRK-B",
+    "AGM-A"), and a dollar-sign preferred-share suffix (e.g. "AHL$D",
+    "EPR$E") resolves as a hyphen plus "P" ("AHL-PD", "EPR-PE") -- both
+    verified against live Yahoo data across a sample of tickers reported
+    stuck in this state in production.
+    """
+    if "$" in ticker:
+        base, _, suffix = ticker.partition("$")
+        return f"{base}-P{suffix}"
+    return ticker.replace(".", "-")
 
 
 def _normalize_news_item(item: dict[str, Any]) -> dict[str, Any] | None:

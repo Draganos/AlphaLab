@@ -4,16 +4,39 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session
 
 from alpha_lab.database.models import Base, Fundamental
 
+# How long a SQLite connection waits on a lock held by another connection
+# before raising "database is locked", instead of failing immediately.
+# SQLite allows exactly one writer at a time; this app has several
+# concurrent writers in production (the dashboard's own auto-refresh,
+# manual Full Refresh, and refresh scripts can all run against the same
+# database file), so a brief wait here is the standard mitigation rather
+# than surfacing a spurious failure for an ordinary, short-lived overlap.
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
 
 def make_engine(url: str) -> Engine:
-    if url.startswith("sqlite:///") and ":memory:" not in url:
+    is_file_based_sqlite = url.startswith("sqlite:///") and ":memory:" not in url
+    if is_file_based_sqlite:
         Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(url)
+    connect_args = {"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS} if url.startswith("sqlite") else {}
+    engine = create_engine(url, connect_args=connect_args)
+    if is_file_based_sqlite:
+        # WAL mode lets readers and the one writer proceed concurrently
+        # instead of blocking each other -- :memory: databases don't
+        # support it (and don't need it: there is nothing else to
+        # contend with a single in-process connection).
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+    return engine
 
 
 def create_schema(engine: Engine) -> None:

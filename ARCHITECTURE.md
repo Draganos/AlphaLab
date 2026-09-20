@@ -2392,3 +2392,69 @@ actually calls the batched method for the whole universe (not a
 per-ticker loop), while the separate Security Detail tab's own
 single-ticker `get_history` call is untouched. Full test suite and all
 three established smoke tests pass. `git diff --check`: clean.
+
+### 33.1 Follow-up: real incident evidence from the same production run
+
+The same production run surfaced two further, distinct problems while the
+automatic refresh above was live -- both diagnosed against real evidence
+(a live SQLite lock scenario reproduced locally, and live Yahoo Finance
+lookups), not guessed at.
+
+**"database is locked" during the automatic refresh.** The reported error
+-- `sqlite3.OperationalError: database is locked` on `UPDATE securities
+... WHERE ticker = 'BRK.B'` -- traced to `alpha_lab.database.session.
+make_engine` calling bare `create_engine(url)` for SQLite, which leaves
+Python's stdlib default: a 5-second busy timeout and the `DELETE` journal
+mode. Several write paths (the automatic refresh, the manual Full
+Refresh button, batch scripts) can genuinely overlap against the same
+database file, and once one write holds the file past 5 seconds, every
+other writer fails immediately rather than waiting. Reproduced locally: a
+writer holding the lock for 6 seconds against a bare `create_engine`
+database reliably raises the identical `OperationalError`; against
+`make_engine`'s fix, the same scenario succeeds. Fixed with a 30-second
+busy timeout (`connect_args={"timeout": 30}`, the standard SQLAlchemy/
+SQLite mitigation) plus `PRAGMA journal_mode=WAL` for file-based
+databases (`:memory:` databases skip this -- WAL isn't supported there,
+and nothing else can contend with their single in-process connection
+anyway). WAL additionally lets readers (e.g. a dashboard page rendering)
+proceed without blocking on the one writer.
+
+**Tickers permanently 404ing, forever, every refresh cycle.** The
+reported log spam (`HTTP Error 404 ... Quote not found`, `possibly
+delisted`) for tickers like `BRK.B`, `AGM.A`, `BF.A`, `AHL$D`, `ALL$B`,
+`DBRG$H` is not those tickers actually being delisted -- it's AlphaLab
+sending Yahoo Finance a symbol it has never recognized. AlphaLab's
+`Security.ticker` follows the universe listing's own share-class
+notation (a dot for a share class, e.g. `BRK.B`; a dollar sign for a
+preferred-share suffix, e.g. `AHL$D`), but Yahoo's own symbol convention
+uses a hyphen instead (`BRK-B`), and a hyphen-plus-`P` for the preferred
+form (`AHL-PD`) -- confirmed live against real Yahoo Finance data for
+every ticker in the reported log, both directions (the dot/dollar form
+404s, the translated form resolves with real quote data). Since this
+never succeeds, these tickers stay stale forever and get retried on
+*every single* stale-refresh pass -- automatic, manual, and scripted
+alike -- permanently wasting cycles and log noise, and permanently
+inflating the "stale ticker" count this diagnosis's §33 was originally
+about (some fraction of the reported ~3,931 is tickers like these that
+can never succeed, not tickers merely waiting their turn). Fixed with
+`alpha_lab.providers.yfinance_provider._yahoo_symbol`, applied at the
+provider's single `_ticker()` choke point that every method already
+shares -- so every one of `YFinanceProvider`'s methods is fixed at once,
+without touching each call site. Deliberately scoped to the outbound
+Yahoo request only: `Security.ticker` (and every value this provider
+itself returns, e.g. `get_company_info`'s own `"ticker"` field) keeps
+the original, canonical form -- this is a provider-side translation of
+what goes out over the wire, never a rewrite of AlphaLab's own identity
+for the ticker.
+
+**Validation:** `tests/test_database.py` gained a fast pragma-value check
+(`busy_timeout`/`journal_mode` on a file-based engine, and confirmation
+`:memory:` is left alone) plus a real concurrency regression test that
+holds a write lock for 6 seconds (longer than SQLite's old 5-second
+default, confirmed live to still fail that way) and asserts a second,
+concurrent writer succeeds rather than raising. `tests/
+test_yfinance_provider.py` gained a parametrized test of `_yahoo_symbol`
+covering every notation observed in the incident, plus a test proving
+the translated symbol -- not the canonical ticker -- is what actually
+reaches `yfinance.Ticker(...)`. Full test suite and all three established
+smoke tests pass. `git diff --check`: clean.
