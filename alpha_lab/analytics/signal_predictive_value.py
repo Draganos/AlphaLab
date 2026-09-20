@@ -96,6 +96,7 @@ import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from alpha_lab.ai.documents import select_documents_for_analysis
 from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
 from alpha_lab.config import Settings
 from alpha_lab.database.models import CompanyDocument, Price
@@ -405,16 +406,22 @@ def collect_rule_based_ai_research_observations(
 ) -> list[SignalObservation]:
     """Walk each ticker's own real SEC filing history (`CompanyDocument.
     document_date`) and, at each distinct filing date, reconstruct what
-    `RuleBasedFinancialResearchProvider` would have scored using only
-    documents filed on or before that date -- a real point-in-time replay,
-    never the persisted `AIResearchAnalysis` row (which holds only the
-    latest full-history analysis). Pairs `AIResearchResult.ai_rating` --
-    the same composite the `ai_research` scoring category is built from --
-    with the ticker's own actual forward return starting from the first
-    trading day strictly after the filing date (same PIT-safety rationale
-    as `_collect_snapshot_domain_observations`: a filing's own `filed`
-    date is a real, uncontrolled date, not a deliberate end-of-day
-    boundary like Technical Summary's `as_of`).
+    `RuleBasedFinancialResearchProvider` would have scored using only the
+    trailing window of documents filed on or before that date (see
+    `select_documents_for_analysis` -- the same windowing
+    `AIResearchService.ensure_all` uses in production, not the ticker's
+    entire filing history: an earlier, unwindowed version of this study
+    found `ai_rating` saturating toward the score's cap as more filings
+    accumulated, masking whatever real signal a RECENT filing carried).
+    A real point-in-time replay, never the persisted `AIResearchAnalysis`
+    row (which holds only the latest windowed analysis, not a historical
+    series). Pairs `AIResearchResult.ai_rating` -- the same composite the
+    `ai_research` scoring category is built from -- with the ticker's own
+    actual forward return starting from the first trading day strictly
+    after the filing date (same PIT-safety rationale as
+    `_collect_snapshot_domain_observations`: a filing's own `filed` date
+    is a real, uncontrolled date, not a deliberate end-of-day boundary
+    like Technical Summary's `as_of`).
 
     A ticker with no ingested documents, or no `Price` history, is skipped
     entirely -- this never raises `InsufficientSnapshotHistory` the way
@@ -444,7 +451,9 @@ def collect_rule_based_ai_research_observations(
             forward_return = _forward_return_from(prices, as_of, forward_days)
             if forward_return is None:
                 continue
-            as_of_documents = [document for document in documents if document.document_date <= as_of]
+            as_of_documents = select_documents_for_analysis(documents, as_of=as_of)
+            if not as_of_documents:
+                continue
             result = provider.analyze(
                 normalized,
                 [

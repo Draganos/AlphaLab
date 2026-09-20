@@ -10,7 +10,7 @@ and re-ingesting a ticker whose filings haven't changed is a no-op rather
 than a growing pile of duplicates.
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 
 from sqlalchemy import Engine, select
@@ -18,6 +18,41 @@ from sqlalchemy.orm import Session
 
 from alpha_lab.database.models import CompanyDocument
 from alpha_lab.providers.interfaces import CompanyDocumentProvider
+
+# A full annual filing cycle (one 10-K plus up to four 10-Qs) comfortably
+# fits inside 400 days -- the same lookback_days convention already used
+# by alpha_lab.macro.service.MacroRegimeService.refresh, chosen here for
+# the same reason: a deliberately round, documented "recent enough to be
+# current state" bound, not derived from calibrating the window itself.
+DOCUMENT_ANALYSIS_WINDOW_DAYS = 400
+
+
+def select_documents_for_analysis(
+    documents: list[CompanyDocument], *, as_of: date
+) -> list[CompanyDocument]:
+    """The trailing window of `documents` that reflects a company's
+    CURRENT state as of `as_of`, not its entire filing history since
+    inception.
+
+    Real finding, not a hypothetical: the Signal Predictive-Value
+    calibration study (ARCHITECTURE.md's Document ingestion hardening +
+    calibration phase) found `RuleBasedFinancialResearchProvider`'s
+    `ai_rating` trending upward over time for NVDA as more filings
+    accumulated -- because its per-dimension scores are a running
+    phrase-count over the ENTIRE cumulative document set, and ordinary
+    corporate boilerplate skews net-positive far more often than
+    negative, so scores drift toward the +-2 cap and stay there
+    regardless of what the most recent filing actually says.
+
+    This is a document-SELECTION problem, not a provider-math problem --
+    fixed once here, for every `AIResearchProvider` this project has or
+    will have (not a rule-based-specific patch): an LLM handed a
+    multi-decade filer's entire history would face the identical recency
+    dilution, and pay for it in tokens besides. See
+    `DOCUMENT_ANALYSIS_WINDOW_DAYS` for the bound.
+    """
+    cutoff = as_of - timedelta(days=DOCUMENT_ANALYSIS_WINDOW_DAYS)
+    return [document for document in documents if cutoff < document.document_date <= as_of]
 
 
 def _content_hash(ticker: str, *, source: str | None, text: str) -> str:

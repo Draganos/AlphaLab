@@ -3263,3 +3263,80 @@ failure). All three fixes verified against the real, running dashboard in
 a real browser (Playwright against the sandbox's pre-installed Chromium),
 not just unit tests -- both the crash-on-cold-load fix and the staleness
 warning were visually confirmed rendering correctly.
+
+## 39. Fixing §37's score-saturation finding, then re-calibrating
+
+Explicit next roadmap step, chosen directly over the alternatives (moving
+straight to a trained classifier, or widening the calibration sample
+first): §37.2 found `RuleBasedFinancialResearchProvider`'s `ai_rating`
+trending upward for NVDA across sampled dates purely because scores were
+a running phrase-count over the **entire cumulative document set** --
+ordinary corporate boilerplate skews net-positive far more often than
+negative, so a dimension's score drifts toward the +-2 cap and stays
+there, regardless of what the most recent filing actually says. Recorded
+then as future work, not fixed. This phase fixes it and re-runs the
+calibration on the corrected behavior, rather than accepting the earlier
+near-zero correlation (pearson +0.065) as the final word on whether this
+signal carries anything.
+
+**The fix is a document-SELECTION problem, not a provider-math problem.**
+`RuleBasedFinancialResearchProvider.analyze()` itself has no notion of
+time -- it scores whatever `documents` list it's handed. The saturation
+comes entirely from its two callers (`AIResearchService.ensure_all` in
+production, `collect_rule_based_ai_research_observations` in the
+calibration study) both handing it a ticker's *entire* filing history at
+once. Fixed with one new shared function,
+`alpha_lab.ai.documents.select_documents_for_analysis(documents, *,
+as_of)`: a trailing `DOCUMENT_ANALYSIS_WINDOW_DAYS = 400` window
+(comfortably a full annual cycle of one 10-K plus up to four 10-Qs,
+mirroring `alpha_lab.macro.service.MacroRegimeService.refresh`'s own
+`lookback_days` convention) rather than unbounded history. Applied at
+the caller level, not the provider level, deliberately: this is a
+generic "analyze current state, not entire history" policy that would
+matter for *any* `AIResearchProvider`, not a rule-based-specific patch
+-- an LLM handed forty years of 10-Ks would face the identical recency
+dilution, and pay for it in tokens besides.
+
+`AIResearchService.ensure_all()` now windows each ticker's documents to
+`as_of=date.today()` before analyzing; a ticker whose only filings have
+all aged out of the window is skipped entirely (same "missing, not
+fabricated" behavior as always) rather than analyzed against stale
+history. Existing `CompanyDocument` rows outside the window are left
+completely untouched (still real, still stored, still available for a
+future re-window) -- only what gets *fed into analysis* changes.
+`collect_rule_based_ai_research_observations` uses the identical
+function at each historical `as_of`, so the calibration study now
+measures exactly what production actually does, not a bespoke
+methodology of its own.
+
+**Real result after the fix, reported plainly:** re-running
+`scripts/analyze_signal_predictive_value.py AAL MA NVDA --forward-days
+20` against the same live AAL/MA/NVDA filing and price history (same 59
+observations -- windowing doesn't change which filing dates are valid
+observations, only what document set feeds each one) produced **pearson
++0.206, spearman +0.196** -- up from +0.065/+0.058 before the fix. A
+real, meaningful improvement in the same direction the saturation
+hypothesis predicted, confirming the fix addressed a genuine
+signal-masking problem -- but still a modest correlation, not a strong
+one, at this sample size. This is reported as exactly that: evidence the
+fix was worth making, not evidence the rule-based provider is now ready
+to score. `ai_research` remains gated out of `overall_score` per §36.2's
+`_SCORING_ELIGIBLE_AI_PROVIDERS` allowlist; nothing in this phase changes
+that gate.
+
+**Tests:** new `tests/test_ai_document_windowing.py` (6 tests) --
+`select_documents_for_analysis` as a pure function (excludes filings
+older than the window, exclusive boundary at exactly
+`DOCUMENT_ANALYSIS_WINDOW_DAYS`, excludes future-dated documents, empty
+input), plus two `AIResearchService.ensure_all` integration tests (only
+the windowed documents are ever handed to the provider; a ticker whose
+only filing has aged out stores nothing). New
+`test_collect_rule_based_ai_research_observations_windows_out_old_filings`
+in `tests/test_signal_predictive_value.py` proves the calibration replay
+excludes a 2024 filing once `as_of` reaches 2026, verified against a
+direct single-document `analyze()` call rather than a hardcoded score.
+
+**Validation:** full test suite, all three smoke tests, and `git diff
+--check` all clean (same unrelated pre-existing `test_dependency_lock.py`
+failure). Real-data validation re-ran the actual calibration script
+against the live database, not a synthetic re-computation.

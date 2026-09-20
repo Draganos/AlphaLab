@@ -1,12 +1,14 @@
 """Optional document-to-AI research workflow; absence or failure remains missing."""
 
 from collections import defaultdict
+from datetime import date
 import hashlib
 import json
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from alpha_lab.ai.documents import select_documents_for_analysis
 from alpha_lab.ai.research import AIResearchProvider, analyze_documents
 from alpha_lab.database.models import AIResearchAnalysis, CompanyDocument
 from alpha_lab.phase3.repository import Phase3Repository
@@ -19,6 +21,7 @@ class AIResearchService:
     def ensure_all(self) -> int:
         if self.provider is None:
             return 0
+        as_of = date.today()
         with Session(self.engine) as session:
             documents = list(
                 session.scalars(
@@ -37,7 +40,14 @@ class AIResearchService:
             grouped[document.ticker].append(document)
         stored = 0
         for ticker, rows in grouped.items():
-            input_fingerprint = _document_fingerprint(rows)
+            # A trailing window, not a company's entire filing history --
+            # see select_documents_for_analysis's own docstring for the
+            # real score-saturation finding this fixes (Signal
+            # Predictive-Value calibration study).
+            windowed_rows = select_documents_for_analysis(rows, as_of=as_of)
+            if not windowed_rows:
+                continue
+            input_fingerprint = _document_fingerprint(windowed_rows)
             if (
                 ticker in latest
                 and (
@@ -57,14 +67,14 @@ class AIResearchService:
                         "source": row.source,
                         "document_date": row.document_date.isoformat(),
                     }
-                    for row in rows
+                    for row in windowed_rows
                 ],
             )
             if result is not None:
                 Phase3Repository(self.engine).save_ai(
                     ticker,
                     result,
-                    analyzed_document_ids=[row.id for row in rows],
+                    analyzed_document_ids=[row.id for row in windowed_rows],
                     input_document_fingerprint=input_fingerprint,
                 )
                 stored += 1
