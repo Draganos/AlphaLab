@@ -217,6 +217,17 @@ class CompanyDocument(Base):
     text: Mapped[str] = mapped_column(Text)
     source: Mapped[str | None] = mapped_column(String(1024))
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # PIT-safety: when AlphaLab itself actually fetched this document --
+    # the same `retrieved_at`/`ingested_at` pattern established across
+    # News/Estimates/AnalystRatingChange -- never the filing's own
+    # document_date, which a historical read could otherwise leak.
+    retrieved_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+    # Idempotency: identifies an exact source document (ticker + content),
+    # mirroring NewsArticleRecord.content_hash -- a re-run of the same
+    # ingestion never duplicates a filing already stored.
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 class AIAnalysis(Base):

@@ -93,6 +93,10 @@ def create_schema(engine: Engine) -> None:
             "analyzed_document_ids": "JSON",
             "input_fingerprint": "VARCHAR(64)",
         },
+        "company_documents": {
+            "retrieved_at": "DATETIME",
+            "content_hash": "VARCHAR(64)",
+        },
     }
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:
@@ -121,6 +125,12 @@ def create_schema(engine: Engine) -> None:
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_ai_research_input_fingerprint "
                     "ON ai_research_analyses (input_fingerprint)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_company_documents_content_hash "
+                    "ON company_documents (content_hash) WHERE content_hash IS NOT NULL"
                 )
             )
 

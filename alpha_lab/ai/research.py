@@ -192,13 +192,28 @@ class OpenAIResearchProvider(AIResearchProvider):
 
 
 def configured_ai_research_provider() -> AIResearchProvider | None:
-    if os.getenv(
-        "ALPHALAB_AI_PROVIDER", "disabled"
-    ).casefold() == "openai" and os.getenv("OPENAI_API_KEY"):
-        return OpenAIResearchProvider(
-            os.environ["OPENAI_API_KEY"], os.getenv("ALPHALAB_AI_MODEL", "gpt-4.1-mini")
-        )
-    return None
+    """Defaults to the deterministic, zero-cost `RuleBasedFinancialResearchProvider`
+    (see `alpha_lab.ai.rule_based`) rather than "disabled" -- unlike
+    `OpenAIResearchProvider`, it needs no API key, makes no external call,
+    and costs nothing to run, so there is no reason for it to require
+    explicit opt-in the way a paid provider does. `ALPHALAB_AI_PROVIDER=
+    disabled` still turns AI research off entirely; `ALPHALAB_AI_PROVIDER=
+    openai` opts into the paid provider, and fails closed (returns `None`,
+    never silently falls back to the local one) if `OPENAI_API_KEY` isn't
+    also set -- an explicit request for a specific provider is never
+    silently substituted."""
+    selection = os.getenv("ALPHALAB_AI_PROVIDER", "rule_based").casefold()
+    if selection == "disabled":
+        return None
+    if selection == "openai":
+        if os.getenv("OPENAI_API_KEY"):
+            return OpenAIResearchProvider(
+                os.environ["OPENAI_API_KEY"], os.getenv("ALPHALAB_AI_MODEL", "gpt-4.1-mini")
+            )
+        return None
+    from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
+
+    return RuleBasedFinancialResearchProvider()
 
 
 def analyze_documents(

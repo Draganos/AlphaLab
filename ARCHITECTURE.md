@@ -2669,3 +2669,143 @@ gaps in this universe.
 **Validation:** none -- no code changed. Every claim in this subsection
 was checked against either the live database or a live Yahoo Finance
 call at investigation time, not assumed from code reading alone.
+
+## 36. Document Evidence Engine (SEC filing ingestion + local AI research)
+
+Closes the `ai_research` scoring gap §35 documented: `CompanyDocumentProvider`
+was declared as an interface in this project's very first PR and never
+implemented, so `AIResearchService.ensure_all` (which only ever *read*
+`CompanyDocument`, never wrote it) had nothing to analyze. This phase
+builds both missing halves -- real SEC filing ingestion, and a real
+analysis step -- deliberately **without any external LLM API**, per
+explicit direction: no OpenAI/Anthropic key is configured in this
+environment, and a $0, fully local, fully reproducible design was chosen
+over buying one. That reproducibility is itself a real advantage for this
+codebase's own point-in-time discipline: "given only documents filed by
+date X, what would this classifier have produced" is answerable exactly
+and deterministically, which a live LLM call never fully guarantees.
+
+**Ingestion: `alpha_lab.providers.sec_filings.SECFilingDocumentProvider`.**
+The `CompanyDocumentProvider` implementation, reusing infrastructure that
+already existed rather than duplicating it: `SECClient`'s identity/pacing/
+caching (the same class `SECCompanyFactsProvider` already uses for XBRL
+facts) and `SECCompanyFactsProvider.company_tickers()`'s existing
+ticker->CIK resolution. Fetches `/submissions/CIK{cik}.json`, filters to
+`SUPPORTED_FORMS` (10-K/10-K-A/10-Q/10-Q-A, the same scope
+`SECCompanyFactsProvider` already uses -- 8-K, press releases, and any
+non-SEC source are deliberately out of scope for this first version),
+and extracts plain text from each filing's real HTML via a new,
+dependency-free `html_to_text` (stdlib `html.parser.HTMLParser` only, per
+this project's established preference for not adding a dependency when
+the standard library suffices -- see the Signal Predictive-Value phase's
+own scipy-avoidance). Bounded at `MAX_DOCUMENT_TEXT_CHARS` (500,000
+characters) as a defensive guard against a pathological filing, not a
+content judgement. One filing document failing to fetch skips just that
+one (mirrors `NewsService.refresh`'s "one item failing never aborts the
+batch"), and a ticker with no CIK or no supported filing at all returns
+`[]`, never a placeholder.
+
+Verified live against real SEC EDGAR data before writing any test:
+CIK resolution for AAL/MA/NVDA, a real filing index (NVDA's 7 most recent
+10-K/10-Q filings, correct forms/dates/accession numbers), a real ~2MB
+inline-XBRL 10-K fetched and reduced to ~340KB of genuinely readable
+plain text (`"...may negatively impact our gross margins and financial
+results. Factors that have caused ... to underestimate or overestimate
+demand..."` -- real NVDA 10-K language, not a fabricated example).
+
+**Persistence: `alpha_lab.ai.documents.ingest_company_documents`.** The
+half `AIResearchService` was always missing. Append-only and
+content-hash-deduplicated exactly like `NewsService.refresh` -- fetch
+happens entirely before any write, so a failed ingestion leaves prior
+documents untouched, and re-ingesting an unchanged filing is a no-op, not
+a duplicate row. `CompanyDocument` gained two columns via the established
+additive-migration pattern: `retrieved_at` (when AlphaLab itself fetched
+the document -- the same PIT-safety shape as every other evidence table's
+`retrieved_at`/`ingested_at`, never the filing's own `document_date`,
+which a historical read could otherwise leak) and `content_hash` (a
+unique index, `WHERE content_hash IS NOT NULL`, mirroring `estimates`'
+own `observation_hash` pattern). New `scripts/refresh_company_documents.py`
+mirrors `scripts/load_sec_facts.py`'s CLI shape exactly.
+
+**Analysis: `alpha_lab.ai.rule_based.RuleBasedFinancialResearchProvider`
+-- the new default.** A deterministic, phrase-lexicon classifier across
+all nine `AIResearchResult` score dimensions (guidance, demand, margin
+outlook, competitive position, management confidence, balance-sheet
+commentary, risk, sentiment, catalyst), extending the same lexicon-based
+approach `DeterministicAIResearchProvider` already used as a test fixture
+into a real per-dimension design meant for production use. Every excerpt
+in `evidence` is a verbatim slice of the real document text (never
+generated), tied to the real `document_id` it came from; `key_positives`/
+`key_risks` are the literal phrases matched, not a paraphrase. Confidence
+is tied to how much real signal was actually found (`total_matches / 10`,
+capped at 1.0) rather than merely how many documents were supplied -- a
+filing set containing none of these phrases is honestly reported as
+zero-confidence, not confidently "neutral" the way `DeterministicAIResearchProvider`'s
+own document-count-based confidence would report it.
+
+`configured_ai_research_provider()` now defaults to this provider rather
+than "disabled": unlike `OpenAIResearchProvider`, it needs no API key,
+makes no external call, and costs nothing to run, so unlike a paid
+provider it has no reason to require explicit opt-in.
+`ALPHALAB_AI_PROVIDER=disabled` still turns AI research off entirely, and
+`ALPHALAB_AI_PROVIDER=openai` still opts into the paid provider -- and,
+unchanged from before this phase, still fails closed (`None`) rather than
+silently substituting the local provider if `OPENAI_API_KEY` isn't also
+set. An explicit request for one provider is never silently satisfied by
+a different one.
+
+**Deliberately not done, per explicit scope decision:** no `scikit-learn`
+or trained-classifier step (would need a labeled dataset this phase does
+not build), no FinBERT or other pretrained model (adds a real, heavy
+dependency for a V1 that doesn't need one), no 8-K/press-release
+ingestion, and no change to `AIResearchAssessment`/Research Stance/the
+fundamental score's own weighting -- each is a separate decision for a
+later phase. The staged plan this phase's V1 belongs to (rules -> trained
+classifier -> pretrained financial-language model -> calibration against
+outcomes) is recorded here for that later phase to pick up, not started
+early.
+
+**Real-data validation (live database, real network calls, no
+fabrication):** `scripts/refresh_company_documents.py AAL MA NVDA`
+stored 45/30/25 real filing documents respectively (AAL back to 2015, MA
+to 2019, NVDA to 2020 -- whatever SEC's own "recent filings" index
+returns; FTEC/GDX and the macro-proxy tickers correctly yield zero, since
+ETFs and indices file different SEC forms, not 10-K/10-Q). Re-running
+`scripts/rebuild_research.py` (the same script that already calls
+`AIResearchService.ensure_all` via `MarketScreenerService` -- no new
+call site needed) then produced real `AIResearchAnalysis` rows: AAL
+rated 44.44, MA 38.89, NVDA 36.11, all at confidence 1.0, each citing
+both real strengths (`"strong demand"`, `"competitive advantage"`) and
+real risks (`"increased competition"`, `"margin decline"`) drawn from
+their own actual filings. Re-running `scripts/coverage_report.py`
+confirmed the fix directly: `ai_research` coverage for AAL/MA/NVDA moved
+from **0.0 to 1.0**, with `_ai_is_attributable` (the exact gate the
+screener's scoring category depends on) verified `True` against the real
+persisted analysis.
+
+**Validation:** `tests/test_sec_filings.py` (10 tests) -- `html_to_text`
+(visible-text extraction, script/style skipped, block-tag breaks, entity
+unescaping, the character bound), `SECFilingDocumentProvider` (unresolvable
+ticker returns `[]`, form filtering, `since` filtering, one failed fetch
+never aborts the batch, real extraction not raw HTML) via a fake SEC
+client -- no test talks to real EDGAR. `tests/test_company_document_ingestion.py`
+(6 tests) -- new documents stored with PIT fields set, idempotent re-ingestion,
+multiple distinct documents, empty-provider-result writes nothing, `since`
+passed through, ticker case normalized. `tests/test_rule_based_ai_research.py`
+(10 tests) -- determinism for identical input, positive/negative phrase
+detection, zero score and zero confidence with no matching phrases,
+confidence scaling with real signal density, `risk_score`'s distinct
+severity-count polarity, evidence excerpts verified verbatim against the
+source text, scores bounded to the schema's range even under repeated-phrase
+stress, graceful handling of zero documents and documents without an id.
+`tests/test_ai_search_phase3.py` gained four tests for
+`configured_ai_research_provider`'s selection logic (rule-based default,
+`disabled`, `openai` with a key, `openai` without one never silently
+falling back). Full test suite and all three established smoke tests
+pass -- the Phase 3 smoke test's own rating fluctuation between runs was
+independently confirmed unrelated to this phase (it uses its own explicit
+`DeterministicAIResearchProvider` fixture, untouched here; the drift
+traces to that smoke test's own `date.today()`-relative `Estimate`
+fixtures shifting real analyst-revision windows day to day, the same
+"needs real elapsed time" shape §35 already documented elsewhere).
+`git diff --check`: clean.
