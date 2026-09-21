@@ -1,10 +1,10 @@
-"""SEC EDGAR 10-K/10-Q filing text ingestion -- the `CompanyDocumentProvider`
-implementation the project's very first PR declared as an interface but
-never built (see ARCHITECTURE.md's Evidence Coverage Hardening
-investigation). Reuses `SECClient`'s existing identity/pacing/caching
-rather than a second HTTP client, and `SECCompanyFactsProvider.
-company_tickers()`'s existing ticker->CIK resolution rather than a new
-lookup.
+"""SEC EDGAR 10-K/10-Q/8-K filing text ingestion -- the
+`CompanyDocumentProvider` implementation the project's very first PR
+declared as an interface but never built (see ARCHITECTURE.md's Evidence
+Coverage Hardening investigation). Reuses `SECClient`'s existing
+identity/pacing/caching rather than a second HTTP client, and
+`SECCompanyFactsProvider.company_tickers()`'s existing ticker->CIK
+resolution rather than a new lookup.
 
 Real filing text only: this never fabricates a document, never guesses at
 content, and skips a ticker entirely (returning `[]`, not a partial or
@@ -21,13 +21,20 @@ import re
 from alpha_lab.providers.interfaces import CompanyDocumentProvider
 from alpha_lab.providers.sec_edgar import SUPPORTED_FORMS, SECClient, SECCompanyFactsProvider
 
-# A defensive upper bound on extracted plain text per filing -- a modern
-# 10-K's raw inline-XBRL HTML can run several megabytes; stripped to plain
-# text it is typically a few hundred KB. This is not a content judgement
-# (nothing meaningful is ever truncated mid-thought on purpose) -- it is
-# purely a guard against a pathological filing consuming unbounded storage,
-# mirroring the general principle of bounding untrusted external input.
-MAX_DOCUMENT_TEXT_CHARS = 500_000
+# A defensive upper bound on extracted plain text per filing, not a
+# content judgement -- purely a guard against a pathological filing
+# consuming unbounded storage, mirroring the general principle of
+# bounding untrusted external input. The original 500,000-char bound was
+# too low for real filings, not just pathological ones: confirmed live,
+# 12 real 10-Ks already ingested (AAL, BRK.B) were silently truncated by
+# it, losing up to ~36% of their real extracted text (as much as 933,915
+# real characters for one AAL 10-K) -- almost certainly cutting off later
+# sections (MD&A, financial statement notes) that a phrase-lexicon
+# analysis or a future trained classifier would want. Raised to
+# comfortably exceed the largest real filing observed so far, with real
+# margin for an even larger one, while still bounding a truly pathological
+# response.
+MAX_DOCUMENT_TEXT_CHARS = 2_000_000
 
 # Tags whose entire contents are never real prose -- inline XBRL metadata,
 # scripts, and styling. Skipping their content (not just the tags) avoids
@@ -91,12 +98,28 @@ def html_to_text(html: str) -> str:
     return parser.text()[:MAX_DOCUMENT_TEXT_CHARS]
 
 
+# Forms ingested for filing TEXT -- deliberately a separate constant from
+# `sec_edgar.SUPPORTED_FORMS` (the numeric-facts pipeline, which stays
+# 10-K/10-Q-only: an 8-K rarely carries the full XBRL financial
+# statements `CONCEPT_MAPPING` expects, and widening that shared constant
+# would risk feeding unintended rows into an already-working, already-
+# tested pipeline this phase has no reason to touch). 8-K ("Current
+# Report") covers material events -- earnings announcements, guidance
+# updates, M&A, leadership changes -- confirmed live to carry real,
+# timely, substantive prose (e.g. a real NVDA 8-K announcing its
+# Hugging Face acquisition), distinct from 10-K/10-Q's own periodic
+# boilerplate and exactly the kind of evidence a future trained
+# classifier benefits from having more of. Amendments included for the
+# same reason 10-K/A and 10-Q/A already are. Press releases and any
+# non-SEC source remain out of scope.
+DOCUMENT_SUPPORTED_FORMS = SUPPORTED_FORMS | {"8-K", "8-K/A"}
+
+
 class SECFilingDocumentProvider(CompanyDocumentProvider):
     """`alpha_lab.providers.interfaces.CompanyDocumentProvider` implementation
-    -- the concrete piece that interface was always missing. Only 10-K/10-Q
-    (and their amendments), matching `SECCompanyFactsProvider`'s own
-    `SUPPORTED_FORMS` scope; 8-K, press releases, and any non-SEC source are
-    deliberately out of scope for this first version (see ARCHITECTURE.md).
+    -- the concrete piece that interface was always missing. 10-K/10-Q/8-K
+    (and their amendments) -- see `DOCUMENT_SUPPORTED_FORMS`. Press
+    releases and any non-SEC source remain deliberately out of scope.
     """
 
     provider_name = "SECFilingDocumentProvider"
@@ -147,7 +170,7 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
 
         documents: list[dict[str, Any]] = []
         for form, filed_date, accession, primary_document in rows:
-            if form not in SUPPORTED_FORMS:
+            if form not in DOCUMENT_SUPPORTED_FORMS:
                 continue
             if since is not None and filed_date < since:
                 continue

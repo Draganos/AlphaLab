@@ -3340,3 +3340,134 @@ direct single-document `analyze()` call rather than a hardcoded score.
 --check` all clean (same unrelated pre-existing `test_dependency_lock.py`
 failure). Real-data validation re-ran the actual calibration script
 against the live database, not a synthetic re-computation.
+
+## 40. Training-data prep ahead of the sklearn classifier phase
+
+Explicit direction: work the two "needs elapsed time" items (§35's
+`analyst_revisions` gap, §33's Analyst Consensus/AI Research Rating
+snapshot calibration) plus the smaller deferred items from §36/§36.2
+(the filing-text truncation cap, 8-K ingestion) -- specifically so the
+data is clean before the sklearn classifier phase begins, not as an
+end in themselves.
+
+### 40.1 `analyst_revisions`: confirmed resolved by real elapsed time, not a bug
+
+Re-ran `scripts/coverage_report.py` against the live database: still 0%
+`analyst_revisions` coverage for every ticker, unchanged from §35, a
+week later. Investigated rather than assumed: the real `Estimate` rows
+for AAL/MA/NVDA only spanned 2026-09-14 to 2026-09-17 (3 days) --
+`calculate_revision_factors`'s shortest window needs an observation
+`>= 7` days older. Confirmed directly with
+`alpha_lab.ratings.estimates.calculate_revision_factors` against the
+real stored data at `as_of=date.today()` (now 2026-09-21, giving a real
+7-day gap against the 2026-09-14 observation): `eps_revision_7d`/
+`revenue_revision_7d` compute real, non-`None` values.
+
+The remaining "0% coverage" was `scripts/coverage_report.py` reading a
+**stale persisted snapshot** (`read_current_research()`, not a live
+recomputation) from before that gap existed. Root cause confirmed as
+"needs elapsed time, not code" exactly as §35 originally concluded --
+fixed by running `scripts/rebuild_research.py` (a pure, local,
+already-stored-data recomputation; no network call) to persist a
+current snapshot. Re-ran `coverage_report.py`: `analyst_revisions`
+coverage for AAL/MA/NVDA moved from **0.0 to 0.33** (the 7-day window
+now real; 30d/90d still need their own real elapsed time). MA and NVDA
+now show **zero unavailable categories at all** (overall coverage
+0.85 -> 0.90 for both).
+
+### 40.2 Analyst Consensus / AI Research Rating snapshot calibration: still genuinely blocked, root cause now precise
+
+`ResearchSnapshot` count was 2 (both stray FTEC/GDX rows, unrelated to
+AAL/MA/NVDA) before this phase. Ran `scripts/refresh_supplemental_research.py`
+for the real tracked universe -- real network calls, real snapshots --
+twice (the first run hit a transient yfinance "Invalid Crumb" 401 on
+the Analyst Consensus endpoint specifically for AAL/MA/NVDA, confirmed
+by retrying the identical `yf.Ticker(...).get_recommendations()`/
+`get_analyst_price_targets()` calls moments later with no code change
+and no error -- a live Yahoo session-token hiccup, not an AlphaLab bug).
+`ResearchSnapshot` count is now 10 (AAL/MA/NVDA/FTEC/GDX x2 each).
+
+Investigated *why* `collect_analyst_consensus_observations` still
+reports **0** usable observations despite `NVDA.analyst_consensus` now
+being real, live, fully populated data (confirmed directly via
+`ResearchService.get_stock_research`). Root cause, more precise than
+"needs elapsed time" alone: `_collect_snapshot_domain_observations`
+requires a real forward return, which requires `forward_days` (20
+trading days, ~1 calendar month) of **real Price history dated after**
+the snapshot -- a snapshot created *today* cannot have that yet, by
+definition, regardless of how many more snapshots are taken today. This
+is a slower, two-part accumulation than §40.1's: not just "30 real
+snapshots" but "30 real snapshots each already `>= 20 trading days`
+old." Confirmed this is not a code bug -- no fix applied here; running
+the refresh today was still the right, necessary step (each real
+snapshot is one data point that will mature into a usable observation
+in about a month), just not one that resolves visibly today.
+
+### 40.3 Filing-text truncation cap and 8-K ingestion
+
+Both already-deferred items from §36/§36.2, verified with real data
+before implementing (not the originally-guessed severity):
+
+- **Truncation was real, not merely theoretical.** 12 of 258 already-
+  ingested documents (AAL, BRK.B 10-Ks) were silently hitting
+  `MAX_DOCUMENT_TEXT_CHARS` (500,000). Fetched their real, uncapped
+  extracted text directly: up to **933,915 real characters** for one
+  AAL 10-K -- 36% of the real document lost, almost certainly the later
+  sections (MD&A, financial statement notes) a phrase-lexicon or future
+  trained classifier most wants. Raised to 2,000,000 (comfortably above
+  the real observed maximum). Deleted the 12 truncated rows and
+  re-ingested: confirmed live, 0 documents now hit the new cap, and the
+  real maximum text length in the database is still 933,915 --
+  unchanged, because it's no longer being cut.
+- **8-K carries real, substantive, timely material-event text.**
+  Verified live before committing to the scope change: a real NVDA 8-K
+  (`nvda-20260902.htm`) contained real prose announcing NVIDIA's
+  ~$11.9B agreement to acquire Hugging Face -- exactly the kind of
+  catalyst-relevant evidence `RuleBasedFinancialResearchProvider`'s
+  `catalyst_score` dimension is designed to pick up, and distinct from
+  10-K/10-Q's own periodic boilerplate. Added `DOCUMENT_SUPPORTED_FORMS`
+  (10-K/10-K-A/10-Q/10-Q-A/8-K/8-K-A) as a **separate** constant from
+  `sec_edgar.SUPPORTED_FORMS`, deliberately not widening the numeric-
+  facts pipeline's own shared constant (8-Ks rarely carry the XBRL
+  financial statements `CONCEPT_MAPPING` expects).
+
+Re-ingested AAL/MA/NVDA/BRK.B with both fixes live: total `CompanyDocument`
+count rose from 258 to **2,323** (1,969 of the increase is real new 8-K/
+8-K-A filings: AAL 894, MA 308, NVDA 246, BRK.B 172). Re-ran
+`scripts/rebuild_research.py` against the much larger real corpus to
+confirm §39's trailing-window fix keeps analysis fast regardless of a
+ticker's total archived history: **~7 seconds** for the full 12-security
+rebuild (AAL alone now has 1,057 total documents; only the trailing
+400-day window is ever analyzed).
+
+**Re-ran the real calibration study on the enriched corpus, reported
+plainly:** sample size grew from 59 (10-K/10-Q only, post-§39-fix) to
+**209** (10-K/10-Q/8-K, since 8-K filing dates add many more real
+observation points) -- **pearson +0.104, spearman +0.118** -- lower than
+the 10-K/10-Q-only +0.206, though from a much larger, more robust
+sample. Reported honestly rather than cherry-picking the higher number:
+plausibly many routine 8-Ks (director departures, routine agreements)
+carry less analyzable sentiment than earnings- or catalyst-related ones,
+diluting the average -- a genuine open question for the sklearn
+classifier phase to investigate with real labeled examples (e.g.
+filtering by 8-K Item type), not resolved here.
+
+### 40.4 Proposed, not started: automate ongoing accumulation
+
+Both §40.1 (7d/30d/90d revision windows) and §40.2 (30-snapshot
+threshold, each needing its own real month of age) only continue
+improving with genuine repeated, real-world refreshes over real time --
+nothing computed in one sitting can substitute for that. Proposed to
+the user rather than set up unilaterally (an ongoing scheduled job
+making real, repeated network calls is a real infrastructure/cost
+decision): a recurring Routine running `scripts/refresh_supplemental_research.py`
+(and periodically `scripts/refresh_company_documents.py` for new real
+filings) so this accumulation keeps happening automatically ahead of
+the sklearn classifier phase, rather than depending on a session
+happening to run these scripts again.
+
+**Validation:** full test suite, all three smoke tests, and `git diff
+--check` all clean (same unrelated pre-existing `test_dependency_lock.py`
+failure). Every number in this section is from a real, live re-run
+against the actual database and actual SEC EDGAR/Yahoo Finance data --
+no fixture or synthetic data anywhere in this phase's own findings.

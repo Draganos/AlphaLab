@@ -7,6 +7,7 @@ from datetime import date
 import pytest
 
 from alpha_lab.providers.sec_filings import (
+    DOCUMENT_SUPPORTED_FORMS,
     MAX_DOCUMENT_TEXT_CHARS,
     SECFilingDocumentProvider,
     html_to_text,
@@ -140,16 +141,50 @@ def test_get_documents_resolves_a_dotted_share_class_ticker():
 
 def test_get_documents_filters_to_supported_forms_only():
     submissions = _submissions_payload(
-        forms=["10-K", "8-K", "10-Q"],
-        filed_dates=["2026-02-25", "2026-01-10", "2025-11-19"],
-        accessions=["0001045810-26-000021", "0001045810-26-000005", "0001045810-25-000230"],
-        primary_documents=["nvda-10k.htm", "nvda-8k.htm", "nvda-10q.htm"],
+        forms=["10-K", "8-K", "10-Q", "DEF 14A", "4"],
+        filed_dates=["2026-02-25", "2026-01-10", "2025-11-19", "2025-10-01", "2025-09-15"],
+        accessions=[
+            "0001045810-26-000021", "0001045810-26-000005", "0001045810-25-000230",
+            "0001045810-25-000200", "0001045810-25-000190",
+        ],
+        primary_documents=["nvda-10k.htm", "nvda-8k.htm", "nvda-10q.htm", "nvda-proxy.htm", "nvda-form4.htm"],
     )
     client = _FakeClient({"0001045810": submissions})
     provider = SECFilingDocumentProvider(client)
     documents = provider.get_documents("NVDA")
-    assert {doc["document_type"] for doc in documents} == {"10-K", "10-Q"}
-    assert len(documents) == 2
+    assert {doc["document_type"] for doc in documents} == {"10-K", "10-Q", "8-K"}
+    assert len(documents) == 3
+
+
+def test_document_supported_forms_includes_8k_and_amendments_only():
+    """Regression test for the real training-data-quality finding: 8-K
+    ("Current Report") carries real, timely, substantive material-event
+    text (confirmed live against a real NVDA 8-K announcing an
+    acquisition) distinct from 10-K/10-Q's own periodic boilerplate.
+    Widened here deliberately as a SEPARATE constant from sec_edgar.
+    SUPPORTED_FORMS (the numeric-facts pipeline), never by mutating that
+    shared constant -- an 8-K rarely carries the XBRL financial
+    statements that pipeline expects."""
+    assert DOCUMENT_SUPPORTED_FORMS == {"10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A"}
+
+
+def test_get_documents_includes_a_real_8k_filing():
+    submissions = _submissions_payload(
+        forms=["8-K"], filed_dates=["2026-09-02"],
+        accessions=["0001045810-26-000078"], primary_documents=["nvda-8k.htm"],
+    )
+    client = _FakeClient(
+        {"0001045810": submissions},
+        document_html={
+            "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000078/nvda-8k.htm":
+                "<p>NVIDIA entered into a definitive agreement to acquire a company.</p>"
+        },
+    )
+    provider = SECFilingDocumentProvider(client)
+    documents = provider.get_documents("NVDA")
+    assert len(documents) == 1
+    assert documents[0]["document_type"] == "8-K"
+    assert "acquire" in documents[0]["text"]
 
 
 def test_get_documents_respects_since():
