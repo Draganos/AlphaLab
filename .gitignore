@@ -5,5 +5,7 @@ __pycache__/
 .pytest_cache/
 .streamlit/
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/cache/
 *.egg-info/
