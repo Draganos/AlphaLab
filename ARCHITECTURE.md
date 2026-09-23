@@ -3471,3 +3471,145 @@ happening to run these scripts again.
 failure). Every number in this section is from a real, live re-run
 against the actual database and actual SEC EDGAR/Yahoo Finance data --
 no fixture or synthetic data anywhere in this phase's own findings.
+
+## 41. Security Screener Verdict: Fit Score, Gates, and AI Final Rating
+
+Requested explicitly, pointing at a third-party research report's own
+"scorecard/fit/verdict" presentation: several evidence dimensions
+tier-weighted into one Fit Score, then capped by categorical red-flag
+Gates rather than only a numeric threshold, then mapped to a Verdict.
+The TECHNIQUE (weighted blend + gates + verdict) was adopted; the
+specific report's own data was not -- see `alpha_lab.scorecard.verdict`'s
+module docstring for the explicit architectural boundary this respects:
+Donatien remains EXTERNAL_CALIBRATION, "not ground truth and not a
+stock-rating engine" (its own existing module docstring, unchanged by
+this phase), and this new module never imports it. Confirmed by
+follow-up with the user: `SecurityScreenerVerdict` (the quantitative
+scorecard) combines with `AIResearchAnalysis` (the existing document-
+evidence AI read) to produce one `AIFinalRating` -- `AIResearchResult +
+SecurityScreenerVerdict = AI Final rating`, in the user's own words.
+
+### 41.1 SecurityTier: a real, objective lifecycle-stage proxy
+
+The source report ties its blend weights to a subjective lifecycle stage
+(Core/Growth/Spec). AlphaLab has no real data supporting that judgment
+call, so `SecurityTier` uses market capitalization instead -- a real,
+objective, already-computed field (`LiveResearchRecord.market_cap`):
+CORE ≥ $10B, GROWTH $2B–$10B, SPECULATIVE below $2B or unknown (unknown
+market cap defaults to the most conservative tier, never guessed).
+
+### 41.2 Fit Score: seven categories, tier-weighted, `ai_research` excluded
+
+`SecurityScreenerVerdict.fit_score` blends `LiveResearchRecord.category_
+scores`' seven quantitative categories (earnings_growth, analyst_
+revisions, business_quality, valuation, momentum, financial_strength,
+shareholder_return) using one of three tier-specific weight sets (CORE
+favors quality/financial-strength/shareholder-return; SPECULATIVE favors
+growth/momentum/revisions; GROWTH is the balanced middle -- every row
+sums to 1.0). `ai_research` is deliberately excluded from this blend: it
+combines with the Fit Score separately, once, in `AIFinalRating` below --
+including it here too would double-count the same AI evidence.
+
+A real data-quality fix made during live validation: a ticker with only
+one or two of the seven categories available (found live for the
+commodity/FX reference series already present in the universe --
+`CL=F`/`GC=F`/`DX-Y.NYB`/`^IRX`/`^TNX`/`^VIX`/`FTEC`/`GDX`, which carry no
+real fundamentals data) was producing a confident-looking Fit Score from
+one category alone (observed live: `CL=F` scored 85.71 from ONE available
+category). Fixed by requiring at least 4 of 7 categories available before
+computing a numeric Fit Score at all -- below that, `fit_score=None` and
+`verdict=INSUFFICIENT_DATA`, the same "not enough evidence to judge"
+treatment `CATEGORY_MINIMUM_METRICS` already applies to each individual
+category.
+
+### 41.3 Gates: absolute (hard) vs. relative (caution)
+
+A **hard gate** always forces `NO_INTEREST` regardless of Fit Score:
+`ethical_exclusion` (AlphaLab's own existing ethics screen, reused
+verbatim -- a security it has already excluded must never earn a
+positive verdict here), `severe_leverage` (real `debt_ebitda` raw metric
+> 6.0), `interest_coverage_shortfall` (real `interest_coverage` raw
+metric < 1.0). These use absolute, real raw metrics rather than
+universe-relative percentiles, because solvency risk is not relative to
+AlphaLab's own small tracked universe the way a percentile score is.
+
+A **caution gate** caps the verdict at `INTEREST`, never `STRONG_FIT`,
+even when the blended Fit Score alone would qualify: `valuation_extreme`,
+`negative_revisions`, `weak_balance_sheet_relative` -- each a
+universe-relative `category_scores` percentile below a round threshold
+(20/20/25).
+
+Validated live against the real 12-security universe: **AAL** genuinely
+triggers `severe_leverage` (a real, well-known fact about airline
+balance sheets) despite a respectable 64.8 Fit Score, forcing
+`NO_INTEREST`; **NVDA** clears every gate with full 7/7 category coverage
+and a 92.0 Fit Score, correctly reaching `STRONG_FIT`; every
+commodity/FX/ETF reference series correctly falls back to
+`INSUFFICIENT_DATA` on Fit Score per §41.2 (several also independently
+trigger `ethical_exclusion`).
+
+### 41.4 AIFinalRating: combining with AIResearchAnalysis
+
+`build_ai_final_rating(verdict, ai)` reuses `alpha_lab.screener.service`'s
+own `_ai_is_attributable`/`_ai_is_scoring_eligible` gate rather than
+re-deriving it -- an AI analysis not trusted to move `overall_score` is
+equally not trusted to move this rating. When usable, `final_rating`
+blends `fit_score` (70% weight) with `ai_rating` (30%); when the AI
+analysis is missing, unattributable, or not yet a scoring-eligible
+provider (currently only `openai` -- see §36.2), `final_rating` falls back
+to `fit_score` alone, the same "missing stays missing, never zero"
+convention every other weighted average in this codebase follows.
+Confirmed live: with only `RuleBasedFinancialResearchProvider` analyses
+in the current database (no `OPENAI_API_KEY` configured in this
+environment), `ai_rating` correctly comes back `None` for every ticker
+and `final_rating` correctly equals `fit_score` -- the fallback path
+working exactly as designed, not merely as asserted by a unit test.
+
+An additional gate beyond the screener's own two: `AIResearchResult.
+risk_score` (0 to +2, higher = more risk) at or above 1.5 is treated as
+its own caution-equivalent gate on `final_verdict`, capping it at
+`INTEREST` even when the blended numeric rating alone would qualify for
+`STRONG_FIT` -- letting the AI layer's own qualitative risk read veto a
+good blended number, not just contribute another averaged input.
+
+### 41.5 UI: Market Screener and Company Research
+
+Market Screener (`app/dashboard/pages/3_Market_Screener.py`) gained four
+columns (Tier / Fit Score / Verdict / Gates) computed per row from the
+already-loaded `LiveResearchRecord`s -- no new query. Company Research
+(`app/dashboard/pages/4_Company_Research.py`) gained a "Scorecard: Fit
+Score, Gates & AI Final Rating" panel using the ticker's already-fetched
+`LiveResearchRecord` (`quote`) and `AIResearchAnalysis` (`ai`) -- both
+already in scope on that page, so this adds no new database read either.
+Both pages were driven live end-to-end with a real headless-browser
+session (Playwright against a real running Streamlit instance, not just
+a unit test): Market Screener's new columns rendered correctly, and
+Company Research's Scorecard panel correctly showed AAL's real
+`severe_leverage` gate and `NO_INTEREST` verdict on first load.
+
+### 41.6 Import boundary and validation
+
+`alpha_lab.scorecard` follows the same one-directional import convention
+`alpha_lab.research_stance`/`alpha_lab.evidence_coverage` already
+established: it imports from `alpha_lab.screener`, and a new regression
+test (`test_no_scoring_module_imports_the_scorecard_verdict_code`,
+mirroring `test_macro_regression.py`'s own guard) proves nothing in
+`alpha_lab.research`/`.screener`/`.strategy`/`.backtest`/`.portfolio`/
+`.ratings`/`.factors` imports it back -- `LiveResearchRecord.overall_score`
+stays completely untouched by this phase.
+
+All tier boundaries, gate thresholds, and blend weights are deliberately
+round, documented V1 defaults, per the user's own explicit choice
+("reasonable defaults, document as uncalibrated") -- not derived from any
+real forward-return calibration study, the same honesty convention
+`alpha_lab.ai.rule_based._confidence`'s threshold already uses.
+
+**Validation:** 24 new tests (`tests/test_screener_verdict.py`, including
+the import-boundary guard), full existing test suite green except the
+same unrelated pre-existing `test_dependency_lock.py` failure, all three
+established smoke tests pass unchanged (this phase adds a new read-only
+package and two additive UI sections; no existing scoring path is
+touched), `git diff --check` clean. Every real-data number in this
+section (AAL/NVDA/commodity-series Fit Scores, the coverage bug, the
+fallback-path confirmation) is from a live run against the actual
+database, not a fixture.

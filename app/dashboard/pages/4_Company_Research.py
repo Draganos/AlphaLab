@@ -25,6 +25,7 @@ from alpha_lab.research.analyst_events import AnalystEventsService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 from alpha_lab.research.technical import IndicatorCategory
 from alpha_lab.research_stance import ResearchStance, build_research_stance
+from alpha_lab.scorecard import build_ai_final_rating, build_security_screener_verdict
 
 st.set_page_config(page_title="AlphaLab Company Research", layout="wide")
 st.title("Company Research")
@@ -1099,6 +1100,44 @@ try:
         else:
             st.info(
                 "AI research unavailable. Missing AI remains missing and does not block the application."
+            )
+
+        st.subheader("Scorecard: Fit Score, Gates & AI Final Rating")
+        st.caption(
+            "A tier-weighted blend of the seven quantitative screener categories "
+            "(excluding AI research, to avoid double-counting it below) into one "
+            "Fit Score, capped by red-flag Gates, combined with AI Research into "
+            "one AI Final Rating. All thresholds are V1 defaults, not yet "
+            "calibrated against real forward returns — see ARCHITECTURE.md §41."
+        )
+        screener_verdict = build_security_screener_verdict(quote)
+        final_rating = build_ai_final_rating(screener_verdict, ai)
+        score_columns = st.columns(4)
+        score_columns[0].metric("Tier", screener_verdict.tier.value)
+        score_columns[1].metric(
+            "Fit Score",
+            "—" if screener_verdict.fit_score is None else f"{screener_verdict.fit_score:.1f}/100",
+        )
+        score_columns[2].metric(
+            "AI Final Rating",
+            "—" if final_rating.final_rating is None else f"{final_rating.final_rating:.1f}/100",
+        )
+        score_columns[3].metric("Verdict", final_rating.final_verdict.value)
+        if final_rating.gates_triggered:
+            st.warning("Gates triggered: " + ", ".join(final_rating.gates_triggered))
+        with st.expander("Scorecard detail"):
+            st.json(
+                {
+                    "dimension_scores": screener_verdict.dimension_scores,
+                    "dimension_coverage": screener_verdict.dimension_coverage,
+                    "hard_gates": screener_verdict.hard_gates,
+                    "caution_gates": screener_verdict.caution_gates,
+                    "screener_verdict": screener_verdict.verdict.value,
+                    "ai_rating": final_rating.ai_rating,
+                    "ai_provider": final_rating.ai_provider,
+                    "ai_risk_score": final_rating.ai_risk_score,
+                    "methodology_version": final_rating.methodology_version,
+                }
             )
 finally:
     engine.dispose()
