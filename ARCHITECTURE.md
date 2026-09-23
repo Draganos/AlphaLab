@@ -3472,7 +3472,138 @@ failure). Every number in this section is from a real, live re-run
 against the actual database and actual SEC EDGAR/Yahoo Finance data --
 no fixture or synthetic data anywhere in this phase's own findings.
 
-## 41. Security Screener Verdict: Fit Score, Gates, and AI Final Rating
+## 41. Real sklearn sentiment classifier, hybrid with the existing lexicon
+
+Requested explicitly: a real trained classifier on real published labeled
+sentiment data, not a self-labeled or synthetic training set, following
+the shape of real precedents named directly (FinBERT: pretrained NLP on
+financial text; AlphaSense/Danelfin: aggregate sentiment/AI scoring
+products) while staying inside a plain, dependency-light sklearn
+pipeline (statsmodels-style classical modeling was not applicable here --
+this is a text classification task, not a time-series one).
+
+### 41.1 Dataset: Financial PhraseBank (Malo et al. 2014)
+
+The real, published, human-annotated dataset used: 16 people with
+financial-markets backgrounds independently labeled ~4,800 sentences from
+real financial news positive/negative/neutral; `Sentences_75Agree.txt`
+(the ≥75%-annotator-agreement subset, chosen to balance real label volume
+against real label quality) has **3,453 real labeled sentences** --
+confirmed live: `Counter({'neutral': 2146, 'positive': 887, 'negative':
+420})`, matching the well-known real-world skew of financial news toward
+neutral factual statements.
+
+**License: CC-BY-NC-SA-3.0** (non-commercial, share-alike, attribution
+required) -- fine for AlphaLab's personal/research paper-trading use, but
+a real constraint: never to be used commercially without contacting the
+dataset's authors. The dataset itself is never committed to this repo
+(fetched fresh from its Hugging Face mirror and cached under the already-
+gitignored `data/cache/`, exactly like every other external evidence
+source in this codebase) -- see `alpha_lab.ai.phrasebank`.
+
+### 41.2 Why hybrid, not a full 9-dimension classifier
+
+Financial PhraseBank supervises exactly one thing: general sentence
+sentiment. It has no labels for guidance direction, demand, margin
+outlook, competitive position, management confidence, balance-sheet
+health, risk severity, or catalysts. Given an explicit choice between (a)
+applying this one classifier's output across all nine `AIResearchResult`
+dimensions or (b) using it only for `sentiment_score` and keeping
+`RuleBasedFinancialResearchProvider`'s existing phrase lexicon for the
+other eight, the user picked (b) directly -- real ML where a real labeled
+dataset exists, and no further, rather than false precision from a
+sentiment-only model applied to dimensions it was never trained to judge.
+
+`alpha_lab.ai.sklearn_sentiment.SklearnFinancialSentimentProvider`
+implements this by composing (not duplicating) a
+`RuleBasedFinancialResearchProvider` instance internally: every
+non-sentiment field on the returned `AIResearchResult` is exactly what
+the lexicon provider would have produced; only `sentiment_score`,
+`evidence`, `key_positives`/`key_risks`, and the provenance fields
+(`provider`/`model`/`prompt_version`/`confidence`/`summary`) are replaced
+or extended with the classifier's own real output.
+
+### 41.3 Pipeline, training, and real evaluation metrics
+
+`scripts/train_sentiment_classifier.py`: TF-IDF (unigrams+bigrams,
+`sublinear_tf`) + `LogisticRegression(class_weight="balanced")`, an 80/20
+stratified train/test split (fixed `random_state`, not tuned against
+AlphaLab's own downstream calibration). Run live for real against the
+real dataset; real held-out test-set metrics (691 sentences never seen in
+training):
+
+```
+              precision    recall  f1-score   support
+    negative       0.71      0.67      0.69        84
+     neutral       0.90      0.92      0.91       429
+    positive       0.77      0.75      0.76       178
+    accuracy                           0.85       691
+   macro avg       0.79      0.78      0.79       691
+```
+
+Neutral (the majority real-world class) is classified most reliably;
+negative is the weakest (smallest class, only 84 test examples) -- an
+honest report of the real numbers, not cherry-picked. The trained
+pipeline + this metadata is persisted via `joblib` to `data/models/
+financial_sentiment_classifier.joblib` (gitignored, alongside
+`data/cache/` -- a build artifact, not repo content; re-running the
+training script is how it's obtained).
+
+### 41.4 Applying the real classifier to real per-sentence text
+
+`SklearnFinancialSentimentProvider` splits each document's text into
+sentences with a dependency-free regex splitter (no spaCy/nltk
+dependency), classifies each with the real trained pipeline, and keeps
+only predictions at ≥60% confidence as a positive/negative "hit" --
+mirroring `RuleBasedFinancialResearchProvider`'s own all-or-nothing
+phrase-match convention, applied to a probabilistic classifier instead.
+`sentiment_score` uses the exact same clip-to-[-2,+2] convention as every
+other lexicon dimension (`positive hits - negative hits`, clamped), so it
+stays on the same scale as the eight dimensions still produced by the
+lexicon.
+
+Validated live against real, already-ingested SEC filing text for all
+four universe tickers (no crash, real output for every one):
+
+| Ticker | Sentences classified | Positive hits (≥60%) | Negative hits (≥60%) | sentiment_score |
+|---|---|---|---|---|
+| AAL | 568 | 47 | 1 | 2.0 |
+| MA | 567 | 19 | 2 | 2.0 |
+| NVDA | 27 | 0 | 0 | 0.0 |
+| BRK.B | 10 | 0 | 0 | 0.0 |
+
+Known real limitation, observed directly in this run: the regex sentence
+splitter does not handle SEC filing tables/financial-statement text well
+(numbers with embedded periods, newline-heavy MD&A tables) -- some
+"sentences" it extracts are really multi-line table fragments rather than
+prose. These still pass `EvidenceReference`'s verbatim-excerpt validator
+(they are real, unmodified slices of the real filing text) and never
+crash analysis, but they are visibly less readable as evidence than a
+clean prose sentence. Documented honestly as future work, not treated as
+disqualifying for this V1.
+
+### 41.5 Provider wiring: explicit opt-in only
+
+`ALPHALAB_AI_PROVIDER=sklearn` opts in via
+`configured_ai_research_provider()`; the rule-based provider stays the
+default. Fails closed (returns `None`, same as a misconfigured `openai`
+selection) if `data/models/financial_sentiment_classifier.joblib` hasn't
+been built yet, rather than silently substituting a different provider.
+Deliberately NOT added to `_SCORING_ELIGIBLE_AI_PROVIDERS`
+(`alpha_lab.screener.service`) for the same reason the rule-based
+provider isn't: this classifier's sentiment component has only been
+validated against Financial PhraseBank's own held-out test set so far,
+never yet calibrated against real AlphaLab forward returns the way a
+scoring input should be before it is trusted to move a weighted score.
+
+**Validation:** full test suite (`tests/test_phrasebank.py`,
+`tests/test_sklearn_sentiment.py`, plus the full existing suite), all
+green except the same unrelated pre-existing `test_dependency_lock.py`
+numpy-version failure (confirmed present on unmodified `main` too, before
+any change in this phase), and `git diff --check` clean. Real dataset
+fetch/parse, real training run, and real per-ticker application above are
+all live results, not fixtures.
+## 42. Security Screener Verdict: Fit Score, Gates, and AI Final Rating
 
 Requested explicitly, pointing at a third-party research report's own
 "scorecard/fit/verdict" presentation: several evidence dimensions

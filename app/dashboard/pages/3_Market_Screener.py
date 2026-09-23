@@ -241,7 +241,7 @@ try:
         "Tier / Fit Score / Verdict / Gates: a scorecard technique (tier-weighted "
         "blend of the seven quantitative categories above, excluding AI Rating, "
         "capped by red-flag gates) applied to AlphaLab's own evidence. "
-        "V1 uncalibrated defaults — see ARCHITECTURE.md §41 and "
+        "V1 uncalibrated defaults — see ARCHITECTURE.md §42 and "
         "alpha_lab.scorecard.verdict."
     )
     with st.expander("Save current screen"):

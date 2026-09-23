@@ -211,6 +211,19 @@ def configured_ai_research_provider() -> AIResearchProvider | None:
                 os.environ["OPENAI_API_KEY"], os.getenv("ALPHALAB_AI_MODEL", "gpt-4.1-mini")
             )
         return None
+    if selection == "sklearn":
+        # Explicit opt-in only -- see `alpha_lab.ai.sklearn_sentiment`'s
+        # module docstring for why this is not the default. Fails closed
+        # (returns None, same as a misconfigured `openai` selection) if the
+        # trained model artifact hasn't been built yet, rather than
+        # silently falling back to the rule-based provider -- an explicit
+        # request for a specific provider is never silently substituted.
+        from alpha_lab.ai.sklearn_sentiment import SklearnFinancialSentimentProvider
+
+        try:
+            return SklearnFinancialSentimentProvider()
+        except FileNotFoundError:
+            return None
     from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
 
     return RuleBasedFinancialResearchProvider()

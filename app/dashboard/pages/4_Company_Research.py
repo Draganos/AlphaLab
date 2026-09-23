@@ -1108,7 +1108,7 @@ try:
             "(excluding AI research, to avoid double-counting it below) into one "
             "Fit Score, capped by red-flag Gates, combined with AI Research into "
             "one AI Final Rating. All thresholds are V1 defaults, not yet "
-            "calibrated against real forward returns — see ARCHITECTURE.md §41."
+            "calibrated against real forward returns — see ARCHITECTURE.md §42."
         )
         screener_verdict = build_security_screener_verdict(quote)
         final_rating = build_ai_final_rating(screener_verdict, ai)
