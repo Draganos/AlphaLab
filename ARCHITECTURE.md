@@ -3603,3 +3603,61 @@ numpy-version failure (confirmed present on unmodified `main` too, before
 any change in this phase), and `git diff --check` clean. Real dataset
 fetch/parse, real training run, and real per-ticker application above are
 all live results, not fixtures.
+
+## 42. Bug fix: `model_copy` bypassed `AIResearchResult`'s price-target validator
+
+Found during a routine bug check of the newly-merged §41 code, not a
+regression from any later change. `SklearnFinancialSentimentProvider.
+analyze()` builds its final `AIResearchResult` via `base.model_copy
+(update={...})` rather than a real constructor call. Confirmed live:
+pydantic v2's `model_copy` deliberately does not re-run field validators
+on `update` values -- constructing `AIResearchResult` directly with a
+price-target-bearing `key_positives` entry correctly raises
+`ValueError: AI research must not contain a price target`
+(`no_price_targets_in_lists`), but assembling the identical value via
+`model_copy(update=...)` silently let it through unvalidated.
+
+This matters because the classifier-derived `key_positives`/`key_risks`
+entries are real verbatim sentence excerpts from real SEC filing text,
+not template strings -- a filing sentence discussing an analyst price
+target (plausible in MD&A/risk-factor sections) is exactly the kind of
+real input this validator exists to catch everywhere else in this
+codebase (`alpha_lab.ai.rule_based._to_evidence`'s own docstring
+describes the identical concern for `EvidenceReference`).
+
+Fixed with a new `_safe_snippet` helper that applies the same
+`_reject_price_target` check `alpha_lab.ai.research` already uses,
+*before* a classifier-derived snippet ever reaches `model_copy` --
+skipping only that one snippet (matching `_to_evidence`'s own precedent)
+rather than letting an exception propagate and discard the entire
+analysis over one sentence. `evidence` list entries were never affected
+(each is a real `EvidenceReference(...)` construction, which does
+validate); only the raw-string `key_positives`/`key_risks` fields were
+exposed.
+
+New regression test
+(`test_analyze_excludes_a_price_target_sentence_even_when_classified`)
+uses a fake, fully deterministic pipeline (not the real toy model, whose
+classification of any specific sentence isn't guaranteed) to force a
+price-target sentence to classify as positive, proving end-to-end that it
+never reaches `key_positives`/`key_risks`/`evidence`. Confirmed the test
+actually catches the original bug by reverting the fix locally and
+re-running it (fails as expected), then restoring it (passes).
+
+Also removed two genuinely unused local variables (`positive_index`/
+`negative_index`) left over from an earlier version of the per-class
+confidence calculation -- `probability_row.max()` already extracts the
+predicted class's own confidence regardless of index, since `predict()`
+always selects the argmax; a reuse/cleanup finding, not a correctness
+bug.
+
+This fix was pulled out onto its own branch/PR rather than folded into
+the in-flight Security Screener Verdict PR (§41 is a merged, separate
+phase; `alpha_lab.ai.sklearn_sentiment` is not otherwise touched by that
+PR's own diff) -- keeping each PR's diff scoped to what it actually
+changes.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass unchanged
+(this is an opt-in-only provider fix; default scoring output is
+untouched), `git diff --check` clean.

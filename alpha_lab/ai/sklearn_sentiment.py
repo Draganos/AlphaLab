@@ -30,7 +30,12 @@ from pathlib import Path
 from typing import Any
 import re
 
-from alpha_lab.ai.research import AIResearchProvider, AIResearchResult, EvidenceReference
+from alpha_lab.ai.research import (
+    AIResearchProvider,
+    AIResearchResult,
+    EvidenceReference,
+    _reject_price_target,
+)
 from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider, _to_evidence
 
 DEFAULT_MODEL_PATH = Path("data/models/financial_sentiment_classifier.joblib")
@@ -107,9 +112,6 @@ class SklearnFinancialSentimentProvider(AIResearchProvider):
         texts = [text for text, _document_id, _excerpt in sentences]
         predictions = self._pipeline.predict(texts)
         probabilities = self._pipeline.predict_proba(texts)
-        classes = list(self._pipeline.classes_)
-        positive_index = classes.index("positive") if "positive" in classes else None
-        negative_index = classes.index("negative") if "negative" in classes else None
 
         positive_hits: list[tuple[str, int, str]] = []
         negative_hits: list[tuple[str, int, str]] = []
@@ -134,12 +136,12 @@ class SklearnFinancialSentimentProvider(AIResearchProvider):
 
         key_positives = list(base.key_positives)
         for _label, _document_id, excerpt in positive_hits:
-            snippet = excerpt.strip()
+            snippet = _safe_snippet(excerpt)
             if snippet and snippet not in key_positives:
                 key_positives.append(snippet)
         key_risks = list(base.key_risks)
         for _label, _document_id, excerpt in negative_hits:
-            snippet = excerpt.strip()
+            snippet = _safe_snippet(excerpt)
             if snippet and snippet not in key_risks:
                 key_risks.append(snippet)
 
@@ -165,6 +167,31 @@ class SklearnFinancialSentimentProvider(AIResearchProvider):
                 ),
             }
         )
+
+
+def _safe_snippet(excerpt: str) -> str | None:
+    """A real classified sentence, or None if it must be excluded from
+    `key_positives`/`key_risks`.
+
+    `analyze()` builds its final `AIResearchResult` via `base.model_copy
+    (update=...)`, not a real constructor call -- pydantic's `model_copy`
+    deliberately does NOT re-run field validators on `update` values, so
+    `AIResearchResult.no_price_targets_in_lists` would silently never fire
+    on a classifier-derived snippet the way it does for every other
+    `key_positives`/`key_risks` entry in this codebase (confirmed live: a
+    price-target-bearing string survives `model_copy` completely
+    unvalidated). A real SEC filing sentence discussing an analyst price
+    target is a plausible classifier hit, not a hypothetical.
+
+    Filtering here, before the value ever reaches `model_copy`, makes the
+    result equivalent to what real validation would have enforced --
+    mirroring `alpha_lab.ai.rule_based._to_evidence`'s own precedent of
+    skipping one bad excerpt rather than raising and losing the entire
+    analysis (every other computed dimension) over a single sentence."""
+    try:
+        return _reject_price_target(excerpt.strip()) or None
+    except ValueError:
+        return None
 
 
 def _extract_sentences(documents: list[dict[str, Any]]) -> list[tuple[str, int, str]]:
