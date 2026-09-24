@@ -24,6 +24,7 @@ def _record(
     ticker: str = "TEST",
     *,
     market_cap: float | None = 50_000_000_000.0,
+    currency: str | None = None,
     category_scores: dict[str, float | None] | None = None,
     raw_metrics: dict[str, float | int | None] | None = None,
     ethical_status: str = "PASS",
@@ -34,6 +35,7 @@ def _record(
         scores.update(category_scores)
     return LiveResearchRecord(
         ticker=ticker, company="Test Co", price=100.0, market_cap=market_cap,
+        currency=currency,
         country="US", exchange="NASDAQ", sector="Technology", industry="Software",
         asset_type="EQUITY", themes=[], ethical_status=ethical_status,
         data_quality_status="valid", overall_score=70.0, overall_rank=None,
@@ -85,6 +87,24 @@ def test_classify_tier_unknown_market_cap_defaults_to_speculative():
     assert classify_tier(None) == SecurityTier.SPECULATIVE
 
 
+def test_classify_tier_explicit_usd_matches_default_behavior():
+    assert classify_tier(10_000_000_000.0, "USD") == SecurityTier.CORE
+
+
+def test_classify_tier_unknown_currency_defaults_to_usd_for_backward_compatibility():
+    # Most real Security rows ingested so far predate the currency field and
+    # ARE plain USD -- an unannotated record must not be forced down to
+    # SPECULATIVE just because currency wasn't recorded.
+    assert classify_tier(10_000_000_000.0, None) == SecurityTier.CORE
+
+
+def test_classify_tier_non_usd_currency_never_compared_against_usd_thresholds():
+    # A market cap this large would be CORE under the USD thresholds, but
+    # AlphaLab has no real FX conversion -- an AED (or any non-USD) market
+    # cap must not be compared against USD boundaries at all.
+    assert classify_tier(50_000_000_000.0, "AED") == SecurityTier.SPECULATIVE
+
+
 # --- build_security_screener_verdict: fit score / coverage -------------------
 
 
@@ -130,6 +150,16 @@ def test_tier_weighting_changes_fit_score_for_the_same_raw_categories():
     assert core.tier == SecurityTier.CORE
     assert speculative.tier == SecurityTier.SPECULATIVE
     assert speculative.fit_score > core.fit_score
+
+
+def test_non_usd_market_cap_is_never_classified_core_via_the_full_pipeline():
+    # A real AED-denominated large-cap (e.g. a UAE security) must not be
+    # classified CORE just because its raw market_cap number happens to
+    # clear the USD CORE threshold -- AlphaLab has no real FX conversion.
+    verdict = build_security_screener_verdict(
+        _record(market_cap=50_000_000_000.0, currency="AED")
+    )
+    assert verdict.tier == SecurityTier.SPECULATIVE
 
 
 # --- hard gates ---------------------------------------------------------------

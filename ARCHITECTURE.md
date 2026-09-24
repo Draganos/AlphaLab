@@ -3802,3 +3802,64 @@ corrected to use a real `EXCLUDED` status rather than `REVIEW`. Full test
 suite, all three smoke tests, and `git diff --check` re-validated clean
 after the fix; scores are unaffected (both bugs were in `alpha_lab.
 scorecard`'s own new code, never in `overall_score`).
+
+### 41.8 Review follow-up: `SecurityTier`'s USD thresholds vs. currency-blind `market_cap`
+
+A second review found `classify_tier`'s CORE/GROWTH boundaries ($10B/$2B)
+are USD amounts compared directly against `LiveResearchRecord.market_cap`,
+which is `price * shares` computed by `alpha_lab.ratings.valuation.
+calculate_valuation_factors` with zero FX normalization -- and confirmed
+this is a real, pre-existing, codebase-wide gap (the same currency
+blindness already exists in `alpha_lab.search.screening`'s own
+`minimum_market_cap`/`maximum_market_cap` filters, predating this PR).
+AlphaLab's config (`config/default.yaml`) defines a UAE, AED-denominated
+universe, so a non-USD security's `market_cap` number could be compared
+against USD tier thresholds and misclassified.
+
+Live-verified before choosing a fix: every one of the 12 `Security` rows
+currently ingested in this environment is `currency=USD` -- the UAE
+universe has never actually been ingested here, so the bug is real but
+currently dormant. Full FX normalization at the canonical valuation layer
+(the reviewer's stated preference) was judged out of scope for this PR:
+it would require real point-in-time FX rate ingestion, a whole new data
+capability this PR does not otherwise touch. Took the reviewer's own
+named alternative instead -- scope the feature to what it can honestly
+support and make that explicit and tested:
+
+- Added `currency: str | None` to `LiveResearchRecord` (mirrors how
+  `country` is already carried from `Security`), threaded from
+  `security.currency` in `MarketScreenerService`'s live-record
+  construction. Defaults to `None` so the many pre-existing
+  `LiveResearchRecord` test fixtures across this codebase, which never
+  exercised this field, did not all need editing.
+- `classify_tier(market_cap, currency="USD")` now takes an explicit
+  currency. An unknown currency (`None` -- most real `Security` rows
+  ingested before this field existed, confirmed live, are actually plain
+  USD) is treated as USD for backward compatibility; any EXPLICITLY known
+  non-USD currency is never compared against these USD thresholds at all
+  and falls back to the same conservative `SPECULATIVE` tier an unknown
+  market cap already gets -- guessing a tier from a non-USD number with
+  no real FX conversion would be fabricated precision, not a real
+  classification.
+
+Validated live against the real database: `MarketScreenerService.
+build_live_records()` correctly threads `currency="USD"` through for all
+12 real securities (`read_current_research()`'s persisted payloads
+predate this field and correctly fall back to the `None`-as-USD default).
+New tests (`test_classify_tier_explicit_usd_matches_default_behavior`,
+`test_classify_tier_unknown_currency_defaults_to_usd_for_backward_
+compatibility`, `test_classify_tier_non_usd_currency_never_compared_
+against_usd_thresholds`, `test_non_usd_market_cap_is_never_classified_
+core_via_the_full_pipeline`) cover both the backward-compatible default
+and the actual fix. Full test suite, all three smoke tests, and `git
+diff --check` re-validated clean.
+
+Not fixed, deliberately left as a documented note rather than a behavior
+change: the same review raised a minor, non-blocking observation that
+`AIFinalRating`'s 70/30 blend can lift a sub-40 `fit_score` above
+`NO_INTEREST` when combined with a strong `ai_rating` -- explicitly
+distinct from §41.7's second bug (an insufficient scorecard, `fit_score
+is None`, being rescued outright). A blend genuinely blending is not a
+bug; it is documented here as intentional, calibration-pending behavior
+consistent with this phase's overall "reasonable defaults, uncalibrated"
+scope, not a defect to fix.

@@ -69,13 +69,31 @@ class SecurityTier(StrEnum):
     SPECULATIVE = "SPECULATIVE"
 
 
-# Round, documented USD market-cap boundaries -- not calibrated.
+# Round, documented USD market-cap boundaries -- not calibrated. AlphaLab
+# has no real point-in-time FX conversion capability (see
+# alpha_lab.ratings.valuation.calculate_valuation_factors, which computes
+# market_cap = price * shares in whatever currency the security itself is
+# quoted in), so these thresholds are only ever meaningful for USD-quoted
+# securities.
 _CORE_MIN_MARKET_CAP = 10_000_000_000.0
 _GROWTH_MIN_MARKET_CAP = 2_000_000_000.0
 
+_USD = "USD"
 
-def classify_tier(market_cap: float | None) -> SecurityTier:
+
+def classify_tier(market_cap: float | None, currency: str | None = _USD) -> SecurityTier:
+    """Classifies by real market cap against the USD thresholds above.
+    `currency` defaults to USD for backward compatibility with existing
+    callers and with records whose currency is simply not yet known (most
+    real `Security` rows ingested so far ARE plain USD, and the field is
+    new). Only an explicitly known NON-USD currency is deliberately not
+    compared against these USD thresholds -- there is no real FX
+    conversion here, so guessing a tier from a non-USD number would be
+    fabricated precision. Falls back to the most conservative tier
+    instead, same as an unknown market cap already does."""
     if market_cap is None:
+        return SecurityTier.SPECULATIVE
+    if currency is not None and currency != _USD:
         return SecurityTier.SPECULATIVE
     if market_cap >= _CORE_MIN_MARKET_CAP:
         return SecurityTier.CORE
@@ -261,7 +279,7 @@ def build_security_screener_verdict(record: LiveResearchRecord) -> SecurityScree
     `record.category_scores`/`record.raw_metrics`/`record.market_cap`/
     `record.ethical_status` exactly as already computed by
     `MarketScreenerService`; computes no new category score of its own."""
-    tier = classify_tier(record.market_cap)
+    tier = classify_tier(record.market_cap, record.currency)
     weights = _TIER_WEIGHTS[tier]
     available = {
         name: record.category_scores[name]
