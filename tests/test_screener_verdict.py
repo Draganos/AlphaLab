@@ -136,9 +136,32 @@ def test_tier_weighting_changes_fit_score_for_the_same_raw_categories():
 
 
 def test_ethical_exclusion_is_a_hard_gate_regardless_of_fit_score():
-    verdict = build_security_screener_verdict(_record(ethical_status="REVIEW"))
+    verdict = build_security_screener_verdict(_record(ethical_status="EXCLUDED"))
     assert "ethical_exclusion" in verdict.hard_gates
     assert verdict.verdict == ScreenerVerdict.NO_INTEREST
+
+
+def test_ethical_review_is_not_treated_as_an_exclusion():
+    """REVIEW means "not yet determined", not "determined excluded" --
+    a real EthicalStatus distinct from EXCLUDED (alpha_lab.ethics.policy).
+    It must never force NO_INTEREST the way a real exclusion does."""
+    verdict = build_security_screener_verdict(_record(ethical_status="REVIEW"))
+    assert verdict.hard_gates == []
+    assert "ethical_exclusion" not in verdict.hard_gates
+    assert verdict.verdict != ScreenerVerdict.NO_INTEREST
+
+
+def test_ethical_review_pending_caps_verdict_at_interest_not_strong_fit():
+    verdict = build_security_screener_verdict(_record(ethical_status="REVIEW"))
+    assert "ethical_review_pending" in verdict.caution_gates
+    assert verdict.fit_score >= 70  # would otherwise be STRONG_FIT
+    assert verdict.verdict == ScreenerVerdict.INTEREST
+
+
+def test_ethical_unknown_also_caps_verdict_like_review():
+    verdict = build_security_screener_verdict(_record(ethical_status="UNKNOWN"))
+    assert "ethical_review_pending" in verdict.caution_gates
+    assert verdict.verdict == ScreenerVerdict.INTEREST
 
 
 def test_severe_leverage_is_a_hard_gate():
@@ -223,6 +246,23 @@ def test_final_rating_blends_fit_score_and_ai_rating_when_both_usable():
     # blend is strictly between the two inputs, weighted toward fit_score
     assert min(verdict.fit_score, 50.0) < rating.final_rating < max(verdict.fit_score, 50.0)
     assert abs(rating.final_rating - (verdict.fit_score * 0.7 + 50.0 * 0.3)) < 0.01
+
+
+def test_ai_never_rescues_an_insufficient_quantitative_scorecard():
+    """A real, scoring-eligible AI rating must never manufacture a
+    complete scorecard when the quantitative Fit Score itself is
+    INSUFFICIENT_DATA (fewer than _MIN_FIT_SCORE_CATEGORIES available) --
+    AI is combined with the quantitative Fit Score, never a substitute
+    for it."""
+    scores = {name: None for name in FIT_SCORE_CATEGORIES}
+    scores["earnings_growth"] = 90.0
+    verdict = build_security_screener_verdict(_record(category_scores=scores))
+    assert verdict.fit_score is None  # confirms the premise
+    ai = _ai_analysis(provider="openai", ai_rating=95.0)
+    rating = build_ai_final_rating(verdict, ai)
+    assert rating.ai_rating == 95.0  # still reported for transparency
+    assert rating.final_rating is None
+    assert rating.final_verdict == ScreenerVerdict.INSUFFICIENT_DATA
 
 
 def test_hard_gate_forces_no_interest_even_with_a_strong_ai_rating():

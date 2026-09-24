@@ -3656,28 +3656,32 @@ category.
 ### 41.3 Gates: absolute (hard) vs. relative (caution)
 
 A **hard gate** always forces `NO_INTEREST` regardless of Fit Score:
-`ethical_exclusion` (AlphaLab's own existing ethics screen, reused
-verbatim -- a security it has already excluded must never earn a
-positive verdict here), `severe_leverage` (real `debt_ebitda` raw metric
-> 6.0), `interest_coverage_shortfall` (real `interest_coverage` raw
-metric < 1.0). These use absolute, real raw metrics rather than
-universe-relative percentiles, because solvency risk is not relative to
-AlphaLab's own small tracked universe the way a percentile score is.
+`ethical_exclusion` (only when AlphaLab's own ethics screen has reached
+`EthicalStatus.EXCLUDED` -- a real determination, see §41.7's fix for why
+this must not also fire on `REVIEW`/`UNKNOWN`), `severe_leverage` (real
+`debt_ebitda` raw metric > 6.0), `interest_coverage_shortfall` (real
+`interest_coverage` raw metric < 1.0). The two leverage gates use
+absolute, real raw metrics rather than universe-relative percentiles,
+because solvency risk is not relative to AlphaLab's own small tracked
+universe the way a percentile score is.
 
 A **caution gate** caps the verdict at `INTEREST`, never `STRONG_FIT`,
 even when the blended Fit Score alone would qualify: `valuation_extreme`,
-`negative_revisions`, `weak_balance_sheet_relative` -- each a
-universe-relative `category_scores` percentile below a round threshold
-(20/20/25).
+`negative_revisions`, `weak_balance_sheet_relative` (each a
+universe-relative `category_scores` percentile below a round threshold,
+20/20/25), and `ethical_review_pending` (§41.7).
 
 Validated live against the real 12-security universe: **AAL** genuinely
 triggers `severe_leverage` (a real, well-known fact about airline
 balance sheets) despite a respectable 64.8 Fit Score, forcing
 `NO_INTEREST`; **NVDA** clears every gate with full 7/7 category coverage
-and a 92.0 Fit Score, correctly reaching `STRONG_FIT`; every
-commodity/FX/ETF reference series correctly falls back to
-`INSUFFICIENT_DATA` on Fit Score per §41.2 (several also independently
-trigger `ethical_exclusion`).
+and a 92.0 Fit Score, correctly reaching `STRONG_FIT`; **BRK.B** and
+**MA** are real `EthicalStatus.EXCLUDED` securities and correctly trigger
+`ethical_exclusion`; every commodity/FX/ETF reference series in the
+universe is real `EthicalStatus.REVIEW` (not `EXCLUDED`) and correctly
+falls back to `INSUFFICIENT_DATA` on Fit Score per §41.2, now honestly
+flagged with `ethical_review_pending` rather than a false
+`ethical_exclusion`.
 
 ### 41.4 AIFinalRating: combining with AIResearchAnalysis
 
@@ -3695,6 +3699,12 @@ in the current database (no `OPENAI_API_KEY` configured in this
 environment), `ai_rating` correctly comes back `None` for every ticker
 and `final_rating` correctly equals `fit_score` -- the fallback path
 working exactly as designed, not merely as asserted by a unit test.
+
+This fallback is deliberately NOT symmetric (§41.7's second fix): when
+`fit_score` itself is `None` (insufficient quantitative coverage),
+`final_rating` stays `None` too, even given a real, scoring-eligible
+`ai_rating` -- AI is combined with the quantitative Fit Score, never a
+substitute for it.
 
 An additional gate beyond the screener's own two: `AIResearchResult.
 risk_score` (0 to +2, higher = more risk) at or above 1.5 is treated as
@@ -3744,3 +3754,51 @@ touched), `git diff --check` clean. Every real-data number in this
 section (AAL/NVDA/commodity-series Fit Scores, the coverage bug, the
 fallback-path confirmation) is from a live run against the actual
 database, not a fixture.
+
+### 41.7 Review fixes: real bugs found live in this PR's own diff
+
+A review of this PR's diff against the real codebase (not just the PR's
+own description) found two genuine bugs, both fixed before merge:
+
+**1. `ethical_status != "PASS"` treated `REVIEW`/`UNKNOWN` as an
+exclusion.** `alpha_lab.ethics.policy.EthicalStatus` has four real
+states -- `PASS`, `REVIEW`, `EXCLUDED`, `UNKNOWN` -- and `REVIEW` means
+"insufficient business evidence to classify" / `UNKNOWN` means "no
+attributable classification computed at all", neither of which is a
+determination that the security IS ethically excluded. The original hard
+gate collapsed all three non-`PASS` states into `ethical_exclusion`,
+forcing `NO_INTEREST` on a security AlphaLab's own ethics screen had
+never actually excluded. Confirmed live against the real 12-security
+universe: every commodity/FX/ETF reference series in the universe is
+real `EthicalStatus.REVIEW`, not `EXCLUDED` -- the bug was live-triggering
+on real data, not just a hypothetical. Fixed by narrowing the hard gate
+to `EXCLUDED` only, and adding `ethical_review_pending` as a new caution
+gate for `REVIEW`/`UNKNOWN` (caps the verdict at `INTEREST`, same
+treatment as a numeric caution factor, never a full `NO_INTEREST` from
+merely undetermined evidence).
+
+**2. `AIFinalRating` let AI rescue an insufficient quantitative
+scorecard.** The original fallback chain was
+`fit_score+ai_rating -> fit_score alone -> ai_rating alone`: when
+`fit_score` was `None` (fewer than `_MIN_FIT_SCORE_CATEGORIES` real
+quantitative categories available -- §41.2's own coverage gate), a real,
+scoring-eligible `ai_rating` alone could still produce a numeric
+`final_rating` and potentially a `STRONG_FIT` verdict, quietly
+undermining the entire purpose of the coverage gate. Fixed: this
+direction is not symmetric -- `final_rating` now stays `None`
+(`INSUFFICIENT_DATA`) whenever `fit_score` is `None`, regardless of AI
+availability; `ai_rating`/`ai_provider` are still reported on the result
+for transparency, just never allowed to manufacture a complete scorecard
+alone.
+
+Both fixes are covered by new tests
+(`test_ethical_review_is_not_treated_as_an_exclusion`,
+`test_ethical_review_pending_caps_verdict_at_interest_not_strong_fit`,
+`test_ethical_unknown_also_caps_verdict_like_review`,
+`test_ai_never_rescues_an_insufficient_quantitative_scorecard`), and the
+original test that had locked in the first bug
+(`test_ethical_exclusion_is_a_hard_gate_regardless_of_fit_score`) was
+corrected to use a real `EXCLUDED` status rather than `REVIEW`. Full test
+suite, all three smoke tests, and `git diff --check` re-validated clean
+after the fix; scores are unaffected (both bugs were in `alpha_lab.
+scorecard`'s own new code, never in `overall_score`).

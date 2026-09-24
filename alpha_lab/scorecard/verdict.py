@@ -149,6 +149,17 @@ _CAUTION_GATE_VALUATION_PERCENTILE = 20.0
 _CAUTION_GATE_REVISIONS_PERCENTILE = 20.0
 _CAUTION_GATE_FINANCIAL_STRENGTH_PERCENTILE = 25.0
 
+# EthicalEvaluation's real states (alpha_lab.ethics.policy.EthicalStatus):
+# PASS / REVIEW / EXCLUDED / UNKNOWN. REVIEW and UNKNOWN mean "not yet
+# determined" -- insufficient business evidence to classify, or no
+# attributable classification computed at all -- never a finding that the
+# security IS ethically excluded. Only EXCLUDED is that determination, so
+# only EXCLUDED is a hard gate below. REVIEW/UNKNOWN instead cap the
+# verdict at INTEREST via a caution gate (never STRONG_FIT while the
+# ethical read itself is still undetermined), the same way a numeric
+# caution gate holds back an otherwise-strong Fit Score.
+_ETHICAL_REVIEW_PENDING_STATUSES = frozenset({"REVIEW", "UNKNOWN"})
+
 # AIFinalRating: how much weight ai_rating gets once genuinely available
 # (attributable AND scoring-eligible) alongside a real Fit Score.
 _AI_BLEND_WEIGHT = 0.3
@@ -200,7 +211,7 @@ def _evaluate_hard_gates(record: LiveResearchRecord) -> list[str]:
     mirroring the source technique's own "capped by red-flag gates"
     convention."""
     gates: list[str] = []
-    if record.ethical_status != "PASS":
+    if record.ethical_status == "EXCLUDED":
         gates.append("ethical_exclusion")
     debt_ebitda = record.raw_metrics.get("debt_ebitda")
     if debt_ebitda is not None and debt_ebitda > _HARD_GATE_MAX_DEBT_EBITDA:
@@ -216,6 +227,8 @@ def _evaluate_caution_gates(record: LiveResearchRecord) -> list[str]:
     the verdict at INTEREST even when the blended Fit Score alone would
     reach STRONG_FIT."""
     gates: list[str] = []
+    if record.ethical_status in _ETHICAL_REVIEW_PENDING_STATUSES:
+        gates.append("ethical_review_pending")
     valuation = record.category_scores.get("valuation")
     if valuation is not None and valuation < _CAUTION_GATE_VALUATION_PERCENTILE:
         gates.append("valuation_extreme")
@@ -290,7 +303,18 @@ def build_ai_final_rating(
     AI analysis is treated as ABSENT (excluded from the blend), never as a
     zero or neutral score -- `final_rating` falls back to `fit_score`
     alone in that case, the same "missing stays missing" convention every
-    other weighted average in this codebase already follows."""
+    other weighted average in this codebase already follows.
+
+    The reverse direction is NOT symmetric: when `verdict.fit_score` is
+    `None` (fewer than `_MIN_FIT_SCORE_CATEGORIES` quantitative categories
+    available), `final_rating` stays `None` too, even if a real,
+    scoring-eligible `ai_rating` is available. AI evidence is one input
+    combined with the quantitative Fit Score, never a substitute for it --
+    letting AI alone manufacture a complete scorecard would quietly
+    undermine `_MIN_FIT_SCORE_CATEGORIES`'s whole purpose (never reporting
+    a confident-looking rating from too little quantitative evidence).
+    `ai_rating`/`ai_provider` are still reported for transparency even
+    when this happens."""
     ai_usable = ai is not None and _ai_is_attributable(ai) and _ai_is_scoring_eligible(ai)
     ai_rating = ai.ai_rating if ai_usable else None
     ai_provider = ai.provider if ai_usable else None
@@ -303,7 +327,7 @@ def build_ai_final_rating(
     elif verdict.fit_score is not None:
         final_rating = verdict.fit_score
     else:
-        final_rating = ai_rating
+        final_rating = None
 
     ai_risk_gated = ai_risk_score is not None and ai_risk_score >= _AI_RISK_GATE_THRESHOLD
     gates_triggered = list(verdict.hard_gates) + list(verdict.caution_gates)
