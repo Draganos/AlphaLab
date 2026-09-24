@@ -12,6 +12,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.screener import MarketScreenerService
+from alpha_lab.scorecard import build_security_screener_verdict
 from alpha_lab.search import (
     DeterministicQueryInterpreter,
     ScreenCriteria,
@@ -207,6 +208,7 @@ try:
     ]
     selected = apply_screen(screen_records, criteria)
     indexed = {item.ticker: item for item in records}
+    verdicts = {item.ticker: build_security_screener_verdict(item) for item in records}
     rows = [
         {
             "Ticker": item.ticker,
@@ -227,10 +229,21 @@ try:
             "Coverage": item.coverage,
             "Data Quality": indexed[item.ticker].data_quality_status,
             "Sharia Status": item.ethical_status,
+            "Tier": verdicts[item.ticker].tier.value,
+            "Fit Score": verdicts[item.ticker].fit_score,
+            "Verdict": verdicts[item.ticker].verdict.value,
+            "Gates": ", ".join(verdicts[item.ticker].hard_gates + verdicts[item.ticker].caution_gates) or "—",
         }
         for item in selected
     ]
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.caption(
+        "Tier / Fit Score / Verdict / Gates: a scorecard technique (tier-weighted "
+        "blend of the seven quantitative categories above, excluding AI Rating, "
+        "capped by red-flag gates) applied to AlphaLab's own evidence. "
+        "V1 uncalibrated defaults — see ARCHITECTURE.md §42 and "
+        "alpha_lab.scorecard.verdict."
+    )
     with st.expander("Save current screen"):
         name = st.text_input("Screen name")
         if st.button("Save") and name:
