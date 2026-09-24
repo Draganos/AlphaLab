@@ -135,6 +135,13 @@ class LiveResearchRecord(BaseModel):
     company: str | None
     price: float | None
     market_cap: float | None
+    # Defaults to None (rather than being required like the other Security
+    # metadata fields here) so the many existing LiveResearchRecord test
+    # fixtures across this codebase don't need touching for a field they
+    # never exercised -- the tier classifier downstream already treats a
+    # missing currency the same conservative way it treats a missing
+    # market_cap.
+    currency: str | None = None
     country: str | None
     exchange: str | None
     sector: str | None
@@ -464,6 +471,7 @@ class MarketScreenerService:
                 if data["valuation"]["market_cap"] is not None
                 else security.market_cap
             ),
+            currency=security.currency,
             country=security.country,
             exchange=security.exchange,
             sector=security.sector,
