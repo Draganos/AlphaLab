@@ -22,6 +22,7 @@ from alpha_lab.database.models import (
     Price,
     Security,
 )
+from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
 from alpha_lab.factors import percentile_scores
 from alpha_lab.fx import FXRateService
@@ -232,14 +233,8 @@ class MarketScreenerService:
         rows: dict[str, dict] = {}
         with Session(self.engine) as session:
             for security in session.scalars(select(Security).order_by(Security.ticker)):
-                prices = list(
-                    session.scalars(
-                        select(Price)
-                        .where(
-                            Price.ticker == security.ticker, Price.date <= evaluation
-                        )
-                        .order_by(Price.date)
-                    )
+                prices = latest_price_per_date(
+                    session, Price.ticker == security.ticker, Price.date <= evaluation
                 )
                 usable_prices = [item for item in prices if _usable_close(item) is not None]
                 price = usable_prices[-1] if usable_prices else None

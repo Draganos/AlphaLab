@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import pandas as pd
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 
 from alpha_lab.database.models import Fundamental, Price, Security
 from alpha_lab.database.session import session_scope
@@ -15,12 +15,36 @@ from alpha_lab.ingestion.universe import _canonical_exchange
 
 logger = logging.getLogger(__name__)
 
+# Every field a re-ingest can revise. Order doesn't matter; used both to
+# merge an incoming row's non-None fields onto the latest known revision
+# and to detect whether anything actually changed -- see ingest()'s Price
+# upsert.
+_PRICE_FIELDS = (
+    "open", "high", "low", "close", "adjusted_close", "volume",
+    "currency", "provider", "source",
+)
+
 
 class IngestionService:
     def __init__(self, provider: MarketDataProvider, engine: Engine):
         self.provider, self.engine = provider, engine
 
     def ingest(self, ticker: str, start: date, end: date) -> None:
+        """Fetch + upsert. `Price` rows are append-only on genuine change --
+        an already-stored `(ticker, date)` bar is never mutated in place;
+        a real revision (corrected close, split/dividend adjustment
+        restating `adjusted_close`, ...) appends a new row with its own
+        `ingested_at` instead, mirroring `Fundamental`'s existing
+        content-hash-based append-only pattern (and `FXRateService.
+        refresh`'s identical fix for the same PIT leak). Mutating in place
+        would silently let a later revision leak into a historical PIT
+        read (e.g. `get_technical_summary_as_of`) that predates the
+        revision -- data AlphaLab did not actually possess at that point
+        in its own history. Re-ingesting an unchanged bar is a true
+        no-op: nothing is inserted, and the existing row's `ingested_at`
+        is left untouched. Every reader of `Price` history must therefore
+        pick exactly one row per `(ticker, date)` -- see
+        `alpha_lab.database.queries.latest_price_per_date`."""
         symbol = ticker.upper().strip()
         info = self.provider.get_company_info(symbol)
         info["exchange"] = _canonical_exchange(info.get("exchange"))
@@ -60,19 +84,23 @@ class IngestionService:
                     provider=provider_name,
                     source=self._text(row.get("source")),
                 )
-                existing = (
-                    session.query(Price)
-                    .filter_by(ticker=symbol, date=pd.Timestamp(index).date())
-                    .one_or_none()
-                )
-                if existing:
-                    for key, value in values.items():
-                        if value is not None:
-                            setattr(existing, key, value)
-                else:
-                    session.add(
-                        Price(ticker=symbol, date=pd.Timestamp(index).date(), **values)
-                    )
+                price_date = pd.Timestamp(index).date()
+                latest = session.scalars(
+                    select(Price)
+                    .where(Price.ticker == symbol, Price.date == price_date)
+                    .order_by(Price.ingested_at.desc(), Price.id.desc())
+                    .limit(1)
+                ).first()
+                merged = {
+                    field: values[field]
+                    if values.get(field) is not None
+                    else (getattr(latest, field) if latest else None)
+                    for field in _PRICE_FIELDS
+                }
+                if latest is None or any(
+                    merged[field] != getattr(latest, field) for field in _PRICE_FIELDS
+                ):
+                    session.add(Price(ticker=symbol, date=price_date, **merged))
             for row in financials.to_dict("records"):
                 period = pd.Timestamp(row.pop("period")).date()
                 values = {

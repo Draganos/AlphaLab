@@ -62,6 +62,51 @@ def test_fundamental_revisions_are_append_only_idempotent_and_point_in_time():
         assert after[0].source == "restated filing"
 
 
+class RevisingPriceProvider(FakeProvider):
+    def __init__(self, close: float):
+        self._close = close
+
+    def get_price_history(self, ticker, start, end):
+        return pd.DataFrame(
+            {"close": [self._close], "adjusted_close": [self._close]},
+            index=pd.to_datetime(["2024-01-01"]),
+        )
+
+
+def test_price_revisions_are_append_only_not_mutated_in_place():
+    """Real reviewer-caught PIT bug (see FXRateService.refresh's identical
+    fix): a genuine price revision must append a new row with a fresh
+    ingested_at, never mutate the existing row in place -- mutating would
+    silently let a historical as_of between the two ingests see the
+    revision, data AlphaLab did not actually possess at that point."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    IngestionService(RevisingPriceProvider(10.0), engine).ingest(
+        "REV", date(2024, 1, 1), date(2024, 2, 1)
+    )
+    IngestionService(RevisingPriceProvider(11.0), engine).ingest(
+        "REV", date(2024, 1, 1), date(2024, 2, 1)
+    )
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(Price).where(Price.ticker == "REV").order_by(Price.id)
+        ).all()
+        assert len(rows) == 2  # appended, never mutated
+        assert [row.close for row in rows] == [10.0, 11.0]
+
+
+def test_price_re_ingesting_an_unchanged_bar_is_a_true_no_op():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    service = IngestionService(RevisingPriceProvider(10.0), engine)
+    service.ingest("SAME", date(2024, 1, 1), date(2024, 2, 1))
+    service.ingest("SAME", date(2024, 1, 1), date(2024, 2, 1))
+    with Session(engine) as session:
+        assert session.scalar(
+            select(func.count()).select_from(Price).where(Price.ticker == "SAME")
+        ) == 1
+
+
 def test_market_provider_cannot_replace_canonical_universe_exchange():
     engine = make_engine("sqlite:///:memory:")
     create_schema(engine)

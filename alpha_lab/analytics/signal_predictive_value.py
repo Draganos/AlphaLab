@@ -100,6 +100,7 @@ from alpha_lab.ai.documents import select_documents_for_analysis
 from alpha_lab.ai.rule_based import RuleBasedFinancialResearchProvider
 from alpha_lab.config import Settings
 from alpha_lab.database.models import CompanyDocument, Price
+from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.research.service import ResearchService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 
@@ -149,15 +150,16 @@ def _price_series(engine: Engine, ticker: str) -> pd.Series:
     filtering)."""
     normalized = ticker.strip().upper()
     with Session(engine) as session:
-        rows = session.execute(
-            select(Price.date, Price.close)
-            .where(Price.ticker == normalized, Price.close.is_not(None))
-            .order_by(Price.date)
-        ).all()
+        rows = [
+            row
+            for row in latest_price_per_date(session, Price.ticker == normalized)
+            if row.close is not None
+        ]
     if not rows:
         return pd.Series(dtype=float)
-    dates, closes = zip(*rows)
-    return pd.Series(list(closes), index=pd.DatetimeIndex(dates).normalize(), dtype=float)
+    dates = [row.date for row in rows]
+    closes = [row.close for row in rows]
+    return pd.Series(closes, index=pd.DatetimeIndex(dates).normalize(), dtype=float)
 
 
 # A weekend or a short holiday cluster is a few calendar days; beyond this,

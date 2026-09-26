@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 
 import pandas as pd
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from alpha_lab.database.models import (
@@ -32,6 +32,7 @@ from alpha_lab.database.models import (
     CurrentTechnicalSummary,
     Price,
 )
+from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.providers.errors import ProviderError
 from alpha_lab.research.ai_rating import (
@@ -134,19 +135,22 @@ class SupplementalResearchService:
         stored yet as of that date. Always returns a `TechnicalSummary`
         (never `None`) -- a short/empty historical price window yields an
         honest REVIEW summary with zero coverage, exactly like
-        `refresh_technical_summary`'s own "always succeeds" guarantee."""
+        `refresh_technical_summary`'s own "always succeeds" guarantee.
+
+        Uses `latest_price_per_date` rather than a plain `select(Price)`:
+        `IngestionService.ingest` now appends a new row (rather than
+        mutating one) for a genuine revision, so more than one row can
+        exist per `(ticker, date)` -- this picks exactly the one revision
+        actually known as of `as_of`, never an earlier or later one."""
         symbol = ticker.strip().upper()
         upper_bound = datetime.combine(as_of, time.max)
         with Session(self.engine) as session:
-            rows = session.scalars(
-                select(Price)
-                .where(
-                    Price.ticker == symbol,
-                    Price.date <= as_of,
-                    Price.ingested_at <= upper_bound,
-                )
-                .order_by(Price.date)
-            ).all()
+            rows = latest_price_per_date(
+                session,
+                Price.ticker == symbol,
+                Price.date <= as_of,
+                Price.ingested_at <= upper_bound,
+            )
         frame = _price_history_frame(rows)
         return build_technical_summary(symbol, frame, as_of=as_of, source="AlphaLabPriceHistory")
 
@@ -190,9 +194,7 @@ class SupplementalResearchService:
         summary with zero coverage, which is honest, not an error)."""
         symbol = ticker.strip().upper()
         with Session(self.engine) as session:
-            rows = session.scalars(
-                select(Price).where(Price.ticker == symbol).order_by(Price.date)
-            ).all()
+            rows = latest_price_per_date(session, Price.ticker == symbol)
         frame = _price_history_frame(rows)
         summary = build_technical_summary(
             symbol,
