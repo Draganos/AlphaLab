@@ -157,3 +157,81 @@ def test_ticker_construction_uses_the_translated_yahoo_symbol_not_the_canonical_
 
     assert captured_symbols == ["BRK-B"]
     assert info["ticker"] == "BRK.B"  # the canonical ticker, unchanged
+
+
+# --- get_fx_rate_history: real point-in-time currency -> USD conversion --
+
+
+def _fx_history_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {"Close": [0.2724, 0.2723]},
+        index=pd.to_datetime(["2026-01-02", "2026-01-05"]),
+    )
+
+
+def test_get_fx_rate_history_queries_the_currency_usd_pair_symbol(monkeypatch):
+    """Uses yf.Ticker directly (not the equity-notation _ticker choke
+    point) -- an FX pair like AEDUSD=X has no share-class dots/dollars for
+    _yahoo_symbol to translate, and is not an AlphaLab-canonical ticker."""
+    captured_symbols: list[str] = []
+
+    class _FakeYFModule:
+        @staticmethod
+        def Ticker(symbol):
+            captured_symbols.append(symbol)
+            return _FakeTicker(history=_fx_history_frame())
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance", _FakeYFModule())
+    provider = YFinanceProvider()
+
+    provider.get_fx_rate_history("aed", date(2026, 1, 1), date(2026, 1, 6))
+
+    assert captured_symbols == ["AEDUSD=X"]
+
+
+def test_get_fx_rate_history_returns_close_prices_as_rate_to_usd(monkeypatch):
+    class _FakeYFModule:
+        @staticmethod
+        def Ticker(symbol):
+            return _FakeTicker(history=_fx_history_frame())
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance", _FakeYFModule())
+    provider = YFinanceProvider()
+
+    rows = provider.get_fx_rate_history("AED", date(2026, 1, 1), date(2026, 1, 6))
+
+    assert rows == [
+        {"date": date(2026, 1, 2), "rate_to_usd": 0.2724},
+        {"date": date(2026, 1, 5), "rate_to_usd": 0.2723},
+    ]
+
+
+def test_get_fx_rate_history_returns_empty_list_for_a_currency_with_no_fx_pair(monkeypatch):
+    """A currency Yahoo has no <CUR>USD=X pair for is a normal, expected
+    outcome -- empty list, never a ProviderError -- exactly like
+    get_price_history already returns an empty frame for an unrecognized
+    equity ticker."""
+
+    class _FakeYFModule:
+        @staticmethod
+        def Ticker(symbol):
+            return _FakeTicker(history=pd.DataFrame())
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance", _FakeYFModule())
+    provider = YFinanceProvider()
+
+    assert provider.get_fx_rate_history("ZZZ", date(2026, 1, 1), date(2026, 1, 6)) == []
+
+
+def test_get_fx_rate_history_raises_provider_error_classified_as_rate_limited(monkeypatch):
+    class _FakeYFModule:
+        @staticmethod
+        def Ticker(symbol):
+            return _FakeTicker(raises=yf_exceptions.YFRateLimitError())
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance", _FakeYFModule())
+    provider = YFinanceProvider()
+
+    with pytest.raises(ProviderError) as excinfo:
+        provider.get_fx_rate_history("AED", date(2026, 1, 1), date(2026, 1, 6))
+    assert excinfo.value.kind == ProviderErrorKind.RATE_LIMITED

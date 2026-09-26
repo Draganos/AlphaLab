@@ -20,10 +20,19 @@ from alpha_lab.scorecard.verdict import (
 )
 
 
+_UNSET = object()
+
+
 def _record(
     ticker: str = "TEST",
     *,
     market_cap: float | None = 50_000_000_000.0,
+    # Defaults to market_cap itself -- i.e. "already USD", exactly what
+    # every pre-FX-normalization fixture here implicitly assumed. Pass an
+    # explicit value (e.g. None) only to simulate a currency known but not
+    # yet convertible, or a real, already-converted USD-equivalent that
+    # differs from the raw native-currency market_cap.
+    market_cap_usd: float | None = _UNSET,
     currency: str | None = None,
     category_scores: dict[str, float | None] | None = None,
     raw_metrics: dict[str, float | int | None] | None = None,
@@ -33,9 +42,11 @@ def _record(
     scores["ai_research"] = None
     if category_scores:
         scores.update(category_scores)
+    if market_cap_usd is _UNSET:
+        market_cap_usd = market_cap
     return LiveResearchRecord(
         ticker=ticker, company="Test Co", price=100.0, market_cap=market_cap,
-        currency=currency,
+        currency=currency, market_cap_usd=market_cap_usd,
         country="US", exchange="NASDAQ", sector="Technology", industry="Software",
         asset_type="EQUITY", themes=[], ethical_status=ethical_status,
         data_quality_status="valid", overall_score=70.0, overall_rank=None,
@@ -83,26 +94,11 @@ def test_classify_tier_speculative_below_growth_boundary():
     assert classify_tier(1_000_000_000.0) == SecurityTier.SPECULATIVE
 
 
-def test_classify_tier_unknown_market_cap_defaults_to_speculative():
+def test_classify_tier_unknown_market_cap_usd_defaults_to_speculative():
+    # None covers both "market cap itself unknown" and "known but not yet
+    # converted to USD" -- classify_tier cannot and does not distinguish
+    # them; see its own docstring and alpha_lab.fx.FXRateService.
     assert classify_tier(None) == SecurityTier.SPECULATIVE
-
-
-def test_classify_tier_explicit_usd_matches_default_behavior():
-    assert classify_tier(10_000_000_000.0, "USD") == SecurityTier.CORE
-
-
-def test_classify_tier_unknown_currency_defaults_to_usd_for_backward_compatibility():
-    # Most real Security rows ingested so far predate the currency field and
-    # ARE plain USD -- an unannotated record must not be forced down to
-    # SPECULATIVE just because currency wasn't recorded.
-    assert classify_tier(10_000_000_000.0, None) == SecurityTier.CORE
-
-
-def test_classify_tier_non_usd_currency_never_compared_against_usd_thresholds():
-    # A market cap this large would be CORE under the USD thresholds, but
-    # AlphaLab has no real FX conversion -- an AED (or any non-USD) market
-    # cap must not be compared against USD boundaries at all.
-    assert classify_tier(50_000_000_000.0, "AED") == SecurityTier.SPECULATIVE
 
 
 # --- build_security_screener_verdict: fit score / coverage -------------------
@@ -152,14 +148,32 @@ def test_tier_weighting_changes_fit_score_for_the_same_raw_categories():
     assert speculative.fit_score > core.fit_score
 
 
-def test_non_usd_market_cap_is_never_classified_core_via_the_full_pipeline():
-    # A real AED-denominated large-cap (e.g. a UAE security) must not be
-    # classified CORE just because its raw market_cap number happens to
-    # clear the USD CORE threshold -- AlphaLab has no real FX conversion.
+def test_non_usd_market_cap_without_a_real_fx_rate_is_never_classified_core():
+    # A real AED-denominated large-cap (e.g. a UAE security) whose currency
+    # is known but has no FX rate ingested yet (alpha_lab.fx.FXRateService
+    # then leaves market_cap_usd as None -- see MarketScreenerService's own
+    # wiring) must not be classified CORE just because its raw, native
+    # market_cap number happens to clear the USD CORE threshold.
     verdict = build_security_screener_verdict(
-        _record(market_cap=50_000_000_000.0, currency="AED")
+        _record(market_cap=50_000_000_000.0, currency="AED", market_cap_usd=None)
     )
     assert verdict.tier == SecurityTier.SPECULATIVE
+
+
+def test_non_usd_market_cap_is_classified_correctly_once_really_fx_converted():
+    # The positive case full FX normalization exists for: once a real FX
+    # rate IS ingested for a non-USD currency, MarketScreenerService
+    # converts the raw native market_cap to a real market_cap_usd, and
+    # classify_tier -- which only ever sees that already-converted number --
+    # classifies it exactly like any other USD market cap of the same size.
+    verdict = build_security_screener_verdict(
+        _record(
+            market_cap=183_625_000_000.0,  # ~50B USD at a real AED peg (~0.2724)
+            currency="AED",
+            market_cap_usd=50_000_000_000.0,
+        )
+    )
+    assert verdict.tier == SecurityTier.CORE
 
 
 # --- hard gates ---------------------------------------------------------------

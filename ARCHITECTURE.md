@@ -3603,6 +3603,7 @@ numpy-version failure (confirmed present on unmodified `main` too, before
 any change in this phase), and `git diff --check` clean. Real dataset
 fetch/parse, real training run, and real per-ticker application above are
 all live results, not fixtures.
+
 ## 42. Security Screener Verdict: Fit Score, Gates, and AI Final Rating
 
 Requested explicitly, pointing at a third-party research report's own
@@ -3863,3 +3864,351 @@ is None`, being rescued outright). A blend genuinely blending is not a
 bug; it is documented here as intentional, calibration-pending behavior
 consistent with this phase's overall "reasonable defaults, uncalibrated"
 scope, not a defect to fix.
+
+## 43. Bug fix: `model_copy` bypassed `AIResearchResult`'s price-target validator
+
+Found during a routine bug check of the newly-merged §41 code, not a
+regression from any later change. `SklearnFinancialSentimentProvider.
+analyze()` builds its final `AIResearchResult` via `base.model_copy
+(update={...})` rather than a real constructor call. Confirmed live:
+pydantic v2's `model_copy` deliberately does not re-run field validators
+on `update` values -- constructing `AIResearchResult` directly with a
+price-target-bearing `key_positives` entry correctly raises
+`ValueError: AI research must not contain a price target`
+(`no_price_targets_in_lists`), but assembling the identical value via
+`model_copy(update=...)` silently let it through unvalidated.
+
+This matters because the classifier-derived `key_positives`/`key_risks`
+entries are real verbatim sentence excerpts from real SEC filing text,
+not template strings -- a filing sentence discussing an analyst price
+target (plausible in MD&A/risk-factor sections) is exactly the kind of
+real input this validator exists to catch everywhere else in this
+codebase (`alpha_lab.ai.rule_based._to_evidence`'s own docstring
+describes the identical concern for `EvidenceReference`).
+
+Fixed with a new `_safe_snippet` helper that applies the same
+`_reject_price_target` check `alpha_lab.ai.research` already uses,
+*before* a classifier-derived snippet ever reaches `model_copy` --
+skipping only that one snippet (matching `_to_evidence`'s own precedent)
+rather than letting an exception propagate and discard the entire
+analysis over one sentence. `evidence` list entries were never affected
+(each is a real `EvidenceReference(...)` construction, which does
+validate); only the raw-string `key_positives`/`key_risks` fields were
+exposed.
+
+New regression test
+(`test_analyze_excludes_a_price_target_sentence_even_when_classified`)
+uses a fake, fully deterministic pipeline (not the real toy model, whose
+classification of any specific sentence isn't guaranteed) to force a
+price-target sentence to classify as positive, proving end-to-end that it
+never reaches `key_positives`/`key_risks`/`evidence`. Confirmed the test
+actually catches the original bug by reverting the fix locally and
+re-running it (fails as expected), then restoring it (passes).
+
+Also removed two genuinely unused local variables (`positive_index`/
+`negative_index`) left over from an earlier version of the per-class
+confidence calculation -- `probability_row.max()` already extracts the
+predicted class's own confidence regardless of index, since `predict()`
+always selects the argmax; a reuse/cleanup finding, not a correctness
+bug.
+
+This fix was pulled out onto its own branch/PR rather than folded into
+the Security Screener Verdict PR (§42 is a merged, separate phase;
+`alpha_lab.ai.sklearn_sentiment` is not otherwise touched by that PR's
+own diff) -- keeping each PR's diff scoped to what it actually changes.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass unchanged
+(this is an opt-in-only provider fix; default scoring output is
+untouched), `git diff --check` clean.
+
+### 43.1 Extending §41.8's currency fix to `alpha_lab.search.screening`'s market-cap filters
+
+§41.8 fixed `alpha_lab.scorecard.verdict.classify_tier`'s currency
+blindness (comparing a raw `market_cap` number against USD tier
+thresholds regardless of the security's actual currency) but explicitly
+flagged, without fixing, that the identical gap independently exists in
+`ScreenCriteria.minimum_market_cap`/`maximum_market_cap` -- `alpha_lab.
+search.screening._matches` compares `ScreenRecord.market_cap` straight
+against these USD-denominated thresholds with zero currency awareness.
+Closing that gap here, applying the exact same fix shape rather than a
+new design:
+
+- Added `currency: str | None = None` to `ScreenRecord` (mirrors how
+  `LiveResearchRecord.currency` was added in §41.8), threaded from
+  `LiveResearchRecord.currency` at both call sites that build
+  `ScreenRecord` lists from live records (`app/dashboard/main.py`,
+  `app/dashboard/pages/3_Market_Screener.py`). The two other call sites
+  (`scripts/smoke_test_phase3.py`, `scripts/benchmark_phase31.py`) don't
+  set it and are unaffected, since `None` stays USD-permissive.
+- `_matches` now computes an effective `market_cap` that is `record.
+  market_cap` unchanged when `currency` is `None` (unknown, USD-permissive
+  for backward compatibility -- most existing `ScreenRecord` construction
+  sites, including every fixture across this codebase, never set this
+  field) or explicitly `"USD"`, and `None` (unusable) for any other
+  explicitly-known currency -- reusing the exact same "missing market_cap
+  already excludes a record from both filters" behavior that existed
+  before this change, rather than inventing a new "excluded because wrong
+  currency" code path. A non-USD `market_cap`, however large or small, can
+  therefore never falsely satisfy *or* falsely violate a `minimum_market_cap`/
+  `maximum_market_cap` filter -- it is excluded either way, exactly like a
+  `None` market_cap already was.
+- Deliberately reused the same conservative "exclude, don't guess" shape
+  as the missing-data case here (rather than §41.8's "fall back to the
+  most conservative tier" shape, which has no equivalent in a boolean
+  match/no-match filter) -- the two fixes are the same currency-safety
+  principle applied to their own domain's existing convention, not
+  identical code.
+
+New tests (`test_market_cap_filter_explicit_usd_matches_default_behavior`,
+`test_market_cap_filter_unknown_currency_defaults_to_usd_for_backward_
+compatibility`, `test_market_cap_filter_non_usd_currency_never_compared_
+against_usd_thresholds`) in `tests/test_ai_search_phase3.py`, alongside
+the existing `apply_screen`/`ScreenRecord` tests. Folded into this PR
+(#47) rather than opened separately -- both fixes are the same
+currency-blindness bug class the reviewer originally raised on this PR's
+sibling (#46), and #46 is already merged, so there is no other in-flight
+PR left to scope it to.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass unchanged
+(every real security in this environment is `currency=USD`, so this is
+currently-dormant-but-real, exactly like §41.8), `git diff --check`
+clean.
+
+**Superseded within this same PR by §44 below.** The "exclude, don't
+guess" shape above was itself a placeholder for real FX conversion, exactly
+as its own bullet says -- §44 replaces `_matches`'s currency-conditional
+`market_cap` with a real, already-converted `market_cap_usd`, computed
+upstream via `alpha_lab.fx.FXRateService`. `ScreenRecord.currency` and the
+tests named just above were changed accordingly; this section is kept
+as-is for the historical record of what the first, currency-only fix
+looked like before real FX conversion existed.
+
+## 44. Full FX Normalization: real point-in-time currency -> USD conversion
+
+§41.8 and §43.1 each explicitly named the same unfinished business: neither
+`classify_tier` nor `alpha_lab.search.screening._matches` could safely
+compare a non-USD `market_cap` against their USD-denominated thresholds,
+because AlphaLab had no real FX conversion capability at all -- both
+sections' fixes were "exclude/fall back to conservative rather than
+guess," never "convert and compare correctly." §41.8 named the real fix
+explicitly ("full FX normalization at the canonical valuation layer")
+and explicitly deferred it as its own, separate, larger phase requiring
+"real point-in-time FX rate ingestion, a whole new data capability." This
+section is that phase, requested directly and folded into this same PR
+(#47) rather than opened separately, for the identical reason §43.1 gave:
+this is the same currency-blindness bug class the original reviewer
+raised on this PR's sibling (#46), and there is no other in-flight PR left
+to scope it to.
+
+**Scope, decided before writing any code:** `alpha_lab.ratings.valuation.
+calculate_valuation_factors` computes every OTHER ratio
+(`pe`/`price_sales`/`ev_ebitda`/`price_fcf`/etc.) as `price / eps` or
+`market_cap / revenue` -- a ratio of two numbers already in the same
+native currency, so it is currency-invariant by construction and needs no
+FX conversion at all. Only the absolute-dollar-amount fields --
+`market_cap` (and anything compared against an absolute USD threshold,
+which today means only `classify_tier`'s tier boundaries and
+`ScreenCriteria.minimum_market_cap`/`maximum_market_cap`) ever needed real
+conversion. This kept the phase narrowly scoped to exactly the gap both
+prior sections named, not a speculative rewrite of the whole valuation
+layer.
+
+**New capability: `alpha_lab.fx`.**
+
+- New `FXRate` table (`alpha_lab/database/models.py`) -- one row per
+  `(currency, date)`, `rate_to_usd` (how many USD one unit of `currency`
+  is worth), mirroring `Price`'s own provenance fields (`provider`,
+  `source`, `ingested_at`) exactly. USD itself is never a row here.
+- New `FXRateProvider` interface (`alpha_lab.providers.interfaces`) and
+  its real implementation, `YFinanceProvider.get_fx_rate_history` -- daily
+  history from Yahoo Finance's own `<CUR>USD=X` FX pair (e.g.
+  `AEDUSD=X`), using the existing `call_with_classification`/`ProviderError`
+  boundary exactly like every other `YFinanceProvider` method. **Verified
+  live** (not assumed): `yf.Ticker("AEDUSD=X").history(...)` returns real
+  daily rates around 0.2724 -- the real, live AED/USD peg -- confirming
+  this data genuinely exists and is fetchable before any code was built
+  on top of it. An unrecognized `<CUR>USD=X` pair returns an empty
+  frame/list, never an error -- confirmed live with a nonexistent
+  currency (`ZZZUSD=X`), exactly like `get_price_history` already handles
+  an unrecognized equity ticker.
+- New `FXRateService` (`alpha_lab.fx.service`) with two responsibilities,
+  cleanly separated exactly like every other domain service in this
+  codebase (e.g. `MacroRegimeService`):
+  - `convert_to_usd(amount, currency, as_of)` -- a **pure database read**,
+    safe to call on every `MarketScreenerService.build_live_records()`
+    call (no network). Passes `amount` through unchanged for `currency in
+    (None, "USD")` (identical backward-compatible convention to §41.8's
+    and §43.1's own default), else looks up the most recent real
+    `FXRate` row at or before `as_of` and multiplies. Returns `None` --
+    never a guess -- when no real rate has been ingested yet for that
+    currency/date, exactly the same "missing != fabricated" contract
+    every other optional field in this codebase already has.
+  - PIT-safe on `FXRate.ingested_at`, not `FXRate.date` alone -- the
+    exact same rationale as `get_technical_summary_as_of`
+    (`alpha_lab.research.supplemental_service`): a first
+    `refresh_fx_rates.py` run ingests real history in one call, so a rate
+    row dated in the past can still have been inserted only today: a
+    historical `as_of` read must never see a rate AlphaLab had not
+    actually stored yet as of that date.
+  - `refresh(provider, currency, start, end)` -- the one method that
+    calls a provider; upserts by `(currency, date)`, mirroring
+    `IngestionService.ingest`'s own upsert pattern for `Price`. A no-op
+    for `currency == "USD"` (never a network call). Skips (never stores)
+    a non-finite or non-positive rate rather than persisting a
+    nonsensical conversion factor.
+- New `scripts/refresh_fx_rates.py` -- reads which non-USD currencies are
+  *actually* present among currently-ingested `Security` rows (never
+  fetches one speculatively) and refreshes each via `FXRateService`,
+  mirroring `scripts/refresh_macro_regime.py`'s structure. Deliberately
+  its own script, not folded into `run_core_refresh` -- `alpha_lab.refresh`'s
+  own module docstring scopes "core refresh" narrowly to
+  price/fundamental ingestion, with every other domain (Analyst Consensus,
+  Technical, AI Research, News, Macro Regime, and now FX) refreshed
+  independently through its own `scripts/refresh_*.py`, exactly the
+  existing convention this phase follows rather than special-cases.
+
+**Wiring `market_cap_usd` through the canonical valuation layer.**
+`classify_tier` and `_matches` both have an explicit "no database read"
+contract (see `build_security_screener_verdict`'s own docstring) -- FX
+conversion cannot happen inside either of them. Instead:
+
+- `LiveResearchRecord` gains `market_cap_usd: float | None = None`,
+  computed exactly once, in `MarketScreenerService._record`, via
+  `self.fx_rates.convert_to_usd(market_cap, security.currency, evaluation)`
+  -- the canonical valuation layer §41.8 itself named as where this
+  belongs. `market_cap`/`currency` are kept as-is (raw, native-currency,
+  for provenance/display); `market_cap_usd` is the new derived field
+  everything else reads.
+- `classify_tier` **simplified** back to a single argument,
+  `classify_tier(market_cap_usd: float | None)` -- the `currency`
+  parameter §41.8 added is gone entirely, because the function's one
+  caller now always passes an already-resolved USD number. `None` covers
+  both "market cap itself unknown" and "known but not yet convertible,"
+  and both correctly fall back to the same conservative `SPECULATIVE`
+  tier as before -- classify_tier cannot tell (and does not need to tell)
+  the two apart.
+- `ScreenRecord` gains the identical `market_cap_usd` field, threaded
+  from `LiveResearchRecord.market_cap_usd` at both live-record call sites
+  (`app/dashboard/main.py`, `app/dashboard/pages/3_Market_Screener.py`).
+  `_matches` now compares `record.market_cap_usd` directly against
+  `minimum_market_cap`/`maximum_market_cap` -- the currency-conditional
+  local variable §43.1 introduced is gone, replaced by this real,
+  already-converted field.
+
+**Live end-to-end validation** (not just unit tests): inserted a real
+`Security` row (`EMAAR`, `currency="AED"`, a real DFM-listed name from
+`config/default.yaml`'s own `universe.uae`) into a scratch database,
+ran `FXRateService.refresh` against the real `YFinanceProvider` --
+ingested 22 real daily AED/USD rates over the trailing 30 days -- then
+confirmed `convert_to_usd(1000.0, "AED", today)` returns real ~272.26,
+matching the live-verified AED peg, and that `convert_to_usd(1000.0,
+None, today)` still passes amounts through unchanged for an
+unknown/USD currency. `scripts/refresh_fx_rates.py` was also run
+against the real, current database (all-USD) and correctly reported
+"nothing to refresh" -- confirming it does not fetch a currency that is
+not actually in use.
+
+**Tests:** `tests/test_yfinance_provider.py` (symbol construction,
+Close-price extraction, empty-list on an unrecognized pair,
+`ProviderError` classification -- all offline, mocking the `yfinance`
+module exactly like this file's existing tests), `tests/test_fx_service.py`
+(new file: `convert_to_usd`'s USD/unknown passthrough, `None`-amount,
+never-ingested, most-recent-at-or-before-`as_of` selection, the
+`ingested_at`-not-`date` PIT gate, and `refresh`'s USD no-op/upsert/
+non-finite-rate-skipping behavior -- entirely against an in-memory
+database), and `tests/test_screener_verdict.py`/`tests/test_ai_search_
+phase3.py` updated for `classify_tier`'s new single-argument signature
+and `_matches`'s `market_cap_usd`-based filtering, including a new
+positive-path test (`test_non_usd_market_cap_is_classified_correctly_
+once_really_fx_converted`) proving a non-USD security IS correctly
+classified `CORE` once a real FX rate makes conversion possible --
+the case §41.8/§43.1 could not yet cover because neither could convert
+anything.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass with
+byte-for-byte unchanged scores (every real security in this environment
+is `currency=USD`/unknown, so `market_cap_usd` always equals `market_cap`
+here -- this phase changes nothing about current default output, only
+makes a previously-impossible non-USD case now handled correctly),
+`git diff --check` clean.
+
+**Deliberately not done here:** `scripts/refresh_fx_rates.py` is not
+wired into any automatic trigger (the launch-time check, the dashboard's
+on-session-start refresh, or `run_core_refresh`) -- exactly like every
+other supplemental-domain refresh script, this stays an explicit,
+independently-run operation. Historical/backtest FX conversion (i.e.
+`HistoricalScoringService`/`alpha_lab.strategy` reading a `market_cap_usd`
+as of an arbitrary past evaluation date) is not wired either -- this
+phase's scope was explicitly the live screener/verdict path §41.8 and
+§43.1 both named; a historical PIT read would reuse `FXRateService.
+convert_to_usd` exactly as-is (it already takes an arbitrary `as_of`), but
+threading it through `HistoricalScoringService` is a separate change to a
+separate code path, left for whenever that path actually needs it.
+
+### 44.1 Review follow-up: `refresh` mutating an existing row silently defeated its own PIT gate
+
+A real review of §44 found a genuine PIT leak in `FXRateService.refresh`
+as first written: when a re-ingest returned a revised `rate_to_usd` for an
+already-stored `(currency, date)` (Yahoo Finance FX history is
+occasionally restated), the original code mutated the existing row's
+`rate_to_usd` in place -- exactly mirroring `IngestionService.ingest`'s
+own `Price` upsert pattern -- but never touched that row's `ingested_at`.
+`convert_to_usd`'s entire PIT correctness rests on `ingested_at`
+genuinely marking when AlphaLab came to know the value currently stored in
+that row; mutating the value while leaving the old `ingested_at` in place
+broke that invariant silently. Concretely: ingest a Jan 5 rate of 0.2720
+on day 1 (`ingested_at`=day 1); a later re-ingest on day 5 revises it to
+0.2730 and overwrites the same row without updating `ingested_at`; a
+historical `convert_to_usd(..., as_of=day 3)` -- a point in AlphaLab's own
+history strictly between the two refreshes -- would then incorrectly see
+0.2730, a value AlphaLab did not actually possess as of day 3.
+
+**Fix: append-only revisions, never mutate.** `refresh` now inserts a new
+`FXRate` row (with its own fresh `ingested_at`) whenever the incoming rate
+for a `(currency, date)` differs from the latest already-stored
+observation for it, and is a true no-op (no insert at all) when the
+incoming rate is unchanged -- so a routine re-refresh of already-correct
+history never accumulates rows. `FXRate` is no longer unique on
+`(currency, date)` for exactly this reason (see its own docstring).
+`convert_to_usd`'s read query needed no change at all: it already ordered
+by `(FXRate.date desc, FXRate.ingested_at desc)` with the existing
+`ingested_at <= end_of(as_of)` gate, which is precisely the query shape
+that correctly picks among multiple same-date revisions -- the most
+recent one actually known as of `as_of`, never a later one.
+
+Deliberately chose real append-only history over the cheaper alternative
+(mutate in place, just bump `ingested_at` on a revision) -- the cheaper
+fix only prevents the leak (a between-refreshes query would fall back to
+`None`), whereas the review's own required test explicitly checked that a
+between-refreshes query still returns the *original, actually-known* rate,
+not just "nothing." Append-only satisfies that without any additional
+machinery: the existing ordered/limited read query already does the right
+thing once more than one row can exist per `(currency, date)`.
+
+**Noted but explicitly out of scope for this fix** (per the review's own
+"do not expand the FX phase beyond this correction"): `IngestionService.
+ingest`'s `Price` upsert has the identical latent issue -- it also mutates
+an existing `Price` row's OHLCV values in place without bumping
+`ingested_at`, which `get_technical_summary_as_of`'s own PIT gate relies
+on exactly the same way. Confirmed real by inspection, not fixed here --
+it predates this PR entirely and is a separate code path or the roadmap.
+
+New regression test `test_refresh_appends_a_revision_rather_than_mutating_
+the_existing_row` and the review's own exact required scenario,
+`test_convert_to_usd_never_leaks_a_later_revision_into_an_earlier_as_of`,
+in `tests/test_fx_service.py`. Confirmed both tests actually catch the
+original bug: reverted the fix locally (mutate-in-place, no new row,
+`ingested_at` untouched) and re-ran them -- both failed exactly as
+expected (one on row count, one on the leaked 0.2730) -- then restored
+the fix and confirmed both pass.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass with
+byte-for-byte unchanged scores, `git diff --check` clean, and the live
+end-to-end AED ingestion from §44 was re-run against the real
+`YFinanceProvider` to confirm a second, unchanged re-refresh correctly
+inserts zero new rows (idempotent) while the first refresh's real data and
+conversion result are unaffected.

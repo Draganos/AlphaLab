@@ -61,6 +61,35 @@ class Price(Base):
     )
 
 
+class FXRate(Base):
+    """Daily `currency` -> USD spot rate (`rate_to_usd`: how many USD one
+    unit of `currency` is worth), mirroring `Price`'s own shape/provenance
+    fields exactly. USD itself is never a row here -- 1 USD is
+    definitionally 1 USD; see `alpha_lab.fx.FXRateService.convert_to_usd`.
+
+    Deliberately NOT unique on `(currency, date)`: a later real revision of
+    an already-stored rate (Yahoo Finance FX history is occasionally
+    restated) is appended as a new row with its own `ingested_at`, never
+    mutated in place -- see `FXRateService.refresh`'s own docstring for why
+    a mutated row would silently leak a revision into a historical `as_of`
+    query that predates the revision itself. `refresh` still never inserts
+    a duplicate for an unchanged rate, so routine re-refreshes of already-
+    correct history do not accumulate rows."""
+
+    __tablename__ = "fx_rates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    currency: Mapped[str] = mapped_column(String(8), index=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    rate_to_usd: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(
+        String(64), default="unknown", server_default="unknown"
+    )
+    source: Mapped[str | None] = mapped_column(String(512))
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
 class Fundamental(Base):
     __tablename__ = "fundamentals"
     __table_args__ = (

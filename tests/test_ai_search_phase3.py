@@ -247,6 +247,49 @@ def test_all_structured_category_filters_execute_deterministically():
     ]
 
 
+# --- market_cap_usd, not raw market_cap, drives minimum_market_cap/
+# maximum_market_cap: these thresholds are USD amounts, and market_cap_usd
+# is where alpha_lab.fx.FXRateService's real point-in-time conversion (or,
+# lacking a real ingested rate, an honest None) already happened, upstream
+# in MarketScreenerService -- ScreenRecord/_matches do no currency logic
+# of their own. ---------------------------------------------------------
+
+
+def test_market_cap_filter_uses_market_cap_usd_not_raw_market_cap():
+    # A deliberately tiny raw (native-currency) market_cap paired with a
+    # large, real market_cap_usd -- proves the filter reads the converted
+    # field, not the raw one, exactly as real AED-denominated data would
+    # once alpha_lab.fx has ingested a real rate for it.
+    record = ScreenRecord(
+        ticker="CONVERTED",
+        ethical_status="PASS",
+        market_cap=1.0,
+        currency="AED",
+        market_cap_usd=5e9,
+    )
+    assert [
+        item.ticker
+        for item in apply_screen([record], ScreenCriteria(minimum_market_cap=1e9))
+    ] == ["CONVERTED"]
+
+
+def test_market_cap_filter_excludes_a_record_with_no_usd_equivalent():
+    # market_cap_usd is None -- whether because market_cap itself is
+    # unknown or because its currency is known but not yet convertible
+    # (no FX rate ingested for it yet) -- must exclude the record from
+    # both filters rather than fabricating a comparison, exactly like an
+    # actually-missing market_cap already does for every other threshold.
+    record = ScreenRecord(
+        ticker="UNCONVERTED",
+        ethical_status="PASS",
+        market_cap=5e10,
+        currency="AED",
+        market_cap_usd=None,
+    )
+    assert apply_screen([record], ScreenCriteria(minimum_market_cap=1e9)) == []
+    assert apply_screen([record], ScreenCriteria(maximum_market_cap=1e12)) == []
+
+
 def test_live_ai_provider_retains_only_supplied_evidence(monkeypatch):
     import json
     from alpha_lab.ai import OpenAIResearchProvider, analyze_documents

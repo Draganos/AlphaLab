@@ -24,6 +24,7 @@ from alpha_lab.database.models import (
 )
 from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
 from alpha_lab.factors import percentile_scores
+from alpha_lab.fx import FXRateService
 from alpha_lab.ratings import (
     calculate_coverage,
     calculate_quality_factors,
@@ -142,6 +143,15 @@ class LiveResearchRecord(BaseModel):
     # missing currency the same conservative way it treats a missing
     # market_cap.
     currency: str | None = None
+    # Real point-in-time FX conversion of `market_cap` to USD (`alpha_lab.
+    # fx.FXRateService.convert_to_usd`) -- `market_cap` unchanged when
+    # `currency` is USD/unknown, `None` when it is a known non-USD currency
+    # with no FX rate ingested yet for this date (never fabricated). Same
+    # backward-compatible default as `currency` itself: existing fixtures
+    # that never set this field get `None`, which every downstream
+    # consumer already treats the same conservative way as a missing
+    # `market_cap`.
+    market_cap_usd: float | None = None
     country: str | None
     exchange: str | None
     sector: str | None
@@ -173,6 +183,7 @@ class MarketScreenerService:
 
     def __init__(self, engine: Engine, settings: Settings):
         self.engine, self.settings = engine, settings
+        self.fx_rates = FXRateService(engine)
 
     def rebuild_current_research(self) -> list[LiveResearchRecord]:
         """Explicit write operation: derive, score, and persist current research."""
@@ -462,16 +473,20 @@ class MarketScreenerService:
             ),
             default=None,
         )
+        market_cap = (
+            data["valuation"]["market_cap"]
+            if data["valuation"]["market_cap"] is not None
+            else security.market_cap
+        )
         return LiveResearchRecord(
             ticker=ticker,
             company=security.company_name,
             price=data["price"],
-            market_cap=(
-                data["valuation"]["market_cap"]
-                if data["valuation"]["market_cap"] is not None
-                else security.market_cap
-            ),
+            market_cap=market_cap,
             currency=security.currency,
+            market_cap_usd=self.fx_rates.convert_to_usd(
+                market_cap, security.currency, evaluation
+            ),
             country=security.country,
             exchange=security.exchange,
             sector=security.sector,

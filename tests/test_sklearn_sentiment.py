@@ -16,6 +16,7 @@ from alpha_lab.ai.sklearn_sentiment import (
     DEFAULT_MODEL_PATH,
     SklearnFinancialSentimentProvider,
     _extract_sentences,
+    _safe_snippet,
 )
 
 
@@ -128,3 +129,52 @@ def test_analyze_is_deterministic_for_identical_input(toy_model_path):
     first = provider.analyze("NVDA", documents)
     second = provider.analyze("NVDA", documents)
     assert first.model_dump(exclude={"analysis_date"}) == second.model_dump(exclude={"analysis_date"})
+
+
+# --- price-target safety: model_copy(update=...) does not re-run pydantic
+# validators, so classifier-derived key_positives/key_risks must be
+# pre-filtered by _safe_snippet before ever reaching it -----------------
+
+
+def test_safe_snippet_rejects_a_real_price_target_sentence():
+    assert _safe_snippet(
+        "Our stock trades near the average analyst price target of $50 per share."
+    ) is None
+
+
+def test_safe_snippet_passes_through_a_clean_sentence():
+    text = "Strong demand exceeded expectations across every reported segment."
+    assert _safe_snippet(text) == text
+
+
+def test_analyze_excludes_a_price_target_sentence_even_when_classified(toy_model_path, monkeypatch):
+    """Forces a price-target sentence to be classified as positive (rather
+    than relying on the toy model to happen to do so) to prove the
+    end-to-end analyze() pipeline never lets it reach key_positives/
+    key_risks -- confirming the real bug (model_copy bypasses
+    AIResearchResult's own no_price_targets_in_lists validator) stays
+    fixed even as analyze()'s internals change."""
+    provider = SklearnFinancialSentimentProvider(model_path=toy_model_path)
+
+    class _FakeArray(list):
+        def max(self):
+            return max(self)
+
+    class _FakePipeline:
+        classes_ = ["negative", "neutral", "positive"]
+
+        def predict(self, texts):
+            return ["positive" for _ in texts]
+
+        def predict_proba(self, texts):
+            return [_FakeArray([0.05, 0.05, 0.9]) for _ in texts]
+
+    monkeypatch.setattr(provider, "_pipeline", _FakePipeline())
+    text = (
+        "Our stock trades near the average analyst price target of fifty "
+        "dollars per share this quarter."
+    )
+    result = provider.analyze("NVDA", [_document(1, text)])
+    assert not any("price target" in item.lower() for item in result.key_positives)
+    assert not any("price target" in item.lower() for item in result.key_risks)
+    assert not any("price target" in ref.excerpt.lower() for ref in result.evidence)
