@@ -1,7 +1,7 @@
 import threading
 import time
 from datetime import date
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from alpha_lab.database.models import (
     Base,
@@ -217,3 +217,40 @@ def test_legacy_fundamental_constraint_is_migrated_without_data_loss():
         assert migrated.provider == "unknown"
         assert migrated.observation_hash == "legacy-1"
         assert migrated.ingested_at is not None
+
+
+def test_legacy_price_unique_constraint_is_migrated_without_data_loss():
+    """Real finding from this phase's own self bug-check: this environment's
+    actual data/alpha_lab.db still had the removed UNIQUE(ticker, date)
+    constraint baked into its on-disk schema -- without this migration,
+    the very first genuine price revision IngestionService.ingest ever
+    tries to append would raise a raw sqlite3.IntegrityError instead of
+    being silently correct."""
+    engine = make_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE prices (
+                id INTEGER PRIMARY KEY, ticker VARCHAR(32) NOT NULL, date DATE NOT NULL,
+                open FLOAT, high FLOAT, low FLOAT, close FLOAT, adjusted_close FLOAT,
+                volume FLOAT, currency VARCHAR(8),
+                provider VARCHAR(64) DEFAULT 'unknown' NOT NULL, source VARCHAR(512),
+                ingested_at DATETIME NOT NULL,
+                CONSTRAINT legacy_unique UNIQUE (ticker, date)
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO prices (id, ticker, date, close, provider, ingested_at)
+            VALUES (1, 'LEGACY', '2024-01-05', 10.0, 'unknown', '2024-01-05 00:00:00')
+        """))
+    create_schema(engine)
+    create_schema(engine)  # idempotent: already-migrated database is a no-op
+    with Session(engine) as session:
+        rows = session.scalars(select(Price)).all()
+        assert len(rows) == 1
+        assert rows[0].close == 10.0
+        # The whole point: a genuine revision must now be appendable at all,
+        # never raise sqlite3.IntegrityError on the old (ticker, date) constraint.
+        session.add(Price(ticker="LEGACY", date=date(2024, 1, 5), close=11.0))
+        session.commit()
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Price)) == 2

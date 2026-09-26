@@ -4330,3 +4330,63 @@ service.py`, `test_historical_scoring.py`, `test_macro_service.py`,
 byte-for-byte unchanged scores (today's real database has no genuine
 price revisions, so every consumer's dedup query returns exactly the same
 single row per date it always did), `git diff --check` clean.
+
+### 45.1 Self bug-check found a deployment-breaking gap: the old constraint was still physically on disk
+
+Requested explicitly as a distinct phase on this same PR: a bug check of
+the diff above, after it was otherwise complete and passing. Found a real
+issue serious enough that it would have broken the very first genuine
+price revision in any already-existing AlphaLab database, including this
+environment's own.
+
+Removing `UniqueConstraint("ticker", "date")` from the `Price` model only
+changes what `Base.metadata.create_all` emits for a **brand-new** table --
+`create_all` never touches a table that already exists, and SQLite has no
+`ALTER TABLE ... DROP CONSTRAINT` for an inline table-level `UNIQUE`
+(or the automatic index it silently creates) at all; the only way to
+remove one is a full table rebuild. Confirmed live, not assumed: inspected
+this environment's own real `data/alpha_lab.db` and found the constraint
+still physically present in its on-disk schema (`CREATE TABLE prices (...
+UNIQUE (ticker, date) ...)`) -- so `IngestionService.ingest`'s new
+append-only logic would have raised a raw `sqlite3.IntegrityError` on this
+exact real database the first time a genuine revision occurred, despite
+every test passing (every test creates a fresh in-memory database via
+`create_schema`, which never had the old constraint to begin with -- the
+gap was invisible to the whole test suite).
+
+This is the identical problem `_migrate_legacy_fundamentals` already
+solves for `Fundamental`'s own former `UNIQUE(ticker, period)` (removed
+when `Fundamental` gained its append-only `observation_hash` design) --
+`Price`'s fix mirrors that function's exact rebuild shape (drop indexes,
+rename the old table aside, recreate `prices` from the current model,
+copy every row through unchanged, drop the renamed table), added as a new
+`_migrate_legacy_price_unique_constraint`, run from `create_schema`
+alongside `_migrate_legacy_fundamentals`. Simpler than the `Fundamental`
+case: no new column needs backfilling, only the constraint needs to go, so
+every column copies straight across.
+
+**Live-validated against a copy of this environment's real database**
+(never the original in place): ran the migration against a copy of the
+actual `data/alpha_lab.db` (8,466 real `Price` rows) -- confirmed all
+8,466 rows survive unchanged, the `UNIQUE(ticker, date)` constraint is
+gone, both real non-unique indexes (`ix_prices_date`/`ix_prices_ticker`)
+are correctly recreated, and then ingested a genuine one-day revision for
+a real ticker (`AAL`) through the actual `IngestionService.ingest` path --
+it appended a second row for that `(ticker, date)` successfully, which
+would have raised `sqlite3.IntegrityError` before this fix.
+
+**New regression test**
+(`test_legacy_price_unique_constraint_is_migrated_without_data_loss` in
+`tests/test_database.py`, mirroring `test_legacy_fundamental_constraint_
+is_migrated_without_data_loss`'s exact structure): builds a database with
+the old constraint by hand, runs `create_schema` twice (proving the
+migration is idempotent -- a no-op on an already-migrated database,
+exactly like its `Fundamental` sibling test), then proves a genuine
+revision can actually be appended afterward. Confirmed this test actually
+catches the bug: reverted `session.py`'s migration function locally and
+re-ran it -- failed with the exact `sqlite3.IntegrityError` predicted
+above -- then restored the fix and confirmed it passes.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests unchanged,
+`git diff --check` clean.

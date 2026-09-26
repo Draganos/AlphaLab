@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session
 
-from alpha_lab.database.models import Base, Fundamental
+from alpha_lab.database.models import Base, Fundamental, Price
 
 # How long a SQLite connection waits on a lock held by another connection
 # before raising "database is locked", instead of failing immediately.
@@ -42,6 +42,7 @@ def make_engine(url: str) -> Engine:
 def create_schema(engine: Engine) -> None:
     if engine.dialect.name == "sqlite":
         _migrate_legacy_fundamentals(engine)
+        _migrate_legacy_price_unique_constraint(engine)
     Base.metadata.create_all(engine)
     # Phase 1.5 additive migration for databases created by Phase 1. No data is rewritten.
     additions = {
@@ -192,6 +193,45 @@ def _migrate_legacy_fundamentals(engine: Engine) -> None:
             )
         )
         connection.execute(text("DROP TABLE fundamentals_phase1_legacy"))
+
+
+def _migrate_legacy_price_unique_constraint(engine: Engine) -> None:
+    """Rebuild `prices` for a database still carrying the removed
+    `UNIQUE(ticker, date)` constraint -- SQLite cannot drop an inline
+    table-level `UNIQUE` constraint (or the automatic index it creates)
+    via `ALTER TABLE`, only via a full table rebuild, exactly like
+    `_migrate_legacy_fundamentals` above solves the identical problem for
+    `Fundamental`'s own former `UNIQUE(ticker, period)`. Without this, the
+    very first genuine price revision `IngestionService.ingest` ever tries
+    to append on an existing database (one created before this fix) would
+    raise a raw `sqlite3.IntegrityError` instead of being silently correct
+    -- confirmed live against this environment's own real `data/alpha_lab.
+    db`, which still has the constraint baked into its on-disk schema.
+    No data is rewritten, only copied through unchanged; idempotent -- a
+    database already migrated (or newly created under the current model)
+    has no such constraint and this is a no-op."""
+    inspector = inspect(engine)
+    if "prices" not in inspector.get_table_names():
+        return
+    unique_sets = {
+        tuple(item["column_names"])
+        for item in inspector.get_unique_constraints("prices")
+    }
+    if ("ticker", "date") not in unique_sets:
+        return
+    with engine.begin() as connection:
+        for index in inspect(connection).get_indexes("prices"):
+            connection.execute(text(f'DROP INDEX IF EXISTS "{index["name"]}"'))
+        connection.execute(text("ALTER TABLE prices RENAME TO prices_pre_append_only_legacy"))
+        Price.__table__.create(connection)
+        columns = ", ".join(f'"{column.name}"' for column in Price.__table__.columns)
+        connection.execute(
+            text(
+                f"INSERT INTO prices ({columns}) "
+                f"SELECT {columns} FROM prices_pre_append_only_legacy"
+            )
+        )
+        connection.execute(text("DROP TABLE prices_pre_append_only_legacy"))
 
 
 @contextmanager
