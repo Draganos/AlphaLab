@@ -73,6 +73,7 @@ def build_screener() -> pd.DataFrame:
             debt_to_ebitda=item.raw_metrics.get("debt_ebitda"),
             market_cap=item.market_cap,
             currency=item.currency,
+            market_cap_usd=item.market_cap_usd,
             coverage=item.overall_live_coverage,
         )
         for item in records

@@ -54,3 +54,10 @@ class AnalystEventProvider(ABC):
     def get_estimate_revision_trend(
         self, ticker: str, observation_date: date
     ) -> list[dict[str, Any]]: ...
+
+
+class FXRateProvider(ABC):
+    @abstractmethod
+    def get_fx_rate_history(
+        self, currency: str, start: date, end: date
+    ) -> list[dict[str, Any]]: ...

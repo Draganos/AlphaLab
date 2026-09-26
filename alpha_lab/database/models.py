@@ -61,6 +61,27 @@ class Price(Base):
     )
 
 
+class FXRate(Base):
+    """Daily `currency` -> USD spot rate (`rate_to_usd`: how many USD one
+    unit of `currency` is worth), mirroring `Price`'s own shape/provenance
+    fields exactly. USD itself is never a row here -- 1 USD is
+    definitionally 1 USD; see `alpha_lab.fx.FXRateService.convert_to_usd`."""
+
+    __tablename__ = "fx_rates"
+    __table_args__ = (UniqueConstraint("currency", "date"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    currency: Mapped[str] = mapped_column(String(8), index=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    rate_to_usd: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(
+        String(64), default="unknown", server_default="unknown"
+    )
+    source: Mapped[str | None] = mapped_column(String(512))
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
 class Fundamental(Base):
     __tablename__ = "fundamentals"
     __table_args__ = (

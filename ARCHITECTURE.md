@@ -3975,3 +3975,175 @@ PR left to scope it to.
 (every real security in this environment is `currency=USD`, so this is
 currently-dormant-but-real, exactly like §41.8), `git diff --check`
 clean.
+
+**Superseded within this same PR by §44 below.** The "exclude, don't
+guess" shape above was itself a placeholder for real FX conversion, exactly
+as its own bullet says -- §44 replaces `_matches`'s currency-conditional
+`market_cap` with a real, already-converted `market_cap_usd`, computed
+upstream via `alpha_lab.fx.FXRateService`. `ScreenRecord.currency` and the
+tests named just above were changed accordingly; this section is kept
+as-is for the historical record of what the first, currency-only fix
+looked like before real FX conversion existed.
+
+## 44. Full FX Normalization: real point-in-time currency -> USD conversion
+
+§41.8 and §43.1 each explicitly named the same unfinished business: neither
+`classify_tier` nor `alpha_lab.search.screening._matches` could safely
+compare a non-USD `market_cap` against their USD-denominated thresholds,
+because AlphaLab had no real FX conversion capability at all -- both
+sections' fixes were "exclude/fall back to conservative rather than
+guess," never "convert and compare correctly." §41.8 named the real fix
+explicitly ("full FX normalization at the canonical valuation layer")
+and explicitly deferred it as its own, separate, larger phase requiring
+"real point-in-time FX rate ingestion, a whole new data capability." This
+section is that phase, requested directly and folded into this same PR
+(#47) rather than opened separately, for the identical reason §43.1 gave:
+this is the same currency-blindness bug class the original reviewer
+raised on this PR's sibling (#46), and there is no other in-flight PR left
+to scope it to.
+
+**Scope, decided before writing any code:** `alpha_lab.ratings.valuation.
+calculate_valuation_factors` computes every OTHER ratio
+(`pe`/`price_sales`/`ev_ebitda`/`price_fcf`/etc.) as `price / eps` or
+`market_cap / revenue` -- a ratio of two numbers already in the same
+native currency, so it is currency-invariant by construction and needs no
+FX conversion at all. Only the absolute-dollar-amount fields --
+`market_cap` (and anything compared against an absolute USD threshold,
+which today means only `classify_tier`'s tier boundaries and
+`ScreenCriteria.minimum_market_cap`/`maximum_market_cap`) ever needed real
+conversion. This kept the phase narrowly scoped to exactly the gap both
+prior sections named, not a speculative rewrite of the whole valuation
+layer.
+
+**New capability: `alpha_lab.fx`.**
+
+- New `FXRate` table (`alpha_lab/database/models.py`) -- one row per
+  `(currency, date)`, `rate_to_usd` (how many USD one unit of `currency`
+  is worth), mirroring `Price`'s own provenance fields (`provider`,
+  `source`, `ingested_at`) exactly. USD itself is never a row here.
+- New `FXRateProvider` interface (`alpha_lab.providers.interfaces`) and
+  its real implementation, `YFinanceProvider.get_fx_rate_history` -- daily
+  history from Yahoo Finance's own `<CUR>USD=X` FX pair (e.g.
+  `AEDUSD=X`), using the existing `call_with_classification`/`ProviderError`
+  boundary exactly like every other `YFinanceProvider` method. **Verified
+  live** (not assumed): `yf.Ticker("AEDUSD=X").history(...)` returns real
+  daily rates around 0.2724 -- the real, live AED/USD peg -- confirming
+  this data genuinely exists and is fetchable before any code was built
+  on top of it. An unrecognized `<CUR>USD=X` pair returns an empty
+  frame/list, never an error -- confirmed live with a nonexistent
+  currency (`ZZZUSD=X`), exactly like `get_price_history` already handles
+  an unrecognized equity ticker.
+- New `FXRateService` (`alpha_lab.fx.service`) with two responsibilities,
+  cleanly separated exactly like every other domain service in this
+  codebase (e.g. `MacroRegimeService`):
+  - `convert_to_usd(amount, currency, as_of)` -- a **pure database read**,
+    safe to call on every `MarketScreenerService.build_live_records()`
+    call (no network). Passes `amount` through unchanged for `currency in
+    (None, "USD")` (identical backward-compatible convention to §41.8's
+    and §43.1's own default), else looks up the most recent real
+    `FXRate` row at or before `as_of` and multiplies. Returns `None` --
+    never a guess -- when no real rate has been ingested yet for that
+    currency/date, exactly the same "missing != fabricated" contract
+    every other optional field in this codebase already has.
+  - PIT-safe on `FXRate.ingested_at`, not `FXRate.date` alone -- the
+    exact same rationale as `get_technical_summary_as_of`
+    (`alpha_lab.research.supplemental_service`): a first
+    `refresh_fx_rates.py` run ingests real history in one call, so a rate
+    row dated in the past can still have been inserted only today: a
+    historical `as_of` read must never see a rate AlphaLab had not
+    actually stored yet as of that date.
+  - `refresh(provider, currency, start, end)` -- the one method that
+    calls a provider; upserts by `(currency, date)`, mirroring
+    `IngestionService.ingest`'s own upsert pattern for `Price`. A no-op
+    for `currency == "USD"` (never a network call). Skips (never stores)
+    a non-finite or non-positive rate rather than persisting a
+    nonsensical conversion factor.
+- New `scripts/refresh_fx_rates.py` -- reads which non-USD currencies are
+  *actually* present among currently-ingested `Security` rows (never
+  fetches one speculatively) and refreshes each via `FXRateService`,
+  mirroring `scripts/refresh_macro_regime.py`'s structure. Deliberately
+  its own script, not folded into `run_core_refresh` -- `alpha_lab.refresh`'s
+  own module docstring scopes "core refresh" narrowly to
+  price/fundamental ingestion, with every other domain (Analyst Consensus,
+  Technical, AI Research, News, Macro Regime, and now FX) refreshed
+  independently through its own `scripts/refresh_*.py`, exactly the
+  existing convention this phase follows rather than special-cases.
+
+**Wiring `market_cap_usd` through the canonical valuation layer.**
+`classify_tier` and `_matches` both have an explicit "no database read"
+contract (see `build_security_screener_verdict`'s own docstring) -- FX
+conversion cannot happen inside either of them. Instead:
+
+- `LiveResearchRecord` gains `market_cap_usd: float | None = None`,
+  computed exactly once, in `MarketScreenerService._record`, via
+  `self.fx_rates.convert_to_usd(market_cap, security.currency, evaluation)`
+  -- the canonical valuation layer §41.8 itself named as where this
+  belongs. `market_cap`/`currency` are kept as-is (raw, native-currency,
+  for provenance/display); `market_cap_usd` is the new derived field
+  everything else reads.
+- `classify_tier` **simplified** back to a single argument,
+  `classify_tier(market_cap_usd: float | None)` -- the `currency`
+  parameter §41.8 added is gone entirely, because the function's one
+  caller now always passes an already-resolved USD number. `None` covers
+  both "market cap itself unknown" and "known but not yet convertible,"
+  and both correctly fall back to the same conservative `SPECULATIVE`
+  tier as before -- classify_tier cannot tell (and does not need to tell)
+  the two apart.
+- `ScreenRecord` gains the identical `market_cap_usd` field, threaded
+  from `LiveResearchRecord.market_cap_usd` at both live-record call sites
+  (`app/dashboard/main.py`, `app/dashboard/pages/3_Market_Screener.py`).
+  `_matches` now compares `record.market_cap_usd` directly against
+  `minimum_market_cap`/`maximum_market_cap` -- the currency-conditional
+  local variable §43.1 introduced is gone, replaced by this real,
+  already-converted field.
+
+**Live end-to-end validation** (not just unit tests): inserted a real
+`Security` row (`EMAAR`, `currency="AED"`, a real DFM-listed name from
+`config/default.yaml`'s own `universe.uae`) into a scratch database,
+ran `FXRateService.refresh` against the real `YFinanceProvider` --
+ingested 22 real daily AED/USD rates over the trailing 30 days -- then
+confirmed `convert_to_usd(1000.0, "AED", today)` returns real ~272.26,
+matching the live-verified AED peg, and that `convert_to_usd(1000.0,
+None, today)` still passes amounts through unchanged for an
+unknown/USD currency. `scripts/refresh_fx_rates.py` was also run
+against the real, current database (all-USD) and correctly reported
+"nothing to refresh" -- confirming it does not fetch a currency that is
+not actually in use.
+
+**Tests:** `tests/test_yfinance_provider.py` (symbol construction,
+Close-price extraction, empty-list on an unrecognized pair,
+`ProviderError` classification -- all offline, mocking the `yfinance`
+module exactly like this file's existing tests), `tests/test_fx_service.py`
+(new file: `convert_to_usd`'s USD/unknown passthrough, `None`-amount,
+never-ingested, most-recent-at-or-before-`as_of` selection, the
+`ingested_at`-not-`date` PIT gate, and `refresh`'s USD no-op/upsert/
+non-finite-rate-skipping behavior -- entirely against an in-memory
+database), and `tests/test_screener_verdict.py`/`tests/test_ai_search_
+phase3.py` updated for `classify_tier`'s new single-argument signature
+and `_matches`'s `market_cap_usd`-based filtering, including a new
+positive-path test (`test_non_usd_market_cap_is_classified_correctly_
+once_really_fx_converted`) proving a non-USD security IS correctly
+classified `CORE` once a real FX rate makes conversion possible --
+the case §41.8/§43.1 could not yet cover because neither could convert
+anything.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass with
+byte-for-byte unchanged scores (every real security in this environment
+is `currency=USD`/unknown, so `market_cap_usd` always equals `market_cap`
+here -- this phase changes nothing about current default output, only
+makes a previously-impossible non-USD case now handled correctly),
+`git diff --check` clean.
+
+**Deliberately not done here:** `scripts/refresh_fx_rates.py` is not
+wired into any automatic trigger (the launch-time check, the dashboard's
+on-session-start refresh, or `run_core_refresh`) -- exactly like every
+other supplemental-domain refresh script, this stays an explicit,
+independently-run operation. Historical/backtest FX conversion (i.e.
+`HistoricalScoringService`/`alpha_lab.strategy` reading a `market_cap_usd`
+as of an arbitrary past evaluation date) is not wired either -- this
+phase's scope was explicitly the live screener/verdict path §41.8 and
+§43.1 both named; a historical PIT read would reuse `FXRateService.
+convert_to_usd` exactly as-is (it already takes an arbitrary `as_of`), but
+threading it through `HistoricalScoringService` is a separate change to a
+separate code path, left for whenever that path actually needs it.

@@ -22,13 +22,18 @@ from alpha_lab.providers.errors import (
 from alpha_lab.providers.interfaces import (
     AnalystEventProvider,
     EstimateProvider,
+    FXRateProvider,
     ResearchNewsProvider,
 )
 from alpha_lab.providers.ticker_notation import to_hyphenated_symbol
 
 
 class YFinanceProvider(
-    MarketDataProvider, ResearchNewsProvider, EstimateProvider, AnalystEventProvider
+    MarketDataProvider,
+    ResearchNewsProvider,
+    EstimateProvider,
+    AnalystEventProvider,
+    FXRateProvider,
 ):
     def _ticker(self, symbol: str):
         import yfinance as yf
@@ -53,6 +58,38 @@ class YFinanceProvider(
                 for c in ["open", "high", "low", "close", "adjusted_close", "volume"]
                 if c in frame
             ]
+        ]
+
+    def get_fx_rate_history(
+        self, currency: str, start: date, end: date
+    ) -> list[dict[str, Any]]:
+        """Daily `currency` -> USD spot rate from Yahoo Finance's own
+        `<CUR>USD=X` FX pair (e.g. `AEDUSD=X`), using each bar's Close.
+        USD is never queried here -- there is no `USDUSD=X` pair, and 1 USD
+        is definitionally 1 USD, so callers should never call this for
+        currency == "USD" in the first place (see
+        `alpha_lab.fx.FXRateService`, which enforces exactly that).
+
+        A currency Yahoo Finance has no FX pair for returns an empty list,
+        exactly like `get_price_history` already returns an empty frame for
+        an unrecognized ticker -- never an error, since "no data for this
+        symbol" is a normal, expected outcome here, not a provider failure."""
+        import yfinance as yf
+
+        symbol = currency.strip().upper()
+        frame = call_with_classification(
+            lambda: yf.Ticker(f"{symbol}USD=X").history(
+                start=start, end=end, auto_adjust=False
+            ),
+            provider=self.provider_name,
+        )
+        if frame.empty:
+            return []
+        frame.index = pd.to_datetime(frame.index).tz_localize(None)
+        return [
+            {"date": index.date(), "rate_to_usd": float(row["Close"])}
+            for index, row in frame.iterrows()
+            if row.get("Close") is not None and math.isfinite(row["Close"])
         ]
 
     def get_company_info(self, ticker: str) -> dict[str, Any]:
