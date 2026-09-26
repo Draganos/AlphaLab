@@ -72,6 +72,7 @@ def build_screener() -> pd.DataFrame:
             shareholder_return_score=item.category_scores.get("shareholder_return"),
             debt_to_ebitda=item.raw_metrics.get("debt_ebitda"),
             market_cap=item.market_cap,
+            currency=item.currency,
             coverage=item.overall_live_coverage,
         )
         for item in records

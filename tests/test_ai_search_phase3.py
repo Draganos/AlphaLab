@@ -247,6 +247,52 @@ def test_all_structured_category_filters_execute_deterministically():
     ]
 
 
+# --- currency-blind market_cap filters: minimum_market_cap/maximum_market_cap
+# are USD amounts, so a record's raw market_cap can only be safely compared
+# against them when its currency is USD or unknown (mirrors
+# alpha_lab.scorecard.verdict.classify_tier's own currency fix) ------------
+
+
+def test_market_cap_filter_explicit_usd_matches_default_behavior():
+    record = ScreenRecord(
+        ticker="USD1", ethical_status="PASS", market_cap=5e9, currency="USD"
+    )
+    tickers_with_usd = [
+        item.ticker
+        for item in apply_screen([record], ScreenCriteria(minimum_market_cap=1e9))
+    ]
+    tickers_with_unknown = [
+        item.ticker
+        for item in apply_screen(
+            [record.model_copy(update={"currency": None})],
+            ScreenCriteria(minimum_market_cap=1e9),
+        )
+    ]
+    assert tickers_with_usd == tickers_with_unknown == ["USD1"]
+
+
+def test_market_cap_filter_unknown_currency_defaults_to_usd_for_backward_compatibility():
+    record = ScreenRecord(
+        ticker="UNKNOWN", ethical_status="PASS", market_cap=5e9, currency=None
+    )
+    assert [item.ticker for item in apply_screen([record], ScreenCriteria(minimum_market_cap=1e9))] == [
+        "UNKNOWN"
+    ]
+
+
+def test_market_cap_filter_non_usd_currency_never_compared_against_usd_thresholds():
+    # A genuinely huge AED number that would clear any real USD threshold if
+    # compared raw -- must still be excluded by both filters rather than
+    # fabricating an FX-adjusted comparison.
+    record = ScreenRecord(
+        ticker="AED1", ethical_status="PASS", market_cap=5e10, currency="AED"
+    )
+    assert apply_screen([record], ScreenCriteria(minimum_market_cap=1e9)) == []
+    # And it must not be falsely admitted by a maximum filter either, since
+    # its true USD value is unknown, not necessarily small.
+    assert apply_screen([record], ScreenCriteria(maximum_market_cap=1e12)) == []
+
+
 def test_live_ai_provider_retains_only_supplied_evidence(monkeypatch):
     import json
     from alpha_lab.ai import OpenAIResearchProvider, analyze_documents

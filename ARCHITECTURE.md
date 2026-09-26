@@ -3921,3 +3921,57 @@ own diff) -- keeping each PR's diff scoped to what it actually changes.
 `test_dependency_lock.py` failure), all three smoke tests pass unchanged
 (this is an opt-in-only provider fix; default scoring output is
 untouched), `git diff --check` clean.
+
+### 43.1 Extending §41.8's currency fix to `alpha_lab.search.screening`'s market-cap filters
+
+§41.8 fixed `alpha_lab.scorecard.verdict.classify_tier`'s currency
+blindness (comparing a raw `market_cap` number against USD tier
+thresholds regardless of the security's actual currency) but explicitly
+flagged, without fixing, that the identical gap independently exists in
+`ScreenCriteria.minimum_market_cap`/`maximum_market_cap` -- `alpha_lab.
+search.screening._matches` compares `ScreenRecord.market_cap` straight
+against these USD-denominated thresholds with zero currency awareness.
+Closing that gap here, applying the exact same fix shape rather than a
+new design:
+
+- Added `currency: str | None = None` to `ScreenRecord` (mirrors how
+  `LiveResearchRecord.currency` was added in §41.8), threaded from
+  `LiveResearchRecord.currency` at both call sites that build
+  `ScreenRecord` lists from live records (`app/dashboard/main.py`,
+  `app/dashboard/pages/3_Market_Screener.py`). The two other call sites
+  (`scripts/smoke_test_phase3.py`, `scripts/benchmark_phase31.py`) don't
+  set it and are unaffected, since `None` stays USD-permissive.
+- `_matches` now computes an effective `market_cap` that is `record.
+  market_cap` unchanged when `currency` is `None` (unknown, USD-permissive
+  for backward compatibility -- most existing `ScreenRecord` construction
+  sites, including every fixture across this codebase, never set this
+  field) or explicitly `"USD"`, and `None` (unusable) for any other
+  explicitly-known currency -- reusing the exact same "missing market_cap
+  already excludes a record from both filters" behavior that existed
+  before this change, rather than inventing a new "excluded because wrong
+  currency" code path. A non-USD `market_cap`, however large or small, can
+  therefore never falsely satisfy *or* falsely violate a `minimum_market_cap`/
+  `maximum_market_cap` filter -- it is excluded either way, exactly like a
+  `None` market_cap already was.
+- Deliberately reused the same conservative "exclude, don't guess" shape
+  as the missing-data case here (rather than §41.8's "fall back to the
+  most conservative tier" shape, which has no equivalent in a boolean
+  match/no-match filter) -- the two fixes are the same currency-safety
+  principle applied to their own domain's existing convention, not
+  identical code.
+
+New tests (`test_market_cap_filter_explicit_usd_matches_default_behavior`,
+`test_market_cap_filter_unknown_currency_defaults_to_usd_for_backward_
+compatibility`, `test_market_cap_filter_non_usd_currency_never_compared_
+against_usd_thresholds`) in `tests/test_ai_search_phase3.py`, alongside
+the existing `apply_screen`/`ScreenRecord` tests. Folded into this PR
+(#47) rather than opened separately -- both fixes are the same
+currency-blindness bug class the reviewer originally raised on this PR's
+sibling (#46), and #46 is already merged, so there is no other in-flight
+PR left to scope it to.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass unchanged
+(every real security in this environment is `currency=USD`, so this is
+currently-dormant-but-real, exactly like §41.8), `git diff --check`
+clean.

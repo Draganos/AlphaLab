@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
+_USD = "USD"
+
 
 class ScreenCriteria(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -58,6 +60,7 @@ class ScreenRecord(BaseModel):
     shareholder_return_score: float | None = Field(None, ge=0, le=100)
     debt_to_ebitda: float | None = Field(None, ge=0)
     market_cap: float | None = Field(None, ge=0)
+    currency: str | None = None
     coverage: float = Field(0.0, ge=0, le=1)
 
 
@@ -236,6 +239,17 @@ def _matches(record: ScreenRecord, criteria: ScreenCriteria) -> bool:
             return False
     if criteria.themes and not set(criteria.themes).issubset(record.themes):
         return False
+    # minimum_market_cap/maximum_market_cap are USD amounts; an EXPLICITLY
+    # known non-USD currency's market_cap can never be safely compared
+    # against them (mirrors alpha_lab.scorecard.verdict.classify_tier's
+    # own currency fix) -- treat it as unusable here exactly like an
+    # actually-missing market_cap already is below, rather than fabricate
+    # a comparison. An unknown currency (None) stays USD-permissive.
+    market_cap = (
+        record.market_cap
+        if record.currency is None or record.currency.upper() == _USD
+        else None
+    )
     minimums = (
         (criteria.minimum_overall_score, record.overall_score),
         (criteria.minimum_growth_score, record.growth_score),
@@ -246,7 +260,7 @@ def _matches(record: ScreenRecord, criteria: ScreenCriteria) -> bool:
         (criteria.minimum_financial_strength_score, record.financial_strength_score),
         (criteria.minimum_ai_research_score, record.ai_research_score),
         (criteria.minimum_shareholder_return_score, record.shareholder_return_score),
-        (criteria.minimum_market_cap, record.market_cap),
+        (criteria.minimum_market_cap, market_cap),
         (criteria.minimum_coverage, record.coverage),
     )
     if any(
@@ -255,7 +269,7 @@ def _matches(record: ScreenRecord, criteria: ScreenCriteria) -> bool:
     ):
         return False
     if criteria.maximum_market_cap is not None and (
-        record.market_cap is None or record.market_cap > criteria.maximum_market_cap
+        market_cap is None or market_cap > criteria.maximum_market_cap
     ):
         return False
     return criteria.maximum_debt_to_ebitda is None or (
