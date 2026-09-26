@@ -140,16 +140,61 @@ def test_refresh_ingests_real_provider_rows():
     assert service.convert_to_usd(1_000.0, "AED", _TODAY) == 272.3
 
 
-def test_refresh_upserts_by_currency_and_date_rather_than_duplicating():
+def test_refresh_re_ingesting_an_unchanged_rate_is_a_true_no_op():
     engine = _engine()
     service = FXRateService(engine)
     first = _FakeFXProvider({"AED": [{"date": _TODAY, "rate_to_usd": 0.27}]})
-    service.refresh(first, "AED", start=_TODAY, end=_TODAY)
-    second = _FakeFXProvider({"AED": [{"date": _TODAY, "rate_to_usd": 0.28}]})
-    service.refresh(second, "AED", start=_TODAY, end=_TODAY)
+    assert service.refresh(first, "AED", start=_TODAY, end=_TODAY) == 1
+    same_again = _FakeFXProvider({"AED": [{"date": _TODAY, "rate_to_usd": 0.27}]})
+    assert service.refresh(same_again, "AED", start=_TODAY, end=_TODAY) == 0
     with session_scope(engine) as session:
         assert session.query(FXRate).count() == 1
-    assert service.convert_to_usd(1_000.0, "AED", _TODAY) == 280.0
+    assert service.convert_to_usd(1_000.0, "AED", _TODAY) == 270.0
+
+
+def test_refresh_appends_a_revision_rather_than_mutating_the_existing_row():
+    """A real reviewer finding: refresh() must never mutate an existing
+    row's rate_to_usd in place, or a later revision silently overwrites
+    what a historical as_of between the two refreshes would see."""
+    engine = _engine()
+    service = FXRateService(engine)
+    day = date(2026, 1, 5)
+    original = _FakeFXProvider({"AED": [{"date": day, "rate_to_usd": 0.2720}]})
+    service.refresh(original, "AED", start=day, end=day)
+    revised = _FakeFXProvider({"AED": [{"date": day, "rate_to_usd": 0.2730}]})
+    count = service.refresh(revised, "AED", start=day, end=day)
+    assert count == 1  # the revision is a new observation, not a skip
+    with session_scope(engine) as session:
+        assert session.query(FXRate).count() == 2  # appended, never mutated
+
+
+def test_convert_to_usd_never_leaks_a_later_revision_into_an_earlier_as_of():
+    """The exact PIT-leak scenario a real review of this PR found: without
+    append-only revisions, a later-discovered restated rate would become
+    visible to a historical as_of that predates the restatement -- data
+    AlphaLab did not actually possess at that point in its own history."""
+    engine = _engine()
+    service = FXRateService(engine)
+    day = date(2026, 1, 5)
+    first_refresh_at = datetime(2026, 9, 26)
+    second_refresh_at = datetime(2026, 9, 30)
+
+    original = _FakeFXProvider({"AED": [{"date": day, "rate_to_usd": 0.2720}]})
+    service.refresh(original, "AED", start=day, end=day)
+    with session_scope(engine) as session:
+        row = session.query(FXRate).one()
+        row.ingested_at = first_refresh_at
+
+    revised = _FakeFXProvider({"AED": [{"date": day, "rate_to_usd": 0.2730}]})
+    service.refresh(revised, "AED", start=day, end=day)
+    with session_scope(engine) as session:
+        rows = session.query(FXRate).order_by(FXRate.id).all()
+        assert len(rows) == 2
+        rows[1].ingested_at = second_refresh_at
+
+    between_the_two_refreshes = date(2026, 9, 28)
+    assert service.convert_to_usd(1_000.0, "AED", between_the_two_refreshes) == 272.0
+    assert service.convert_to_usd(1_000.0, "AED", date(2026, 9, 30)) == 273.0
 
 
 def test_refresh_skips_non_finite_or_non_positive_rates_never_fabricating_a_conversion():

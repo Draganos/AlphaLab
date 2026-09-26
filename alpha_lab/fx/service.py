@@ -71,13 +71,25 @@ class FXRateService:
     def refresh(
         self, provider: FXRateProvider, currency: str, *, start: date, end: date
     ) -> int:
-        """Ingest real daily `currency` -> USD history from `provider` and
-        upsert it by `(currency, date)`, mirroring `IngestionService.
-        ingest`'s own upsert-by-unique-key pattern for `Price`. A no-op,
-        returning 0, for `currency == "USD"` (never a network call -- see
-        `FXRateProvider.get_fx_rate_history`'s own docstring) or when the
-        provider has no history for this currency at all. Returns the
-        number of rows ingested (inserted or updated)."""
+        """Ingest real daily `currency` -> USD history from `provider`. A
+        no-op, returning 0, for `currency == "USD"` (never a network call --
+        see `FXRateProvider.get_fx_rate_history`'s own docstring) or when
+        the provider has no history for this currency at all. Returns the
+        number of new observations recorded.
+
+        Appends a new row (never mutates one) whenever the incoming rate
+        for a `(currency, date)` differs from the latest already-stored
+        observation for it -- Yahoo Finance FX history is occasionally
+        restated, and `convert_to_usd`'s PIT gate
+        (`ingested_at <= end_of(as_of)`) only works if a revision's
+        `ingested_at` genuinely marks when AlphaLab came to know THAT
+        value. Mutating the existing row in place instead (like
+        `IngestionService.ingest`'s `Price` upsert does) would silently
+        let a later revision leak into a historical `as_of` query that
+        predates the revision -- data AlphaLab did not actually possess at
+        that point in its own history; see `FXRate`'s own docstring. A
+        routine re-refresh that returns an unchanged rate is a true no-op
+        -- it neither inserts a duplicate row nor touches `ingested_at`."""
         symbol = currency.strip().upper()
         if symbol == USD:
             return 0
@@ -90,22 +102,21 @@ class FXRateService:
                 rate = entry["rate_to_usd"]
                 if not math.isfinite(rate) or rate <= 0:
                     continue
-                ingested += 1
-                existing = session.scalar(
-                    select(FXRate).where(
-                        FXRate.currency == symbol, FXRate.date == entry["date"]
+                latest = session.scalars(
+                    select(FXRate)
+                    .where(FXRate.currency == symbol, FXRate.date == entry["date"])
+                    .order_by(FXRate.ingested_at.desc())
+                    .limit(1)
+                ).first()
+                if latest is not None and latest.rate_to_usd == rate:
+                    continue
+                session.add(
+                    FXRate(
+                        currency=symbol,
+                        date=entry["date"],
+                        rate_to_usd=rate,
+                        provider=provider.provider_name,
                     )
                 )
-                if existing is not None:
-                    existing.rate_to_usd = rate
-                    existing.provider = provider.provider_name
-                else:
-                    session.add(
-                        FXRate(
-                            currency=symbol,
-                            date=entry["date"],
-                            rate_to_usd=rate,
-                            provider=provider.provider_name,
-                        )
-                    )
+                ingested += 1
         return ingested

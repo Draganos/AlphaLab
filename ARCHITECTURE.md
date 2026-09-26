@@ -4147,3 +4147,68 @@ phase's scope was explicitly the live screener/verdict path §41.8 and
 convert_to_usd` exactly as-is (it already takes an arbitrary `as_of`), but
 threading it through `HistoricalScoringService` is a separate change to a
 separate code path, left for whenever that path actually needs it.
+
+### 44.1 Review follow-up: `refresh` mutating an existing row silently defeated its own PIT gate
+
+A real review of §44 found a genuine PIT leak in `FXRateService.refresh`
+as first written: when a re-ingest returned a revised `rate_to_usd` for an
+already-stored `(currency, date)` (Yahoo Finance FX history is
+occasionally restated), the original code mutated the existing row's
+`rate_to_usd` in place -- exactly mirroring `IngestionService.ingest`'s
+own `Price` upsert pattern -- but never touched that row's `ingested_at`.
+`convert_to_usd`'s entire PIT correctness rests on `ingested_at`
+genuinely marking when AlphaLab came to know the value currently stored in
+that row; mutating the value while leaving the old `ingested_at` in place
+broke that invariant silently. Concretely: ingest a Jan 5 rate of 0.2720
+on day 1 (`ingested_at`=day 1); a later re-ingest on day 5 revises it to
+0.2730 and overwrites the same row without updating `ingested_at`; a
+historical `convert_to_usd(..., as_of=day 3)` -- a point in AlphaLab's own
+history strictly between the two refreshes -- would then incorrectly see
+0.2730, a value AlphaLab did not actually possess as of day 3.
+
+**Fix: append-only revisions, never mutate.** `refresh` now inserts a new
+`FXRate` row (with its own fresh `ingested_at`) whenever the incoming rate
+for a `(currency, date)` differs from the latest already-stored
+observation for it, and is a true no-op (no insert at all) when the
+incoming rate is unchanged -- so a routine re-refresh of already-correct
+history never accumulates rows. `FXRate` is no longer unique on
+`(currency, date)` for exactly this reason (see its own docstring).
+`convert_to_usd`'s read query needed no change at all: it already ordered
+by `(FXRate.date desc, FXRate.ingested_at desc)` with the existing
+`ingested_at <= end_of(as_of)` gate, which is precisely the query shape
+that correctly picks among multiple same-date revisions -- the most
+recent one actually known as of `as_of`, never a later one.
+
+Deliberately chose real append-only history over the cheaper alternative
+(mutate in place, just bump `ingested_at` on a revision) -- the cheaper
+fix only prevents the leak (a between-refreshes query would fall back to
+`None`), whereas the review's own required test explicitly checked that a
+between-refreshes query still returns the *original, actually-known* rate,
+not just "nothing." Append-only satisfies that without any additional
+machinery: the existing ordered/limited read query already does the right
+thing once more than one row can exist per `(currency, date)`.
+
+**Noted but explicitly out of scope for this fix** (per the review's own
+"do not expand the FX phase beyond this correction"): `IngestionService.
+ingest`'s `Price` upsert has the identical latent issue -- it also mutates
+an existing `Price` row's OHLCV values in place without bumping
+`ingested_at`, which `get_technical_summary_as_of`'s own PIT gate relies
+on exactly the same way. Confirmed real by inspection, not fixed here --
+it predates this PR entirely and is a separate code path or the roadmap.
+
+New regression test `test_refresh_appends_a_revision_rather_than_mutating_
+the_existing_row` and the review's own exact required scenario,
+`test_convert_to_usd_never_leaks_a_later_revision_into_an_earlier_as_of`,
+in `tests/test_fx_service.py`. Confirmed both tests actually catch the
+original bug: reverted the fix locally (mutate-in-place, no new row,
+`ingested_at` untouched) and re-ran them -- both failed exactly as
+expected (one on row count, one on the leaked 0.2730) -- then restored
+the fix and confirmed both pass.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests pass with
+byte-for-byte unchanged scores, `git diff --check` clean, and the live
+end-to-end AED ingestion from §44 was re-run against the real
+`YFinanceProvider` to confirm a second, unchanged re-refresh correctly
+inserts zero new rows (idempotent) while the first refresh's real data and
+conversion result are unaffected.
