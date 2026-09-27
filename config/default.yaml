@@ -1,7 +1,7 @@
 database_url: sqlite:///data/alpha_lab.db
 donatien_url: https://donatien.ca/members/reports/Portfolio/index.html
 universe:
-  us: [NVDA, MA, AAL, FTEC, GDX]
+  us: [NVDA, MA, AAL, FTEC, GDX, SPY, QQQ, VT, MSFT, AAPL, AMZN, GOOGL, META, COST, JPM]
   uae: [EMAAR, ALEC, DUBAIRESI, PARKIN, AIRARABIA, ALDAR, ADNOCGAS, EAND, SALIK, DU]
 strategy:
   rebalance: monthly
