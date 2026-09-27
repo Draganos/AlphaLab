@@ -67,6 +67,35 @@ DEFAULT_INGESTION_YEARS = 2
 # refreshing everything is still possible, just never silently automatic.
 MAX_AUTO_REFRESH_TICKERS = 200
 
+# Safety cap for run_core_refresh's own "tickers=None" (whole configured
+# universe) path -- both scripts/launch.py's launch-time check and the
+# manual Full Refresh button take this path by omitting `tickers`. Real
+# incident that motivated this: a broadly-loaded universe (e.g. `scripts/
+# load_universe.py`'s full NASDAQ/NYSE non-ETF directory -- thousands of
+# tickers, since that script's own `--limit` only bounds live metadata
+# *enrichment*, not how many `Security` rows `UniverseIngestionService.
+# load` creates) turned one Full Refresh click into a many-hour blocking
+# operation with zero progress feedback -- indistinguishable from "stuck"
+# to whoever was waiting on it.
+#
+# Kept equal to MAX_AUTO_REFRESH_TICKERS deliberately: both bound the same
+# underlying cost (one live provider round-trip per ticker, none of it
+# backgrounded or parallelized) for a caller not already restricting to an
+# explicit subset. Unlike the automatic trigger (which skips entirely
+# above its cap, leaving the manual button as the deliberate fallback),
+# there is no smaller/safer fallback below this one, so above this many
+# tracked tickers `run_core_refresh` switches from "ingest the whole
+# universe every call" (fine at the tens-of-tickers scale every caller
+# here was originally sized for) to "ingest the
+# MAX_FULL_UNIVERSE_REFRESH_BATCH stalest tickers this call, the rest on
+# the next call." Self-correcting, no persisted cursor needed: each call
+# ingests the current staleness leaders (`stale_universe_tickers`' own
+# alphabetical-by-ticker order), which removes them from the *next*
+# call's stale set, so repeated calls work through the backlog
+# deterministically without ever double-processing an already-fresh
+# ticker.
+MAX_FULL_UNIVERSE_REFRESH_BATCH = MAX_AUTO_REFRESH_TICKERS
+
 
 def _latest_price_by_ticker(engine: Engine) -> dict[str, date]:
     """One row per ticker via SQL `MAX(date)` -- this runs unconditionally
@@ -175,11 +204,16 @@ def run_core_refresh(
     stale, rather than always re-ingesting the entire universe. Omitting
     it (the default -- used by both `scripts/launch.py`'s launch-time
     check and the manual Full Refresh button) ingests the full configured
-    universe, exactly as before this parameter existed. Either way, the
-    research rebuild step below always runs against the full current
-    database state: it is a local read/recompute, not a network call, so
-    narrowing its scope to match a partial ingestion would only leave
-    already-fresh tickers' research stale for no reason.
+    universe -- unless that universe exceeds `MAX_FULL_UNIVERSE_REFRESH_
+    BATCH`, in which case it ingests only that many of the currently
+    stalest tickers instead (see that constant's own docstring for why:
+    a broadly-loaded universe would otherwise turn one call into a
+    many-hour blocking operation). Below the cap this is byte-identical
+    to before this batching existed. Either way, the research rebuild
+    step below always runs against the full current database state: it
+    is a local read/recompute, not a network call, so narrowing its scope
+    to match a partial ingestion would only leave already-fresh tickers'
+    research stale for no reason.
 
     Never raises for a per-ticker *provider* failure. `MarketScreenerService.
     rebuild_current_research`'s own failure is caught and reported on the
@@ -191,7 +225,15 @@ def run_core_refresh(
     Full Refresh button) decide how to surface `research_error`, never how
     to recover the data -- there is nothing to recover.
     """
-    target_tickers = configured_universe_tickers(engine) if tickers is None else list(tickers)
+    if tickers is None:
+        target_tickers = configured_universe_tickers(engine)
+        if len(target_tickers) > MAX_FULL_UNIVERSE_REFRESH_BATCH:
+            stale_after_days = settings.data_quality["stale_price_days"]
+            target_tickers = stale_universe_tickers(engine, stale_after_days)[
+                :MAX_FULL_UNIVERSE_REFRESH_BATCH
+            ]
+    else:
+        target_tickers = list(tickers)
     ingestion_service = IngestionService(YFinanceProvider(), engine)
     end = date.today()
     start = end - timedelta(days=365 * years)
