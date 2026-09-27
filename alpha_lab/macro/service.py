@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from alpha_lab.database.models import CurrentMacroAssessment, MacroAssessmentSnapshot, Price
+from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.ingestion.service import IngestionService
 from alpha_lab.macro.regime import (
     MACRO_METHODOLOGY_VERSION,
@@ -179,11 +180,9 @@ class MacroRegimeService:
         price_histories: dict[str, pd.DataFrame] = {}
         with Session(self.engine) as session:
             for ticker in MACRO_PROXY_TICKERS:
-                rows = session.scalars(
-                    select(Price)
-                    .where(Price.ticker == ticker, Price.date <= as_of)
-                    .order_by(Price.date)
-                ).all()
+                rows = latest_price_per_date(
+                    session, Price.ticker == ticker, Price.date <= as_of
+                )
                 frame = pd.DataFrame(
                     [{"date": row.date, "close": row.close} for row in rows if row.close is not None]
                 )

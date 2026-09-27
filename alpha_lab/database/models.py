@@ -40,8 +40,18 @@ class Security(Base):
 
 
 class Price(Base):
+    """One daily OHLCV observation. Deliberately NOT unique on `(ticker,
+    date)`: a later real revision of an already-stored bar (a corrected
+    close, a split/dividend adjustment restating `adjusted_close`, ...) is
+    appended as a new row with its own `ingested_at`, never mutated in
+    place -- see `IngestionService.ingest`'s own docstring for why a
+    mutated row would silently leak a revision into a historical PIT read
+    that predates it, and `alpha_lab.database.queries.
+    latest_price_per_date` for how every consumer picks the one correct
+    row per `(ticker, date)` now that more than one can exist. `ingest`
+    still never inserts a duplicate for an unchanged bar."""
+
     __tablename__ = "prices"
-    __table_args__ = (UniqueConstraint("ticker", "date"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     ticker: Mapped[str] = mapped_column(ForeignKey("securities.ticker"), index=True)
     date: Mapped[date] = mapped_column(Date, index=True)

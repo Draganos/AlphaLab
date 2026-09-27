@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from alpha_lab.config import Settings
 from alpha_lab.database.models import Price, Security
-from alpha_lab.database.queries import latest_fundamentals_as_of
+from alpha_lab.database.queries import latest_fundamentals_as_of, latest_price_per_date
 from alpha_lab.factors import calculate_factors, percentile_scores
 from alpha_lab.factors.engine import FACTOR_VERSION
 from alpha_lab.portfolio import Candidate
@@ -60,8 +60,9 @@ class HistoricalScoringService:
             for security in securities:
                 if symbols is not None and security.ticker not in symbols:
                     continue
-                prices = session.scalars(select(Price).where(
-                    Price.ticker == security.ticker, Price.date <= evaluation_date).order_by(Price.date)).all()
+                prices = latest_price_per_date(
+                    session, Price.ticker == security.ticker, Price.date <= evaluation_date
+                )
                 usable_prices = [item for item in prices if _price_value(item) is not None]
                 fundamentals = latest_fundamentals_as_of(session, security.ticker, evaluation_date)
                 series = pd.Series(

@@ -4212,3 +4212,181 @@ end-to-end AED ingestion from §44 was re-run against the real
 `YFinanceProvider` to confirm a second, unchanged re-refresh correctly
 inserts zero new rows (idempotent) while the first refresh's real data and
 conversion result are unaffected.
+
+## 45. Price PIT bugfix: `IngestionService.ingest` had the identical revision-leak pattern as `FXRate`
+
+§44.1's own review found `FXRate.refresh` mutating an existing row in
+place on a revision, without bumping `ingested_at` -- fixed there by
+making `refresh` append-only. That section explicitly flagged, without
+fixing (per its own review's "do not expand the FX phase beyond this
+correction"), that `IngestionService.ingest`'s `Price` upsert has the
+identical latent pattern: it mutates an existing `(ticker, date)` row's
+OHLCV/currency/provider/source fields in place, never bumping
+`ingested_at`, which `get_technical_summary_as_of`'s own PIT gate relies
+on exactly the same way `FXRateService.convert_to_usd` does. Requested
+directly as its own scoped bug-fix phase (not a roadmap feature) -- design
+and implement, self bug-check, test, PR.
+
+**Audit before touching anything.** Unlike `FXRate` (a brand-new table
+with a handful of consumers), `Price` is read far more pervasively --
+`get_technical_summary_as_of`/`refresh_technical_summary`, the live
+screener (`MarketScreenerService.build_live_records`), Macro Regime
+(`MacroRegimeService.refresh`), `HistoricalScoringService.
+score_universe_as_of` (used by both the live screener and the
+backtester), the backtest engine's own price loader
+(`alpha_lab.backtest.database_runner.load_price_frames`), and the Signal
+Predictive-Value Study's `_price_series`. A full read-only audit (every
+`select(Price)`/`session.query(Price)` call site, checked for whether it
+already tolerates or would misbehave under more than one row per
+`(ticker, date)`) was run before any schema or upsert change, specifically
+to avoid a design that fixes the write path while leaving read paths
+silently broken. Worst finding: `HistoricalScoringService.
+score_universe_as_of`'s `{item.date: _price_value(item) for item in
+usable_prices}` -- a **plain dict comprehension keyed by date** -- would
+silently collapse duplicate-date rows to whichever iteration order wins,
+feeding every momentum/return factor in both live scoring and
+backtesting. Every other consumer above had some version of the same
+"assumes one row per date" shape (`list[-1]`/`list[-20:]` after
+`ORDER BY date` with no `ingested_at` tiebreak, or a `pd.Series`/
+`DataFrame` built with a duplicate index).
+
+**Scope decision:** fix only the duplicate-row/revision-leak bug, and
+preserve every consumer's existing `as_of`/PIT semantics exactly as they
+are today -- e.g. `HistoricalScoringService`/`build_live_records`/
+`MacroRegimeService.refresh` have no `ingested_at` gate at all today (only
+`get_technical_summary_as_of` does), and this phase does not add one to
+any of them. `MacroRegimeService.refresh`'s own docstring already claims
+"point-in-time" despite never filtering on `ingested_at` -- a real,
+separate, pre-existing gap, noted here but deliberately not fixed, for
+the identical "don't expand this bug-fix phase" reason §44.1 gave for not
+also fixing `Price` while it was being discussed.
+
+**The fix, mirroring `Fundamental`'s own precedent almost exactly**
+(`Fundamental` already solves this identical problem via a content-hash
+append-only upsert plus `alpha_lab.database.queries.
+latest_fundamentals_as_of`'s window-function PIT query -- `Price` simply
+never had either):
+
+- `IngestionService.ingest`'s `Price` upsert now fetches the latest
+  existing row for `(ticker, date)`, merges the incoming non-`None`
+  fields onto it (carrying forward whatever the incoming row didn't
+  supply, exactly like the old mutate-in-place code's "only overwrite
+  non-`None` fields" behavior), and appends a **new** row only if
+  something in that merge actually differs from the latest stored values
+  -- otherwise (identical re-ingest) it is a true no-op, matching
+  `Fundamental`'s own idempotent-on-unchanged-value behavior exactly
+  (required to keep `test_ingestion_is_idempotent_and_preserves_unknown_
+  publication_date` passing unchanged).
+- New `alpha_lab.database.queries.latest_price_per_date_statement`/
+  `latest_price_per_date`, mirroring `latest_fundamentals_as_of_statement`'s
+  exact row-ranking shape (`row_number() over (partition by ..., order by
+  ingested_at desc, id desc) = 1`) rather than a Python-side reducer --
+  callers pass arbitrary `Price` filter conditions (ticker, date bound,
+  optionally an `ingested_at` PIT bound) and get back exactly one row per
+  `(ticker, date)`, the freshest revision actually satisfying those
+  conditions.
+- `Price` is no longer unique on `(ticker, date)`, for the identical
+  reason `FXRate` isn't (see its own updated docstring).
+- All six read call sites named above now build their existing
+  `select(Price)` conditions through `latest_price_per_date` instead of a
+  raw query -- no consumer's own `as_of`/date-range logic changed, only
+  how it disambiguates multiple rows sharing a date. `alpha_lab.analytics.
+  signal_predictive_value._price_series` additionally switched from
+  selecting only `(Price.date, Price.close)` columns to full `Price` rows
+  (needed for the `ingested_at`/`id` tiebreak), filtering `close is not
+  None` in Python afterward instead of in SQL -- provably equivalent
+  given the merge-and-carry-forward upsert above never lets a real
+  `close` value regress to `None` in a later revision.
+
+**Self bug-check caught a real issue before it shipped:** the first
+version of `latest_price_per_date_statement` partitioned the ranking
+window by `Price.date` alone, not `(Price.ticker, Price.date)` --
+harmless today because every current call site already filters to a
+single ticker, but a latent bug for any future caller querying across
+tickers without a `Price.ticker == ...` condition, which would silently
+collapse two different tickers' same-date rows into one ranking
+partition. Fixed to partition by `(ticker, date)`, matching
+`latest_fundamentals_as_of_statement`'s own `(ticker, period)` partition
+exactly, with a new regression test
+(`test_latest_price_per_date_partitions_by_ticker_not_just_date`) proving
+two tickers sharing a date each keep their own row.
+
+**Tests:** `tests/test_ingestion.py` -- two new tests
+(`test_price_revisions_are_append_only_not_mutated_in_place`,
+`test_price_re_ingesting_an_unchanged_bar_is_a_true_no_op`), confirmed to
+actually catch the original bug (reverted the fix locally, re-ran --
+failed exactly as expected -- then restored it). `tests/test_point_in_
+time_queries.py` -- `test_price_revision_never_leaks_into_an_earlier_
+as_of` (the exact FXRate-style PIT-leak scenario: original ingestion,
+revision, then an `as_of` between the two must return the original
+value) and the ticker-partition regression above.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure) across every affected area
+(`test_ingestion.py`, `test_point_in_time_queries.py`, `test_supplemental_
+service.py`, `test_historical_scoring.py`, `test_macro_service.py`,
+`test_macro_regression.py`, `test_signal_predictive_value.py`,
+`test_backtest.py`, `test_database.py`), all three smoke tests pass with
+byte-for-byte unchanged scores (today's real database has no genuine
+price revisions, so every consumer's dedup query returns exactly the same
+single row per date it always did), `git diff --check` clean.
+
+### 45.1 Self bug-check found a deployment-breaking gap: the old constraint was still physically on disk
+
+Requested explicitly as a distinct phase on this same PR: a bug check of
+the diff above, after it was otherwise complete and passing. Found a real
+issue serious enough that it would have broken the very first genuine
+price revision in any already-existing AlphaLab database, including this
+environment's own.
+
+Removing `UniqueConstraint("ticker", "date")` from the `Price` model only
+changes what `Base.metadata.create_all` emits for a **brand-new** table --
+`create_all` never touches a table that already exists, and SQLite has no
+`ALTER TABLE ... DROP CONSTRAINT` for an inline table-level `UNIQUE`
+(or the automatic index it silently creates) at all; the only way to
+remove one is a full table rebuild. Confirmed live, not assumed: inspected
+this environment's own real `data/alpha_lab.db` and found the constraint
+still physically present in its on-disk schema (`CREATE TABLE prices (...
+UNIQUE (ticker, date) ...)`) -- so `IngestionService.ingest`'s new
+append-only logic would have raised a raw `sqlite3.IntegrityError` on this
+exact real database the first time a genuine revision occurred, despite
+every test passing (every test creates a fresh in-memory database via
+`create_schema`, which never had the old constraint to begin with -- the
+gap was invisible to the whole test suite).
+
+This is the identical problem `_migrate_legacy_fundamentals` already
+solves for `Fundamental`'s own former `UNIQUE(ticker, period)` (removed
+when `Fundamental` gained its append-only `observation_hash` design) --
+`Price`'s fix mirrors that function's exact rebuild shape (drop indexes,
+rename the old table aside, recreate `prices` from the current model,
+copy every row through unchanged, drop the renamed table), added as a new
+`_migrate_legacy_price_unique_constraint`, run from `create_schema`
+alongside `_migrate_legacy_fundamentals`. Simpler than the `Fundamental`
+case: no new column needs backfilling, only the constraint needs to go, so
+every column copies straight across.
+
+**Live-validated against a copy of this environment's real database**
+(never the original in place): ran the migration against a copy of the
+actual `data/alpha_lab.db` (8,466 real `Price` rows) -- confirmed all
+8,466 rows survive unchanged, the `UNIQUE(ticker, date)` constraint is
+gone, both real non-unique indexes (`ix_prices_date`/`ix_prices_ticker`)
+are correctly recreated, and then ingested a genuine one-day revision for
+a real ticker (`AAL`) through the actual `IngestionService.ingest` path --
+it appended a second row for that `(ticker, date)` successfully, which
+would have raised `sqlite3.IntegrityError` before this fix.
+
+**New regression test**
+(`test_legacy_price_unique_constraint_is_migrated_without_data_loss` in
+`tests/test_database.py`, mirroring `test_legacy_fundamental_constraint_
+is_migrated_without_data_loss`'s exact structure): builds a database with
+the old constraint by hand, runs `create_schema` twice (proving the
+migration is idempotent -- a no-op on an already-migrated database,
+exactly like its `Fundamental` sibling test), then proves a genuine
+revision can actually be appended afterward. Confirmed this test actually
+catches the bug: reverted `session.py`'s migration function locally and
+re-ran it -- failed with the exact `sqlite3.IntegrityError` predicted
+above -- then restored the fix and confirmed it passes.
+
+**Validation:** full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests unchanged,
+`git diff --check` clean.

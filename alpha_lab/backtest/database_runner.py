@@ -3,13 +3,14 @@
 from datetime import date
 import math
 import pandas as pd
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from alpha_lab.backtest.benchmark import buy_and_hold
 from alpha_lab.backtest.engine import BacktestEngine, BacktestResult, TransactionCostModel
 from alpha_lab.config import Settings
 from alpha_lab.database.models import Price
+from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.strategy import HistoricalScoringService
 
 
@@ -40,8 +41,9 @@ def load_price_frames(engine: Engine, tickers: list[str] | tuple[str, ...], star
     frames = {}
     with Session(engine) as session:
         for ticker in tickers:
-            rows = session.scalars(select(Price).where(
-                Price.ticker == ticker, Price.date >= start, Price.date <= end).order_by(Price.date)).all()
+            rows = latest_price_per_date(
+                session, Price.ticker == ticker, Price.date >= start, Price.date <= end
+            )
             if rows:
                 frames[ticker] = pd.DataFrame([adjusted_price_values(row) for row in rows]).set_index("date")
     return frames
