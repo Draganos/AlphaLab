@@ -52,11 +52,23 @@ class HistoricalScoringService:
     def score_universe_as_of(self, evaluation_date: date, tickers: list[str] | tuple[str, ...] | None = None,
                              *, min_score: float | None = None,
                              minimum_coverage: float | None = None) -> list[HistoricalScore]:
+        """`tickers=None` (the live screener's own call, via `MarketScreener
+        Service.build_live_records`) scores the tracked research universe
+        (`Security.is_tracked`) -- never `scripts/load_universe.py`'s
+        broader untracked catalog. An explicit `tickers` list (the
+        backtester's own call, from its named CSV universe -- see `alpha_
+        lab.research.universe.load_universe`) is scored exactly as given,
+        completely independent of tracking status: a backtest study may
+        legitimately name a ticker AlphaLab never marked as a live
+        research candidate."""
         symbols = {ticker.upper() for ticker in tickers} if tickers else None
         raw: dict[str, dict[str, float]] = {}
         metadata: dict[str, tuple[str | None, str | None, str | None]] = {}
         with Session(self.engine) as session:
-            securities = session.scalars(select(Security).order_by(Security.ticker)).all()
+            statement = select(Security).order_by(Security.ticker)
+            if symbols is None:
+                statement = statement.where(Security.is_tracked.is_(True))
+            securities = session.scalars(statement).all()
             for security in securities:
                 if symbols is not None and security.ticker not in symbols:
                     continue

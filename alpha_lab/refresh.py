@@ -111,14 +111,19 @@ def _latest_price_by_ticker(engine: Engine) -> dict[str, date]:
 
 
 def configured_universe_tickers(engine: Engine) -> list[str]:
-    """The already-tracked universe `run_core_refresh` ingests -- exactly
-    the tickers `MarketScreenerService.build_live_records` itself reads
-    from `Security` (see that method's own `select(Security)` query), so
-    a core refresh ingests precisely what the rebuild step is about to
-    use. Never discovers or expands the universe (that remains
-    `scripts/load_universe.py`/`load_live_research.py`'s job)."""
+    """The live research universe `run_core_refresh` ingests -- every
+    `Security` with `is_tracked=True`, exactly what `MarketScreenerService.
+    build_live_records` itself reads (see that method's own `select(
+    Security)` queries), so a core refresh ingests precisely what the
+    rebuild step is about to use. A `Security` row can exist without being
+    tracked (`scripts/load_universe.py`'s broad catalog load never sets
+    the flag -- see `Security`'s own docstring); this never discovers or
+    expands the tracked universe on its own. Adding/removing a ticker from
+    it is `scripts/manage_universe.py`'s job."""
     with Session(engine) as session:
-        return list(session.scalars(select(Security.ticker).order_by(Security.ticker)))
+        return list(session.scalars(
+            select(Security.ticker).where(Security.is_tracked.is_(True)).order_by(Security.ticker)
+        ))
 
 
 def stale_universe_tickers(

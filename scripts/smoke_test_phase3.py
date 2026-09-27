@@ -92,6 +92,7 @@ def main() -> None:
                             market_cap=1_000_000_000,
                             metadata_provider="fixture",
                             metadata_source="phase3-smoke",
+                            is_tracked=True,
                         )
                     )
                     for offset in range(90):

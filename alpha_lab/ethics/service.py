@@ -22,9 +22,15 @@ class EthicalClassificationService:
         self.policy = policy
 
     def ensure_all(self) -> dict[str, str]:
+        """Only the tracked research universe (`Security.is_tracked`) --
+        never `scripts/load_universe.py`'s broader untracked catalog, which
+        can hold thousands of rows with no research relationship to
+        AlphaLab at all. See `Security`'s own docstring."""
         with Session(self.engine) as session:
             securities = list(
-                session.scalars(select(Security).order_by(Security.ticker))
+                session.scalars(
+                    select(Security).where(Security.is_tracked.is_(True)).order_by(Security.ticker)
+                )
             )
         return {
             security.ticker: self.ensure_security(security) for security in securities

@@ -1,5 +1,11 @@
 #!/usr/bin/env python
-"""Load a broad credential-free US universe and optionally enrich live metadata."""
+"""Load a broad credential-free US universe and optionally enrich live metadata.
+
+Catalog-only: this never sets `Security.is_tracked` (see that model's own
+docstring), so running this script alone never adds anything to AlphaLab's
+live research universe -- only `IngestionService.ingest` (via `scripts/
+manage_universe.py add`, `load_us_data.py`, or `load_live_research.py`)
+does that, deliberately, for a named ticker."""
 
 from pathlib import Path
 import argparse

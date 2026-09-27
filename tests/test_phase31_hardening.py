@@ -305,7 +305,7 @@ def test_current_snapshot_read_is_read_only_and_historical_service_does_not_cons
     try:
         create_schema(engine)
         with Session(engine) as session:
-            session.add(Security(ticker="X"))
+            session.add(Security(ticker="X", is_tracked=True))
             session.commit()
         from alpha_lab.phase3 import Phase3Repository
         Phase3Repository(engine).save_current_research([_record()])

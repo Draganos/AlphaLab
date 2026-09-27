@@ -66,7 +66,7 @@ def _seed_security(db_path, ticker: str, price_date: date | None) -> None:
     engine = make_engine(f"sqlite:///{db_path}")
     create_schema(engine)
     with Session(engine) as session:
-        session.add(Security(ticker=ticker, country="US", currency="USD"))
+        session.add(Security(ticker=ticker, country="US", currency="USD", is_tracked=True))
         if price_date is not None:
             session.add(Price(
                 ticker=ticker, date=price_date, close=100.0,
@@ -138,7 +138,7 @@ def test_automatic_refresh_only_ingests_the_stale_subset_not_the_full_universe(t
     _seed_security(db_path, "NVDA", date.today() - timedelta(days=30))  # stale
     engine = make_engine(f"sqlite:///{db_path}")
     with Session(engine) as session:
-        session.add(Security(ticker="AAPL", country="US", currency="USD"))
+        session.add(Security(ticker="AAPL", country="US", currency="USD", is_tracked=True))
         session.add(Price(
             ticker="AAPL", date=date.today(), close=200.0,
             high=201.0, low=199.0, provider="fixture", currency="USD", source="test",
@@ -170,7 +170,7 @@ def test_a_stale_count_above_the_safety_cap_skips_the_automatic_refresh(tmp_path
     with Session(engine) as session:
         for i in range(MAX_AUTO_REFRESH_TICKERS + 1):
             ticker = f"T{i:05d}"
-            session.add(Security(ticker=ticker, country="US", currency="USD"))
+            session.add(Security(ticker=ticker, country="US", currency="USD", is_tracked=True))
             session.add(Price(
                 ticker=ticker, date=stale_date, close=100.0,
                 high=101.0, low=99.0, provider="fixture", currency="USD", source="test",

@@ -55,7 +55,7 @@ class _FakeProvider(MarketDataProvider):
 
 def _seed_security_with_price(engine, ticker: str, price_date: date) -> None:
     with Session(engine) as session:
-        session.add(Security(ticker=ticker, country="US", currency="USD"))
+        session.add(Security(ticker=ticker, country="US", currency="USD", is_tracked=True))
         session.add(Price(
             ticker=ticker, date=price_date, close=100.0, high=101.0, low=99.0,
             provider="fixture", currency="USD", source="test",
@@ -97,7 +97,7 @@ def test_a_tracked_security_with_no_price_at_all_is_stale():
     engine = make_engine("sqlite:///:memory:")
     create_schema(engine)
     with Session(engine) as session:
-        session.add(Security(ticker="NVDA", country="US", currency="USD"))
+        session.add(Security(ticker="NVDA", country="US", currency="USD", is_tracked=True))
         session.commit()
     assert is_universe_price_stale(engine, stale_after_days=7) is True
 
@@ -151,7 +151,7 @@ def test_run_core_refresh_batches_a_universe_larger_than_the_cap(monkeypatch):
     create_schema(engine)
     with Session(engine) as session:
         for ticker in ["AAA", "BBB", "CCC", "DDD", "EEE"]:
-            session.add(Security(ticker=ticker, country="US", currency="USD"))
+            session.add(Security(ticker=ticker, country="US", currency="USD", is_tracked=True))
         session.commit()
     settings = load_settings()
 
@@ -200,7 +200,7 @@ def test_repeated_calls_work_through_a_large_stale_backlog_without_double_proces
     create_schema(engine)
     with Session(engine) as session:
         for ticker in ["AAA", "BBB", "CCC", "DDD", "EEE"]:
-            session.add(Security(ticker=ticker, country="US", currency="USD"))
+            session.add(Security(ticker=ticker, country="US", currency="USD", is_tracked=True))
         session.commit()
     settings = load_settings()
 
