@@ -18,6 +18,7 @@ def test_automatic_classification_persists_and_reevaluates_metadata(tmp_path):
                     industry="Payment Processing",
                     business_description="Global payment network infrastructure",
                     metadata_source="fixture-v1",
+                    is_tracked=True,
                 )
             )
             session.commit()

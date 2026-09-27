@@ -23,6 +23,21 @@ class Base(DeclarativeBase):
 
 
 class Security(Base):
+    """A row here means only "AlphaLab knows this ticker exists" -- a cheap
+    catalog entry `UniverseIngestionService.load` can create by the
+    thousand (the full NASDAQ/NYSE non-ETF directory) with no price or
+    fundamental data behind it at all. `is_tracked` is the separate,
+    deliberate concept: "this security is part of AlphaLab's live research
+    universe" -- what the dashboard, Full Refresh, the screener, and
+    historical scoring actually operate on. `IngestionService.ingest`
+    sets it the moment it genuinely ingests price/fundamental data for a
+    ticker (see its own `mark_tracked` parameter for the one exception:
+    `MacroRegimeService`'s fixed macro-proxy tickers, which need price
+    history but are never research candidates). Only ever set True by
+    ingestion; only ever cleared by an explicit `scripts/manage_universe.py
+    remove` call -- never by re-ingesting, and never by deleting the row
+    or any historical Price/Fundamental data it owns."""
+
     __tablename__ = "securities"
     ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
     company_name: Mapped[str | None] = mapped_column(String(255))
@@ -37,6 +52,9 @@ class Security(Base):
     metadata_provider: Mapped[str | None] = mapped_column(String(64))
     metadata_source: Mapped[str | None] = mapped_column(String(512))
     metadata_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    is_tracked: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
 
 
 class Price(Base):

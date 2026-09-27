@@ -29,7 +29,7 @@ class IngestionService:
     def __init__(self, provider: MarketDataProvider, engine: Engine):
         self.provider, self.engine = provider, engine
 
-    def ingest(self, ticker: str, start: date, end: date) -> None:
+    def ingest(self, ticker: str, start: date, end: date, *, mark_tracked: bool = True) -> None:
         """Fetch + upsert. `Price` rows are append-only on genuine change --
         an already-stored `(ticker, date)` bar is never mutated in place;
         a real revision (corrected close, split/dividend adjustment
@@ -44,7 +44,19 @@ class IngestionService:
         no-op: nothing is inserted, and the existing row's `ingested_at`
         is left untouched. Every reader of `Price` history must therefore
         pick exactly one row per `(ticker, date)` -- see
-        `alpha_lab.database.queries.latest_price_per_date`."""
+        `alpha_lab.database.queries.latest_price_per_date`.
+
+        `mark_tracked=True` (the default) sets `Security.is_tracked = True`
+        -- calling `ingest` for a ticker is inherently a deliberate act, so
+        this is how a ticker joins AlphaLab's live research universe (see
+        `Security`'s own docstring). The one exception is `MacroRegimeService
+        .refresh`, which ingests its fixed macro-proxy tickers (VIX,
+        Treasury yields, ...) purely for their price history -- those are
+        never research candidates, so it passes `mark_tracked=False`.
+        `mark_tracked=False` only ever *skips setting* the flag; it never
+        clears an already-tracked security's flag back to untracked --
+        removal from the universe is exclusively `scripts/manage_universe.
+        py remove`'s job."""
         symbol = ticker.upper().strip()
         info = self.provider.get_company_info(symbol)
         info["exchange"] = _canonical_exchange(info.get("exchange"))
@@ -66,6 +78,8 @@ class IngestionService:
                         }:
                             continue
                         setattr(security, key, value)
+            if mark_tracked:
+                security.is_tracked = True
             security.metadata_updated_at = datetime.now(UTC)
             for index, row in prices.iterrows():
                 values = {

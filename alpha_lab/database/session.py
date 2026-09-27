@@ -53,6 +53,7 @@ def create_schema(engine: Engine) -> None:
             "metadata_provider": "VARCHAR(64)",
             "metadata_source": "VARCHAR(512)",
             "metadata_updated_at": "DATETIME",
+            "is_tracked": "BOOLEAN DEFAULT 0 NOT NULL",
         },
         "prices": {
             "currency": "VARCHAR(8)",

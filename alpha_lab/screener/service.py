@@ -205,7 +205,9 @@ class MarketScreenerService:
         AIResearchService(self.engine, configured_ai_research_provider()).ensure_all()
         with Session(self.engine) as metadata_session:
             metadata = list(
-                metadata_session.scalars(select(Security).order_by(Security.ticker))
+                metadata_session.scalars(
+                    select(Security).where(Security.is_tracked.is_(True)).order_by(Security.ticker)
+                )
             )
         repository = Phase3Repository(self.engine)
         for security in metadata:
@@ -232,7 +234,9 @@ class MarketScreenerService:
         }
         rows: dict[str, dict] = {}
         with Session(self.engine) as session:
-            for security in session.scalars(select(Security).order_by(Security.ticker)):
+            for security in session.scalars(
+                select(Security).where(Security.is_tracked.is_(True)).order_by(Security.ticker)
+            ):
                 prices = latest_price_per_date(
                     session, Price.ticker == security.ticker, Price.date <= evaluation
                 )

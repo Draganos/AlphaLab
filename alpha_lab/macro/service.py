@@ -173,7 +173,12 @@ class MacroRegimeService:
         ingestion = IngestionService(provider, self.engine)
         for ticker in MACRO_PROXY_TICKERS:
             try:
-                ingestion.ingest(ticker, start, as_of)
+                # mark_tracked=False: these are market-observable proxy
+                # instruments, never research candidates -- ingesting them
+                # for their price history must never add them to the live
+                # research universe (Security.is_tracked). See Ingestion
+                # Service.ingest's own docstring.
+                ingestion.ingest(ticker, start, as_of, mark_tracked=False)
             except ProviderError:
                 continue
 

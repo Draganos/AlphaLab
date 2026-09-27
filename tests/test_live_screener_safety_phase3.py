@@ -178,6 +178,7 @@ def test_live_screener_filters_future_evidence_and_excludes_stale_reference(
                         business_description="Enterprise software operating business with recurring subscriptions",
                         metadata_source="fixture",
                         market_cap=1_000_000,
+                        is_tracked=True,
                     )
                 )
             for offset in range(30):
@@ -315,6 +316,7 @@ def test_excluded_company_is_scored_against_pass_reference_but_never_ranked(
                     industry="Software",
                     business_description="Enterprise software operating business with recurring subscriptions",
                     metadata_source="fixture",
+                    is_tracked=True,
                 )
             )
             session.add(
@@ -324,6 +326,7 @@ def test_excluded_company_is_scored_against_pass_reference_but_never_ranked(
                     industry="Regional Banks",
                     business_description="Bank holding company accepting deposits and originating loans",
                     metadata_source="fixture",
+                    is_tracked=True,
                 )
             )
             for ticker, base_price in (("PASS", 20), ("BANK", 10)):

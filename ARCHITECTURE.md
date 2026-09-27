@@ -4555,3 +4555,150 @@ first batch's tickers genuinely clear the staleness check before the
 second call runs). Full suite green (same unrelated pre-existing `test_
 dependency_lock.py` failure), all three smoke tests unchanged, `git diff
 --check` clean.
+
+## 48. Universe tracking model: `Security.is_tracked` separates catalog from live research membership
+
+**The underlying problem, exposed by #50/#51 rather than fixed by either**:
+before this phase there was no formal concept of "the live research
+universe" at all. `config/default.yaml`'s `universe.us` was never read by
+the dashboard or by `run_core_refresh` -- it is only a default CLI argument
+for a handful of standalone scripts. The real universe, everywhere that
+mattered, was simply "every row in the `securities` table." That single
+fact is what let `scripts/load_universe.py` -- a script whose whole point
+is cheap, broad *cataloging* (the full active NASDAQ/NYSE non-ETF
+directory, with its `--limit` flag only ever bounding live-metadata
+*enrichment*, never the initial bulk `load()` call) -- silently balloon the
+live dashboard's universe to thousands of bare, no-data rows. §47's batch
+cap made the resulting Full Refresh hang survivable; it didn't address why
+a cataloging script was expanding the live universe in the first place.
+Growing `config/default.yaml` by hand (#50) was a symptom-level fix to the
+same conflation: it treated the live universe as a config list rather than
+database membership.
+
+**Design**: two clearly separated concepts, both still backed by the
+existing `Security` table and its existing APIs -- no new table, no new
+service abstraction.
+
+- **Catalog** -- a `Security` row means only "AlphaLab knows this ticker
+  exists." `UniverseIngestionService.load()` (via `load_universe.py`) can
+  still create these by the thousand, exactly as before, with zero price
+  or fundamental data behind them.
+- **Tracked research universe** -- `Security.is_tracked = True` means
+  "this security is part of AlphaLab's live research universe": what the
+  dashboard, Full Refresh, the screener, ethics classification, and live
+  historical scoring actually operate on. Membership is deliberate and is
+  only ever set by `IngestionService.ingest()` -- the moment a ticker
+  genuinely gets price/fundamental data pulled for it -- and only ever
+  cleared by an explicit `scripts/manage_universe.py remove`. Nothing ever
+  clears it implicitly, and nothing ever deletes the `Security` row or its
+  historical data on removal.
+
+**Migration**: additive, via the established `create_schema` `additions`
+pattern -- `securities.is_tracked BOOLEAN DEFAULT 0 NOT NULL`, applied by
+`ALTER TABLE ... ADD COLUMN` only when missing, idempotent on repeat runs.
+The ORM column carries both `default=False` (Python-side) and
+`server_default="0"` (DDL-level); the first pass used only the former,
+which passed every ORM-driven test but failed
+`test_ethics_fingerprint_migration_is_additive_and_idempotent`'s raw-SQL
+`INSERT INTO securities (ticker) VALUES (...)` with a `NOT NULL` violation,
+since a Python-side default is invisible to SQL issued outside the ORM.
+`server_default` fixed it by putting a real `DEFAULT` in the generated
+DDL.
+
+**`ingest()` becomes the explicit membership action**: `IngestionService.
+ingest` gained `mark_tracked: bool = True` and sets `security.is_tracked =
+True` whenever true -- never clearing an already-tracked row back to
+`False`. Default-true is deliberate: ingesting price/fundamental data for a
+named ticker is already a deliberate act (`load_us_data.py`,
+`load_live_research.py`, and the new `manage_universe.py add` all call it
+this way), so it should count as membership without a second explicit
+step. The one exception, found during implementation rather than specified
+up front: `MacroRegimeService.refresh()` calls `ingestion.ingest()`
+directly for its 7 fixed macro-proxy tickers (rate, credit-spread, and
+volatility instruments needed only for their price history, never research
+candidates) -- under the naive "ingest always tracks" rule these would have
+been silently promoted into the live research universe on every macro
+refresh. This was a live, pre-existing symptom, not a hypothetical: those 7
+tickers were already showing up as confusing near-empty rows in the Stock
+Screener before this fix. `MacroRegimeService` now calls `ingestion.ingest
+(ticker, start, as_of, mark_tracked=False)`.
+
+**`load_universe.py` unchanged, docstring only**: it never called `ingest`
+and never set `is_tracked`; the fix simply documents that running it alone
+never adds anything to the live research universe.
+
+**Five read sites filtered to `Security.is_tracked.is_(True)`** -- the
+three named in the request, plus two more found by grep-auditing every
+`select(Security)` in the codebase, both necessary to actually deliver
+"refresh/research/dashboard -> tracked universe only" rather than just the
+final displayed numbers:
+
+- `alpha_lab.refresh.configured_universe_tickers` (drives `run_core_
+  refresh`'s `tickers=None` path)
+- `MarketScreenerService.build_live_records` (both its metadata and
+  scoring `select(Security)` calls)
+- `EthicalClassificationService.ensure_all` -- otherwise ethics
+  classification would still run, and persist a verdict, for every
+  untracked catalog row
+- `HistoricalScoringService.score_universe_as_of` -- only on its
+  `tickers=None` branch. An explicit `tickers` list (the backtester's own
+  named-CSV universe via `alpha_lab.research.universe.load_universe`, and
+  `scripts/benchmark_phase31.py`) is scored exactly as given, completely
+  independent of tracking status -- confirmed via grep that every existing
+  caller of this path already passes an explicit list, so backtest
+  behavior is unaffected.
+
+**`scripts/manage_universe.py`** (new): explicit `add`/`remove` CLI for
+research-universe membership.
+
+- `add <tickers...>`: full per-ticker bootstrap (`IngestionService.ingest`,
+  analyst consensus, technical summary or `SupplementalResearchService.
+  refresh_all`, estimates, analyst rating-change history, news snapshot --
+  each independently try/excepted for `ProviderError` so one missing data
+  domain, e.g. no analyst coverage, never blocks the rest), then a single
+  `MarketScreenerService.rebuild_current_research()` at the end covering
+  every added ticker.
+- `remove <tickers...>`: flips `is_tracked` to `False` only -- never
+  deletes the `Security` row or any historical `Price`/`Fundamental`/etc.
+  data it owns -- then rebuilds current research once. A no-op (not an
+  error) if a ticker is already untracked; reports tickers not found in
+  the catalog at all.
+
+**Backfill**: the 16 currently intended tickers (NVDA .. AACP) explicitly
+set `is_tracked = True` against the real database in a single migration
+pass; every other existing row, including every catalog row `load_universe.
+py` had already created, was left untracked.
+
+**New regression/idempotency tests** (`tests/test_universe_tracking.py`,
+15 tests): `ingest()`/`mark_tracked` semantics (new security, existing
+untracked promoted to tracked, `mark_tracked=False` on a brand-new
+security, `mark_tracked=False` never downgrades an already-tracked row);
+all five read-site filters; `manage_universe.py`'s `add_tickers`/
+`remove_tickers` loaded as a module via `importlib.util.spec_from_file_
+location` (matching `tests/test_load_us_data.py`'s established precedent
+for testing scripts directly), including partial-failure handling and
+idempotent double-removal; and migration idempotency -- a legacy raw-SQL-
+created `securities` table with no `is_tracked` column, `create_schema` run
+twice, confirming the existing row correctly defaults to `is_tracked=False`
+and the second run is a no-op.
+
+**Existing test fixtures updated, not behavior**: ~14 pre-existing tests
+across `test_refresh.py`, `test_dashboard_full_refresh_banner.py`,
+`test_ethical_pipeline_phase3.py`, `test_live_screener_safety_phase3.py`,
+and `test_phase31_hardening.py`, plus `scripts/smoke_test_phase3.py`,
+constructed `Security(...)` fixtures directly and expected them to appear
+through one of the five now-filtered read paths; each needed only
+`is_tracked=True` added to the fixture, no logic changes.
+
+**Live-validated** against a backed-up copy of the real `data/alpha_lab.
+db`: captured exact per-ticker scores/coverage before any change, applied
+the migration and the 16-ticker backfill, rebuilt current research, and
+confirmed byte-identical scores for all 16 tracked tickers. The only
+observable change in the Stock Screener was the correct disappearance of
+the 7 macro-proxy rows (already untracked catalog noise, never real
+research candidates). Re-ran `MacroRegimeService.refresh()` against the
+same database to confirm it still ingests its 7 proxies correctly without
+re-promoting them. Headless-browser screenshot of the live dashboard
+confirmed zero errors and a clean Stock Screener table. Full test suite
+green (same unrelated pre-existing `test_dependency_lock.py` failure), all
+three smoke tests unchanged in output, `git diff --check` clean.
