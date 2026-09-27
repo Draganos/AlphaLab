@@ -51,12 +51,27 @@ _DEFAULT_INGESTION_YEARS = 5
 
 
 def add_tickers(engine, settings, tickers: list[str]) -> bool:
-    """Full bootstrap for each ticker; rebuilds current research once at
-    the end. Returns False if any ticker's price/fundamental ingestion
-    (the step that actually sets `is_tracked=True`) failed -- a
-    supplemental-domain failure is reported but never fails the whole
-    ticker, mirroring every existing `refresh_*.py` script's own
-    per-domain failure isolation."""
+    """Full bootstrap for each ticker. Returns False if any ticker's
+    price/fundamental ingestion (the step that actually sets
+    `is_tracked=True`) failed -- a supplemental-domain failure is reported
+    but never fails the whole ticker, mirroring every existing
+    `refresh_*.py` script's own per-domain failure isolation.
+
+    Two passes, not one, deliberately: ingestion first for every ticker,
+    then one research rebuild, THEN the supplemental (analyst/technical/AI)
+    pass. `SupplementalResearchService.refresh_all` -- the only path that
+    computes the AI Research Rating -- needs an existing `StockResearch`
+    (`ResearchService.get_stock_research`, which reads the persisted
+    *current research* snapshot, not a live computation) to synthesize
+    from; for a ticker with no prior current-research row at all (every
+    ticker `add` is ever called for, by definition), that only starts
+    existing once `MarketScreenerService.rebuild_current_research` has run
+    at least once since ingestion. Interleaving ingest-then-supplemental
+    per ticker in one pass -- the first version of this script did that --
+    silently skipped the AI Research Rating for every ticker on its first
+    `add`, since `get_stock_research` was always still `None` at that
+    point; a repeated `add` for the same ticker would then compute it,
+    which is exactly the sign of an ordering bug now fixed here."""
     provider = YFinanceProvider()
     ingestion = IngestionService(provider, engine)
     supplemental = SupplementalResearchService(engine)
@@ -66,16 +81,25 @@ def add_tickers(engine, settings, tickers: list[str]) -> bool:
     start = end - timedelta(days=365 * _DEFAULT_INGESTION_YEARS)
 
     all_succeeded = True
+    ingested: list[str] = []
     for ticker in tickers:
-        print(f"--- {ticker} ---")
+        print(f"--- {ticker}: price/fundamentals ---")
         try:
             ingestion.ingest(ticker, start, end)
         except ProviderError as error:
-            print(f"  price/fundamentals: FAILED ({error.kind.value} - {error.reason}); not added")
+            print(f"  FAILED ({error.kind.value} - {error.reason}); not added")
             all_succeeded = False
             continue
-        print("  price/fundamentals: ok (now tracked)")
+        print("  ok (now tracked)")
+        ingested.append(ticker)
 
+    if ingested:
+        print()
+        print("Seeding base research for newly-tracked ticker(s)...")
+        MarketScreenerService(engine, settings).rebuild_current_research()
+
+    for ticker in ingested:
+        print(f"--- {ticker}: supplemental research ---")
         base_research = research_service.get_stock_research(ticker)
         if base_research is None:
             try:

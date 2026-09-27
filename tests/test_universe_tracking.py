@@ -84,6 +84,9 @@ class _FakeProvider(MarketDataProvider):
     def get_news(self, ticker):
         raise _NO_COVERAGE
 
+    def get_fund_data(self, ticker):
+        return None
+
 
 # --- IngestionService.ingest: the deliberate membership action ------------
 
@@ -227,6 +230,46 @@ def test_manage_universe_add_marks_tracked_and_rebuilds_research(monkeypatch, ma
         assert security is not None
         assert security.is_tracked is True
     assert configured_universe_tickers(engine) == ["NEWCO"]
+
+
+class _AnalystConsensusSucceedsProvider(_FakeProvider):
+    """Unlike `_FakeProvider`, analyst consensus genuinely succeeds here --
+    exercising `SupplementalResearchService.refresh_all`'s AI-Research-
+    Rating branch, which only runs when analyst consensus does not fail
+    (see that method's own docstring). Regression coverage for a real bug
+    found during review: an earlier version of `add_tickers` called
+    `ResearchService.get_stock_research` before any research rebuild had
+    ever run for a freshly-ingested ticker, so it was always `None` on a
+    ticker's first `add` -- silently routing every brand-new ticker into
+    the analyst-consensus-only branch and never computing an AI Research
+    Rating at all, no matter how the provider behaved."""
+
+    def get_analyst_consensus(self, ticker):
+        return {
+            "strong_buy": 5, "buy": 3, "hold": 1, "sell": 0, "strong_sell": 0,
+            "target_current": 100.0, "target_low": 80.0, "target_mean": 110.0,
+            "target_median": 108.0, "target_high": 130.0, "as_of": date.today(),
+        }
+
+
+def test_manage_universe_add_computes_ai_research_rating_on_first_add(monkeypatch, manage_universe):
+    """A brand-new ticker's AI Research Rating must be computed within its
+    very first `add` call, not silently deferred to a second one."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    settings = load_settings()
+    monkeypatch.setattr(
+        manage_universe, "YFinanceProvider", lambda: _AnalystConsensusSucceedsProvider()
+    )
+
+    ok = manage_universe.add_tickers(engine, settings, ["NEWCO"])
+
+    assert ok is True
+    from alpha_lab.research import ResearchService
+
+    research = ResearchService(engine, settings).get_stock_research("NEWCO")
+    assert research is not None
+    assert research.ai_research_assessment is not None
 
 
 def test_manage_universe_add_reports_failure_without_crashing(monkeypatch, manage_universe):
