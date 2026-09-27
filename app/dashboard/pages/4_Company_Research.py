@@ -15,7 +15,7 @@ from alpha_lab.calibration.sector_alignment import get_sector_tier_weights_for_t
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
-from alpha_lab.news import NewsService
+from alpha_lab.news import NewsService, classify_article
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers import YFinanceProvider
 from alpha_lab.providers.errors import ProviderError
@@ -823,10 +823,12 @@ try:
     st.subheader("News (evidence only)")
     st.caption(
         "Stored news articles for this ticker, exactly as reported — no "
-        "sentiment, no relevance score, no NewsImpact classification, and "
-        "no effect on the Alpha score, ranking, or portfolio weights. "
-        "Opening this page or changing the ticker never fetches news; only "
-        "the explicit refresh below does."
+        "sentiment, no relevance score, and no effect on the Alpha score, "
+        "ranking, or portfolio weights. \"Topics\" are deterministic "
+        "keyword tags (NewsImpact) naming what an article appears to be "
+        "about — never a sentiment, opinion, or rating. Opening this page "
+        "or changing the ticker never fetches news; only the explicit "
+        "refresh below does."
     )
     news_service = NewsService(engine)
     articles = news_service.get_history(ticker, limit=20)
@@ -843,6 +845,10 @@ try:
                     "Published": row.published_at,
                     "Title": row.title,
                     "Publisher": _dash(row.publisher),
+                    "Topics": (
+                        ", ".join(tag.category.value for tag in classify_article(row).tags)
+                        or "Unclassified"
+                    ),
                     "URL": row.url,
                     "Retrieved (UTC)": row.retrieved_at,
                 }
