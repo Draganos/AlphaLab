@@ -17,6 +17,8 @@ from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.refresh import (
     MAX_AUTO_REFRESH_TICKERS,
+    MAX_FULL_UNIVERSE_REFRESH_BATCH,
+    configured_universe_tickers,
     is_universe_price_stale,
     run_core_refresh_guarded,
     stale_universe_tickers,
@@ -234,11 +236,33 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
             f"{len(result.tickers_attempted)} ticker(s) ({len(result.tickers_failed)} failed)."
         )
     else:
-        st.success(
-            f"Ingested {len(result.tickers_succeeded)}/{len(result.tickers_attempted)} "
-            f"ticker(s) ({len(result.tickers_failed)} failed); research rebuilt for "
-            f"{result.research_record_count} securit(y/ies)."
-        )
+        _tracked_total = len(configured_universe_tickers(engine))
+        if _tracked_total > MAX_FULL_UNIVERSE_REFRESH_BATCH:
+            # See MAX_FULL_UNIVERSE_REFRESH_BATCH's own docstring: a universe
+            # this large made one click a many-hour, feedback-free operation,
+            # so run_core_refresh silently capped this call to a batch of the
+            # stalest tickers instead of the whole universe. Say so explicitly
+            # here -- otherwise "Ingested 200/200" on a 4000+-ticker universe
+            # would read as a completed refresh rather than one batch of many.
+            _remaining_stale = len(stale_universe_tickers(engine, _stale_price_days))
+            st.success(
+                f"Large universe ({_tracked_total} tracked securities) — refreshed a batch "
+                f"of {len(result.tickers_succeeded)}/{len(result.tickers_attempted)} stale "
+                f"ticker(s) ({len(result.tickers_failed)} failed); research rebuilt for "
+                f"{result.research_record_count} securit(y/ies). "
+                + (
+                    f"{_remaining_stale} still stale — click Full Refresh again to continue "
+                    "catching up."
+                    if _remaining_stale
+                    else "All tracked securities are now within the freshness window."
+                )
+            )
+        else:
+            st.success(
+                f"Ingested {len(result.tickers_succeeded)}/{len(result.tickers_attempted)} "
+                f"ticker(s) ({len(result.tickers_failed)} failed); research rebuilt for "
+                f"{result.research_record_count} securit(y/ies)."
+            )
     # Deliberately no st.rerun() here: Streamlit already runs this script
     # top-to-bottom on the click that got us here, and build_screener() is
     # called later in this SAME run (below) -- clearing its cache now is

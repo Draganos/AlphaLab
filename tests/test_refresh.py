@@ -135,6 +135,90 @@ def test_stale_data_triggers_exactly_one_ingestion_call_per_ticker(monkeypatch):
     assert result.research_rebuilt is True
 
 
+def test_run_core_refresh_batches_a_universe_larger_than_the_cap(monkeypatch):
+    """Real incident this guards against: scripts/load_universe.py can load
+    thousands of Security rows with zero price data (all instantly stale),
+    and run_core_refresh(tickers=None) used to attempt every single one in
+    one blocking call. Above MAX_FULL_UNIVERSE_REFRESH_BATCH, it must
+    instead ingest only that many of the stalest tickers -- alphabetical
+    order, matching stale_universe_tickers' own ordering -- leaving the
+    rest for a later call rather than turning one click into a many-hour
+    operation."""
+    import alpha_lab.refresh as refresh_module
+
+    monkeypatch.setattr(refresh_module, "MAX_FULL_UNIVERSE_REFRESH_BATCH", 3)
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in ["AAA", "BBB", "CCC", "DDD", "EEE"]:
+            session.add(Security(ticker=ticker, country="US", currency="USD"))
+        session.commit()
+    settings = load_settings()
+
+    fake = _FakeProvider()
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: fake)
+    monkeypatch.setattr(
+        "alpha_lab.refresh.MarketScreenerService.rebuild_current_research",
+        lambda self: [],
+    )
+
+    result = run_core_refresh(engine, settings, tickers=None)
+
+    assert result.tickers_attempted == ["AAA", "BBB", "CCC"]
+    assert fake.calls == ["AAA", "BBB", "CCC"]
+    assert result.research_rebuilt is True
+
+
+def test_repeated_calls_work_through_a_large_stale_backlog_without_double_processing(monkeypatch):
+    """Self-correcting batching, no persisted cursor: once a batch's tickers
+    are ingested they are no longer stale, so the next call's stale set
+    naturally advances to the next alphabetical group. Uses a fresh-dated
+    fake (unlike the shared _FakeProvider's fixed 2024-01-01 bar) because
+    that self-correction depends on the newly-ingested price actually being
+    recent enough to clear the staleness check -- exactly what the real
+    YFinanceProvider returns (data through `end=date.today()`)."""
+    import alpha_lab.refresh as refresh_module
+
+    class _FreshProvider(MarketDataProvider):
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def get_company_info(self, ticker):
+            return {"ticker": ticker, "company_name": f"{ticker} Inc", "country": "US", "currency": "USD"}
+
+        def get_price_history(self, ticker, start, end):
+            self.calls.append(ticker)
+            return pd.DataFrame(
+                {"close": [10.0], "adjusted_close": [10.0]}, index=pd.to_datetime([date.today()])
+            )
+
+        def get_financials(self, ticker):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(refresh_module, "MAX_FULL_UNIVERSE_REFRESH_BATCH", 3)
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in ["AAA", "BBB", "CCC", "DDD", "EEE"]:
+            session.add(Security(ticker=ticker, country="US", currency="USD"))
+        session.commit()
+    settings = load_settings()
+
+    fake = _FreshProvider()
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: fake)
+    monkeypatch.setattr(
+        "alpha_lab.refresh.MarketScreenerService.rebuild_current_research",
+        lambda self: [],
+    )
+
+    first = run_core_refresh(engine, settings, tickers=None)
+    second = run_core_refresh(engine, settings, tickers=None)
+
+    assert first.tickers_attempted == ["AAA", "BBB", "CCC"]
+    assert second.tickers_attempted == ["DDD", "EEE"]
+    assert fake.calls == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+
+
 def test_configured_universe_tickers_matches_what_rebuild_current_research_reads():
     """run_core_refresh must ingest exactly the tickers
     MarketScreenerService.build_live_records itself reads from Security --

@@ -4481,3 +4481,77 @@ overlap (e.g. "Why Marvell Stock Is Falling Today") correctly reported
 `Unclassified` rather than a guessed category. Verified live via headless
 browser on Company Research (NVDA): zero page errors, the "Topics" column
 renders every value above exactly matching the offline classification.
+
+## 47. Full Refresh button: cap a single call against a broadly-loaded universe
+
+**Real incident, reported live**: after loading a broad universe (`scripts/
+load_universe.py`'s full active NASDAQ/NYSE non-ETF directory -- its own
+`--limit` flag only bounds live metadata *enrichment*, not how many
+`Security` rows `UniverseIngestionService.load` creates, so this script
+alone can add thousands of bare `Security` rows with zero price/
+fundamental data), the main dashboard's "Full Refresh" button appeared to
+hang. It had not: `run_core_refresh(tickers=None)` -- the path both the
+manual button and `scripts/launch.py`'s launch-time check take -- always
+ingested the entire configured universe (`configured_universe_tickers`) in
+one synchronous loop, one live provider round-trip per ticker, none of it
+backgrounded or parallelized. At the tens-of-tickers scale every caller
+here was originally sized for that finishes in seconds; at ~4,600 tickers
+(reported live) it becomes a many-hour blocking operation with zero
+progress feedback -- indistinguishable from "stuck" to whoever is waiting.
+
+**Fix**: `alpha_lab.refresh.MAX_FULL_UNIVERSE_REFRESH_BATCH` (deliberately
+kept equal to the existing `MAX_AUTO_REFRESH_TICKERS` -- both bound the
+same underlying per-call cost). `run_core_refresh`'s `tickers=None` path
+now checks the configured universe's size: at or below the cap, behavior
+is byte-identical to before (ingest everything, exactly as tested and
+documented until now); above it, the call ingests only the
+`MAX_FULL_UNIVERSE_REFRESH_BATCH` *currently stalest* tickers (`stale_
+universe_tickers`' own alphabetical-by-ticker ordering) instead of the
+whole universe. An explicit `tickers=` argument (the automatic
+on-session-start trigger's own, separately-capped call) is entirely
+unaffected -- this only changes the "give me everything" path's own
+internal ceiling.
+
+**Self-correcting, no persisted cursor needed**: once a batch's tickers
+are freshly ingested they drop out of the *next* call's stale set (their
+newest `Price.date` is now recent), so repeated clicks -- or repeated
+`scripts/launch.py` runs -- naturally advance through the backlog in
+deterministic alphabetical order, never double-processing an already-fresh
+ticker, without any new state to persist or reset.
+
+**UI**: the Full Refresh button's success message now distinguishes the
+two cases. Below the cap, the message is unchanged from before this fix.
+Above it, it names the total tracked count, how many of the batch
+succeeded/failed, and either how many tickers are still stale ("click Full
+Refresh again to continue catching up") or that the universe is now fully
+fresh -- so "Ingested 200/200" on a several-thousand-ticker universe is
+never misread as a completed refresh.
+
+**Live-validated** against a copy of the real database with 600 additional
+never-ingested securities appended (623 tracked total, matching the scale
+of the reported incident): a single `run_core_refresh` call correctly
+attempted exactly 200 tickers (`FAKE0000`..`FAKE0199`, alphabetically
+first among the stale set) and left the other 400 for a subsequent call --
+confirmed via a second live call, which correctly picked up where the
+first left off.
+
+**Deliberately not fixed here** (separate, pre-existing latent instance of
+the identical risk, out of scope for this bug-check-triggered fix):
+`scripts/launch.py`'s own launch-time staleness check calls `run_core_
+refresh` the same `tickers=None` way, so it now benefits from the same cap
+automatically -- no separate change needed there. What remains unaddressed
+is `scripts/load_universe.py` itself silently loading thousands of bare
+`Security` rows with no ingestion at all in one command; that script's own
+behavior (whether `--limit` should bound the *initial* load, not just
+enrichment) is a separate design question, not this fix's job.
+
+New regression tests (`tests/test_refresh.py`): `test_run_core_refresh_
+batches_a_universe_larger_than_the_cap` (a monkeypatched cap of 3 over 5
+tracked tickers confirms only the 3 alphabetically-first are attempted)
+and `test_repeated_calls_work_through_a_large_stale_backlog_without_
+double_processing` (two successive calls correctly partition a 5-ticker
+backlog into batches of 3 then 2, using a fresh-dated fake provider so the
+first batch's tickers genuinely clear the staleness check before the
+second call runs). Full suite green (same unrelated pre-existing `test_
+dependency_lock.py` failure), all three smoke tests unchanged, `git diff
+--check` clean.
