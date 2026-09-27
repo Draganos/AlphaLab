@@ -4390,3 +4390,94 @@ above -- then restored the fix and confirmed it passes.
 **Validation:** full test suite green (same unrelated pre-existing
 `test_dependency_lock.py` failure), all three smoke tests unchanged,
 `git diff --check` clean.
+
+## 46. NewsImpact: deterministic topic tags on News articles
+
+Per the roadmap's post-#47 sequencing comment: once Price PIT correctness
+shipped (§45), the next roadmap feature is NewsImpact, the News Engine's
+(§19) first consumer -- "design how individual news items are
+deterministically related to existing research/theses/calibration,
+including missing-data and PIT semantics," explicitly **not** a score,
+conviction adjustment, ranking change, or portfolio input.
+
+**Design approved before implementation** (chat, not a GitHub comment,
+since there was no open PR yet): a pure, stateless topic-tagging layer
+over already-stored `NewsArticleRecord`s -- `alpha_lab.news.impact.
+classify_article(article) -> NewsImpact`, substring-matching `title`/
+`summary` text against small, reviewable phrase lexicons per category,
+mirroring `alpha_lab.ai.rule_based`'s existing lexicon-matching idiom
+(§36) exactly, rather than any ML/sentiment approach. Still zero code
+path into `alpha_lab.research`/`.screener`/`.strategy`/`.backtest`/
+`.portfolio`/`.ratings`/`.factors` -- covered by the existing `test_news_
+regression.py::test_no_scoring_module_imports_the_news_code` static
+import-boundary check, which already matches any `alpha_lab.news.impact`
+import the same way it matches `alpha_lab.news` itself.
+
+**Taxonomy** (`NewsImpactCategory`, 8 values, each independently boolean
+-- an article can match zero, one, or several): `EARNINGS_GUIDANCE`,
+`ANALYST_ACTION`, `CORPORATE_ACTION`, `REGULATORY_LEGAL`, `MACRO`,
+`MANAGEMENT`, `PRODUCT_STRATEGIC`, `PRICE_ACTION`. Each category
+statically names which `alpha_lab.research_stance.stance.DOMAIN_ORDER`
+domain key(s) it topically relates to (e.g. `EARNINGS_GUIDANCE ->
+fundamentals`, `ANALYST_ACTION -> analysts, revisions`) as a plain string
+label -- `alpha_lab.news.impact` does **not** import `research_stance` or
+any other evidence domain, so this adds zero new cross-module runtime
+dependency; some categories (`REGULATORY_LEGAL`, `MANAGEMENT`) correctly
+map to no existing domain at all, since AlphaLab has no dedicated
+legal-risk or management-quality domain to cross-reference.
+
+**No new persisted table, deliberately.** Classification is a pure
+function of immutable text: `NewsArticleRecord` rows are never mutated
+once written (§19), so the same article always yields the same
+`NewsImpact` -- there is nothing to version or leak across a historical
+`as_of` boundary that `retrieved_at`'s existing PIT gate doesn't already
+cover. This is the same "pure construction from already-computed objects"
+pattern `alpha_lab.research_stance.build_research_stance` (§28) uses, and
+it means NewsImpact needed no schema migration, no new refresh path, and
+no new script.
+
+**Missing-data honesty**: yfinance articles frequently have a title but no
+summary (§19's own schema caveat). `classify_article` runs on whatever
+text exists; a category with zero phrase matches is simply absent from
+`NewsImpact.tags`, and an article matching nothing at all reports
+`is_classified=False` -- a real, honest outcome, never a guessed category.
+Every `NewsImpactTag.matched_phrases` entry is a verbatim, lowercased
+substring actually found in the article's own text, never a fabricated or
+paraphrased label.
+
+**UI**: Company Research's existing "News (evidence only)" table gained a
+"Topics" column (`", ".join(tag.category.value for tag in
+classify_article(row).tags)` or `"Unclassified"`), computed on read for
+whatever articles are already displayed -- no new page, no new button, no
+new provider call. The section's caption was updated to explain topics
+are "deterministic keyword tags... never a sentiment, opinion, or
+rating," preserving the honesty framing §19 established. `research_
+stance.py` was deliberately left untouched: its own module docstring
+commits News to staying non-directional/count-only in that panel
+specifically, and folding topic tags into `StanceLine`/`outcome`/
+`conflicts` there would cross into exactly the kind of derived-judgment
+territory that module explicitly refuses for News.
+
+**Tests** (`tests/test_news_impact.py`, 9 new): each category's positive
+match, verbatim-matched-phrase invariant, per-category related-domain
+mapping (including the empty-tuple case for `REGULATORY_LEGAL`), an
+article matching multiple categories at once, an honestly-unclassified
+article, title-only classification (no summary), determinism (same input
+-> identical output), and that `NewsImpact.content_hash` always carries
+the source article's own hash. Full suite green (same unrelated
+pre-existing `test_dependency_lock.py` failure), all three smoke tests
+unchanged (NewsImpact is display-only and reads no scoring path), `git
+diff --check` clean.
+
+**Real-data validation**: ran `classify_article` against NVDA's real
+stored news (the only ticker in the live 12-security universe with
+articles) -- correct, non-fabricated topic matches throughout: "Federal
+Reserve: 1 Thing All Investors Need to Know" -> `MACRO`; "OpenAI's Sam
+Altman Says an IPO Won't Happen This Year" -> `CORPORATE_ACTION` (real
+"ipo" match); "CoreWeave's CEO Just Gave Investors Great News" ->
+`MANAGEMENT` (real "ceo" match); "Wall St falls as AI anxiety batters
+Nvidia, chipmakers" -> `PRICE_ACTION`; several headlines with no lexicon
+overlap (e.g. "Why Marvell Stock Is Falling Today") correctly reported
+`Unclassified` rather than a guessed category. Verified live via headless
+browser on Company Research (NVDA): zero page errors, the "Topics" column
+renders every value above exactly matching the offline classification.
