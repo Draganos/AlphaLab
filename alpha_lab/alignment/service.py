@@ -86,6 +86,31 @@ class AlignmentService:
         row = self.get_current(scope)
         return None if row is None else AlignmentAssessment.model_validate(row.payload)
 
+    def get_assessment_as_of(
+        self, scope: str = DEFAULT_MACRO_SCOPE, *, as_of: date
+    ) -> AlignmentAssessmentSnapshot | None:
+        """Point-in-time historical lookup: the most recent snapshot whose
+        own `as_of` is at or before the requested date -- mirrors
+        `MacroRegimeService.get_assessment_as_of` exactly, for the same
+        reason. Distinct from `refresh(as_of=...)`: that method always
+        recomputes AND overwrites `CurrentAlignmentAssessment`, even for a
+        historical `as_of` -- calling it to read a past alignment would
+        silently corrupt the live current state. This method never writes
+        anything; it only reads whatever `refresh` has already persisted to
+        `AlignmentAssessmentSnapshot`. Returns `None` if no snapshot exists
+        at or before `as_of` (alignment has never been computed that far
+        back), never a guess."""
+        with Session(self.engine) as session:
+            row = session.scalars(
+                select(AlignmentAssessmentSnapshot)
+                .where(AlignmentAssessmentSnapshot.scope == scope, AlignmentAssessmentSnapshot.as_of <= as_of)
+                .order_by(AlignmentAssessmentSnapshot.as_of.desc(), AlignmentAssessmentSnapshot.created_at.desc())
+                .limit(1)
+            ).first()
+            if row is not None:
+                session.expunge(row)
+            return row
+
     def get_history(
         self, scope: str = DEFAULT_MACRO_SCOPE, *, limit: int | None = None
     ) -> list[AlignmentAssessmentSnapshot]:
