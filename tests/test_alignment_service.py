@@ -212,3 +212,59 @@ def test_historical_as_of_uses_the_nearest_prior_snapshot_not_the_latest_overall
     later = service.refresh(as_of=date(2024, 6, 10))
     assert later.alignment == Alignment.ALIGNED.value  # now the 6/10 fearful+defensive pairing
     assert mid_period.content_hash != later.content_hash
+
+
+# --- get_assessment_as_of: a genuinely read-only historical lookup ---------
+#
+# Roadmap Phase 4/5 finding: unlike MacroRegimeService/ExternalCalibrationService,
+# refresh(as_of=...) above is NOT safe to call just to read a historical
+# alignment -- the test right above this section proves it overwrites
+# CurrentAlignmentAssessment as a side effect, even for a past as_of.
+# get_assessment_as_of exists specifically so a caller (e.g. the Research
+# State assembler) can read a historical alignment without that risk.
+
+
+def test_get_assessment_as_of_never_mutates_current_state(engine):
+    _seed(engine, macro_values=_CALM_VALUES, donatien_weights=_CONSTRUCTIVE_WEIGHTS,
+          as_of=date(2024, 6, 1), retrieved_at=datetime(2024, 6, 1, 10, 0, tzinfo=UTC))
+    service = AlignmentService(engine)
+    current = service.refresh(as_of=date(2024, 6, 1))
+
+    _seed(engine, macro_values=_FEARFUL_VALUES, donatien_weights=_DEFENSIVE_WEIGHTS,
+          as_of=date(2024, 6, 10), retrieved_at=datetime(2024, 6, 10, 10, 0, tzinfo=UTC))
+    service.refresh(as_of=date(2024, 6, 10))  # advances "current" to 6/10, as intended
+
+    # A historical read for the earlier date must return that earlier
+    # alignment...
+    historical = service.get_assessment_as_of(as_of=date(2024, 6, 1))
+    assert historical is not None
+    assert historical.as_of == date(2024, 6, 1)
+    assert historical.content_hash == current.content_hash
+
+    # ...and must never have touched CurrentAlignmentAssessment, which must
+    # still reflect the most recent real refresh (6/10), not the read above.
+    still_current = service.get_current()
+    assert still_current.as_of == date(2024, 6, 10)
+
+
+def test_get_assessment_as_of_returns_none_before_any_snapshot_exists(engine):
+    assert AlignmentService(engine).get_assessment_as_of(as_of=date(2024, 6, 1)) is None
+
+
+def test_get_assessment_as_of_selects_by_the_snapshots_own_as_of_not_by_creation_order(engine):
+    """Mirrors MacroRegimeService's own identically-named test: the earlier
+    as_of's snapshot must be selected even when it was persisted (has a
+    later created_at) strictly after the later-as_of snapshot."""
+    service = AlignmentService(engine)
+    # Later as_of, computed (created_at) FIRST.
+    _seed(engine, macro_values=_FEARFUL_VALUES, donatien_weights=_DEFENSIVE_WEIGHTS,
+          as_of=date(2024, 6, 10), retrieved_at=datetime(2024, 6, 10, 10, 0, tzinfo=UTC))
+    service.refresh(as_of=date(2024, 6, 10))
+    # Earlier as_of, computed (created_at) SECOND -- inverted backfill order.
+    _seed(engine, macro_values=_CALM_VALUES, donatien_weights=_CONSTRUCTIVE_WEIGHTS,
+          as_of=date(2024, 6, 1), retrieved_at=datetime(2024, 6, 1, 10, 0, tzinfo=UTC))
+    service.refresh(as_of=date(2024, 6, 1))
+
+    earlier = service.get_assessment_as_of(as_of=date(2024, 6, 1))
+    assert earlier.as_of == date(2024, 6, 1)
+    assert earlier.alignment == Alignment.ALIGNED.value  # calm+constructive pairing

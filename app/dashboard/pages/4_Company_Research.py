@@ -25,6 +25,7 @@ from alpha_lab.research.analyst_events import AnalystEventsService
 from alpha_lab.research.supplemental_service import SupplementalResearchService
 from alpha_lab.research.technical import IndicatorCategory
 from alpha_lab.research_stance import ResearchStance, build_research_stance
+from alpha_lab.research_state import get_research_state
 from alpha_lab.scorecard import build_ai_final_rating, build_security_screener_verdict
 
 st.set_page_config(page_title="AlphaLab Company Research", layout="wide")
@@ -769,7 +770,15 @@ try:
         st.stop()
     ticker = st.selectbox("Company", [quote.ticker for quote in quotes])
     quote = next(value for value in quotes if value.ticker == ticker)
-    research = service.get_stock_research(ticker)
+    # Roadmap Phase 5's first UI migration: reads through the canonical
+    # Research State assembler instead of calling ResearchService.get_
+    # stock_research directly -- a drop-in replacement (see ResearchState.
+    # stock_research's own docstring; today's evaluation_date path is a
+    # pure passthrough to the exact same call, so `research` below is the
+    # identical StockResearch object this page always rendered). Nothing
+    # downstream of this line changes.
+    research_state = get_research_state(engine, settings, ticker)
+    research = research_state.stock_research
     if research is None:
         st.info("No research is available for this ticker in the current build.")
         st.stop()

@@ -4851,3 +4851,190 @@ universe -- exactly the kind of gap this phase exists to surface, not
 hide). Full test suite green (same unrelated pre-existing `test_dependency_
 lock.py` failure), all three smoke tests unchanged in output, `git diff
 --check` clean.
+
+## 50. Canonical Research State: a per-security assembler over every evidence domain
+
+**Roadmap Phase 5**, following the approved Phase 4 design (amended in
+review to require `provenance_id` and a locked availability/freshness
+separation) and its explicit 8-point implementation gate. `get_research_
+state(engine, settings, ticker, evaluation_date=None) -> ResearchState` is
+the one function a consumer -- the dashboard, Company Research, a future
+AI Research step, a future agent -- calls instead of independently
+reconstructing `StockResearch` + News + Macro + Donatien + Alignment +
+Ethics + a deterministic score from its own page-specific code. Pages are
+views; this is what they read from. Pure assembler (`alpha_lab/research_
+state.py`), no new persisted table, mirroring `alpha_lab.evidence_coverage.
+build_security_coverage_summary`'s own existing pattern exactly, just
+widened to every evidence domain the roadmap's field list named.
+
+**Gate 1 -- `AlignmentService.get_assessment_as_of` added as a pure read.**
+A real, confirmed gap from the design review: `MacroRegimeService.get_
+assessment_as_of`/`ExternalCalibrationService.get_calibration_as_of` are
+both genuinely read-only PIT lookups, but `AlignmentService`'s only
+`as_of`-aware method, `refresh(as_of=...)`, **always overwrites
+`CurrentAlignmentAssessment`, even for a historical `as_of`** -- confirmed
+by an existing test in `tests/test_alignment_service.py`
+(`test_historical_as_of_uses_the_nearest_prior_snapshot_not_the_latest_
+overall`) whose own body calls `refresh(as_of=...)` twice for two
+different dates and asserts "current" reflects whichever was called
+*last*, not whichever `as_of` is more recent -- exactly the mutation risk
+this gate exists to close. Added `get_assessment_as_of` mirroring Macro's
+identical query shape (most recent `AlignmentAssessmentSnapshot` whose own
+`as_of` is at or before the requested date), with 3 new tests: selection
+by the snapshot's own `as_of` (not creation order, mirroring Macro's own
+test), `None` before any snapshot exists, and -- the one that actually
+proves the fix -- `test_get_assessment_as_of_never_mutates_current_state`,
+which refreshes to a later date, reads the earlier date via the new
+method, and asserts `CurrentAlignmentAssessment` still reflects the later
+refresh untouched.
+
+**Gate 2 -- `ResearchField` keeps status/observed_at/provenance_id
+independent**, locked into the contract per the design review:
+
+```python
+class ResearchField(BaseModel):
+    value: Any = None
+    source: str | None = None
+    observed_at: str | None = None   # freshness -- independent of status
+    status: str                       # availability -- independent of observed_at
+    provenance_id: str | None = None  # addressable, reproducible identity
+    detail: str | None = None
+```
+
+`status` reuses `alpha_lab.evidence_coverage.CoverageStatus`'s vocabulary
+(FULL/PARTIAL/NO_EVIDENCE/NOT_COMPUTED/NOT_APPLICABLE). A field can be
+FULL and stale (available, `observed_at` old) or NOT_COMPUTED regardless
+of any freshness question -- the two are never collapsed into one derived
+figure. `provenance_id`: the domain's own persisted snapshot/row id where
+the read path already returns one (Macro/Donatien/Alignment's own
+`snapshot_id`, Ethics' row `id`, `AIResearchAnalysis`'s row `id`) --
+otherwise a deterministic sha256 over the field's own serialized value,
+the same canonical-json-hash idiom already established three times in
+this codebase (Donatien/Macro/Alignment snapshot identity, §49's
+`version_id`). Distinct from `ResearchState.research_refresh_version_id`
+(§49's whole-tracked-universe refresh-cycle stamp): `provenance_id` is the
+addressable handle for *this one field's own evidence*, the level a
+future AI/agent step (roadmap Phase 6+) needs to cite exactly what it
+computed against.
+
+**Gate 3/4 -- assembler only, zero network calls, zero writes.** No new
+persisted table. Every field is a direct reference to an already-
+persisted domain object or a thin read through an already-existing (or,
+for Alignment/Ethics, newly-added this phase) PIT-safe getter. Verified by
+two tests: one monkeypatches `YFinanceProvider`/`DonatienProvider` to
+raise if ever constructed (never triggered), the other snapshots every
+table's row count before and after two `get_research_state` calls
+(including a historical one) and asserts zero rows changed anywhere.
+
+**Gate 5 -- historical `evaluation_date` never mutates current state.**
+Two dedicated tests (`test_historical_evaluation_date_never_mutates_
+current_alignment`/`..._ethics`) refresh to a later date, then call
+`get_research_state` for an earlier date, then assert `AlignmentService.
+get_current()`/`EthicalClassificationService.get_evaluation_as_of(...,
+as_of=today)` still reflect the later, unmutated state -- re-confirmed
+live against the real database (`AlignmentService.get_current().as_of`
+unchanged after a 30-days-ago `get_research_state` call).
+
+**A second, smaller gap closed the same way**: `EthicalClassificationService`
+had the identical problem as Alignment -- `ensure_security` is a write-
+triggering method (persists a new decision when evidence/policy changed),
+never safe to call merely to read a historical ethical status. Added
+`get_evaluation_as_of(ticker, as_of)`, a pure read filtered on
+`evaluated_at <= end_of(as_of)` mirroring `ExternalCalibrationService.
+get_calibration_as_of`'s own upper-bound idiom exactly.
+
+**The `StockResearch` two-path split -- a deliberate, documented exception
+to "one PIT-safe path."** `AlignmentService.refresh`'s own docstring
+establishes "use one PIT-safe code path unconditionally, even for today,
+never a separate current shortcut" -- but `StockResearch`'s historical
+state is not cheaply recomputable on demand the way Alignment's is; it
+depends on a `ResearchSnapshot` having actually been taken (`alpha_lab.
+research.snapshots.ResearchSnapshotRepository`, the existing Historical
+Research Reconstruction mechanism). Confirmed against the real database:
+of the 16 tracked tickers, AACP has **no** `ResearchSnapshot` at all,
+despite having live current research -- a real, common case (a ticker
+added but never explicitly refreshed via `scripts/manage_universe.py add`/
+the Company Research "Refresh for this ticker" button), not a hypothetical
+edge case. So `fundamentals`/`analyst_activity`/`technicals`/`ai_rating`
+use two paths: `evaluation_date >= today` -> `ResearchService.get_stock_
+research` (the live path, guaranteed to exist for any tracked ticker with
+a current-research build); a genuinely past date -> `ResearchSnapshot
+Repository.get_latest_as_of` (PIT-safe, honestly `None`/`NOT_COMPUTED`
+when nothing was ever snapshotted that far back -- confirmed live: a
+30-days-ago NVDA query returns `NOT_COMPUTED` for every snapshot-backed
+domain, since this whole research-state versioning system is only weeks
+old and no snapshot goes back that far yet; a 10-days-ago query correctly
+finds real historical macro data).
+
+**Gate 7 -- first UI migration, one page, before/after comparison.**
+`app/dashboard/pages/4_Company_Research.py`'s one call to `ResearchService.
+get_stock_research(ticker)` now reads `get_research_state(engine, settings,
+ticker).stock_research` instead -- nothing else on the 1,149-line page
+changes; it still receives the identical `StockResearch` object,
+untouched, for every line of rendering below that call. This required
+adding `ResearchState.stock_research: StockResearch | None` -- the exact
+object the four decomposed fields above were derived from, exposed
+directly so an existing consumer can swap in without losing any of that
+object's structure (the decomposed fields alone would have lost
+`overall_score`/`strengths`/`weaknesses`/`confidence_breakdown`/etc., which
+this 1,149-line page uses extensively). Verified as a true drop-in
+replacement by a dedicated test asserting `state.stock_research.model_
+dump(exclude={"generated_at"})` equals a direct `get_stock_research()`
+call's own output field-for-field (`generated_at` is a fresh wall-clock
+stamp on every independent read, not stored state, so excluded from the
+comparison -- confirmed that's the *only* field that ever differs between
+two calls a fraction of a second apart). Live-validated: headless-browser
+screenshot of the migrated Company Research page (AACP) renders every
+section correctly -- Overall Score/Coverage/Confidence, Analyst Consensus,
+Technical Summary, AI Research Rating ("Not yet computed for this ticker"
+-- honest), Research Stance table -- with zero page errors.
+
+**Gate 8 -- AI not wired in.** Nothing here calls or gates any AI/scoring
+path; `ai_research`/`ai_rating` are read-only fields like every other
+domain, and `conflicts` is reserved (always `None`) for roadmap Phase 8,
+never a fabricated placeholder score.
+
+**Full field-by-field mapping** (roadmap's conceptual list -> existing
+source -> this phase's read):
+
+| Field | Source | Read |
+|---|---|---|
+| `fundamentals` | `StockResearch.categories` | live or snapshot (see above) |
+| `analyst_activity` | `StockResearch.analyst_consensus` + `.analyst_research` | live or snapshot |
+| `technicals` | `StockResearch.technical_summary` | live or snapshot |
+| `news` | `NewsService.get_history(ticker, as_of=...)` | already PIT-safe |
+| `news_impact` | `alpha_lab.news.impact.classify_article` per article | pure function |
+| `macro` | `MacroRegimeService.get_assessment_as_of` | already PIT-safe |
+| `donatien` | `ExternalCalibrationService.get_calibration_as_of` | already PIT-safe |
+| `donatien_alignment` | `AlignmentService.get_assessment_as_of` | **new this phase** |
+| `ethics` | `EthicalClassificationService.get_evaluation_as_of` | **new this phase** |
+| `deterministic_score` | `HistoricalScoringService.score_universe_as_of(tickers=[ticker])` | already PIT-safe |
+| `ai_research` | `AIResearchAnalysis`, queried inline with a `evaluated_at`-style PIT upper bound | new inline query (no dedicated service exists for this table; matches `screener/service.py`'s own existing direct-query idiom for it) |
+| `ai_rating` | `StockResearch.ai_research_assessment` | live or snapshot |
+| `coverage` | `alpha_lab.evidence_coverage.build_security_coverage_summary`, reused directly | already exists |
+| `conflicts` | -- | reserved for Phase 8, always `None` |
+
+**New tests** (`tests/test_research_state.py`, 12; `tests/test_alignment_
+service.py`, +3): every gate above has a dedicated test, plus: missing
+domains honestly report `NOT_COMPUTED` with no fabricated value (except
+Ethics, which `EthicalClassificationService.ensure_all` auto-classifies as
+a side effect of every `rebuild_current_research` call -- a real,
+documented exception, not an oversight); populated domains carry a real
+`provenance_id`, reproducible across repeated assembly of unchanged
+evidence; Macro's `provenance_id` is verified to be the domain's own real
+`snapshot_id`, not a locally re-derived hash; `ai_research` respects its
+PIT upper bound (a document dated 5 days ago is invisible to a 10-days-ago
+query, visible to today's).
+
+**Live-validated** against the real database: `get_research_state(engine,
+settings, 'NVDA')` populated all 12 fields with real values in a single
+call; AACP (no snapshot) correctly showed live fundamentals but honestly
+`NOT_COMPUTED` AI rating; a 30-days-ago historical query correctly
+returned `NOT_COMPUTED` everywhere (no evidence exists that far back yet)
+while a 10-days-ago query correctly found real historical macro data;
+`ResearchState` round-trips cleanly through `model_dump(mode="json")` +
+`model_validate_json` (proving the dataclass-derived `deterministic_score`
+field, which carries a raw `date` inside an `Any`-typed value, still
+serializes correctly). Full test suite green (same unrelated pre-existing
+`test_dependency_lock.py` failure), all three smoke tests unchanged in
+output, `git diff --check` clean.
