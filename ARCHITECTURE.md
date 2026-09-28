@@ -4702,3 +4702,152 @@ re-promoting them. Headless-browser screenshot of the live dashboard
 confirmed zero errors and a clean Stock Screener table. Full test suite
 green (same unrelated pre-existing `test_dependency_lock.py` failure), all
 three smoke tests unchanged in output, `git diff --check` clean.
+
+## 49. Research Refresh Orchestrator: a versioned research-state stamp
+
+**Roadmap Phase 3**, the successor to #52's universe-tracking model.
+Design context: #52 formalized *who* is in the live research universe
+(`Security.is_tracked`). This phase formalizes *what AlphaLab currently
+knows about them and how fresh it is* -- the first two steps of the
+target architecture's `refresh orchestrator -> establish research state
+-> [future] AI may consume only an explicit research-state version` flow.
+Phase 4 (canonical Research State assembler) and Phase 6 (AI Research
+consuming that state) build on what this phase establishes; this phase
+does not itself touch AI Research or scoring.
+
+**The scoping decision, made explicit before implementation**: only
+**core** (price/fundamentals) has an established staleness policy today
+(`config/default.yaml`'s `stale_price_days`), auto-refreshed on launch/
+the dashboard's own triggers. Every other evidence domain -- Analyst
+Consensus/Technical/AI Research Rating, Analyst History, Revisions, News,
+Macro Regime, Donatien External Calibration, Alignment -- has **no**
+staleness policy anywhere in the codebase; each is refreshed only by a
+human running its own standalone `scripts/refresh_*.py` script, whenever
+they choose. Inventing arbitrary freshness windows for eight domains that
+have never had one would be pure guesswork. So this phase does not
+auto-refresh any of them. Instead, the orchestrator adds a **read-only,
+pure-DB-read cross-domain coverage/freshness status** across the tracked
+universe for all of them, stamped with a stable, deterministic
+`version_id` -- honest visibility into what's actually known and how
+stale it might be, without pretending to define policy nobody has set.
+Future phases can register an actual auto-refresh policy for any given
+domain without redesigning this module; none is registered yet.
+
+**Reuse, not a second coverage engine**: the cross-domain read is built
+entirely from `alpha_lab.evidence_coverage` (PR #28) -- the exact same
+`build_security_coverage_summary`/`flatten_coverage_rows` read-model the
+Evidence & Coverage Dashboard page already renders, aggregated across the
+tracked universe (mean coverage, freshest observation, rolled-up status
+per category) rather than a parallel implementation. Only two domains
+needed new code at all: Donatien External Calibration and Alignment,
+which `alpha_lab.evidence_coverage` deliberately excludes (both are
+`EXTERNAL_CALIBRATION`, never scoring inputs) -- these read directly from
+`ExternalCalibrationService.get_current()`/`AlignmentService.get_current()`,
+two more pure DB reads.
+
+**Core stays byte-identical**: `run_core_refresh` is called completely
+unchanged -- same function, same tests. Critically, the orchestrator
+reproduces the *existing* cost profile exactly rather than always calling
+it: `_maybe_refresh_core` only calls `run_core_refresh` when an explicit
+`tickers` subset is given (the dashboard's own auto-trigger, which
+already computed its stale subset), or `force_core=True` (the manual Full
+Refresh button, unconditional as before), or `is_universe_price_stale`
+says so (the launch-time check, gated as before). A first draft of this
+module called `run_core_refresh` unconditionally on every orchestrator
+run -- caught in self-review before any test was written: that would have
+silently turned every launch into a full network refresh regardless of
+staleness, exactly the "download everything every launch" anti-pattern
+this whole roadmap explicitly rejects. Fixed by giving `_maybe_refresh_core`
+the identical three-way branch `launch.py`/the dashboard/the Full Refresh
+button already used, now centralized in one place instead of duplicated
+across three call sites.
+
+**Versioning**: `version_id` is a deterministic sha256 over the evaluation
+date, the core refresh outcome, and every domain's aggregated coverage/
+status/freshness -- the exact idempotency idiom
+`ExternalCalibrationService.refresh` already established for Donatien,
+reused rather than reinvented. Persisted as `current_research_refresh_
+status` (one upserted row) + `research_refresh_status_snapshots`
+(immutable, append-only, deduped by `version_id`) -- the same current+
+history pattern as `CurrentExternalCalibration`/`ExternalCalibrationSnapshot`.
+Re-running with genuinely unchanged evidence is idempotent: the current
+row's `computed_at` advances, no duplicate snapshot is written.
+
+**Self-caught bugs during review, before any test existed**:
+
+1. The unconditional-core-refresh bug above (§ own paragraph).
+2. **A real, confirmed monkeypatch-leak bug**: an early version imported
+   `run_core_refresh`/`is_universe_price_stale` via `from alpha_lab.refresh
+   import ...` -- a name captured once at this module's first import.
+   `tests/test_refresh.py` monkeypatches `alpha_lab.refresh.run_core_
+   refresh` itself by string path (to assert it's never called on a
+   normal Streamlit rerun); that only patches the attribute on the
+   `alpha_lab.refresh` module object, which a statically-captured name
+   elsewhere never sees -- and since this module's first-ever import
+   happened to occur *while* that exact test's patch was active (triggered
+   by `test_refresh.py`'s own `test_importing_the_dashboard_normally_
+   never_calls_core_refresh` importing `app/dashboard/main.py`, which now
+   imports this module for the first time), this module's `run_core_refresh`
+   name got permanently bound to that test's exploding stub for the rest
+   of the pytest process -- silently breaking three unrelated tests in
+   `tests/test_dashboard_full_refresh_banner.py` whenever the full suite
+   ran (never when run in isolation, which is exactly what made it easy to
+   miss). Confirmed by bisecting exactly which test-file combination
+   reproduced it, then confirming the combination passed cleanly on `main`
+   before this phase existed. Fixed by calling `alpha_lab.refresh` via a
+   module reference (`import alpha_lab.refresh as refresh`, then
+   `refresh.run_core_refresh(...)`) instead of a captured name, so every
+   call sees whatever `alpha_lab.refresh.run_core_refresh` currently is,
+   patched or not, with no leak either way. `tests/test_launch.py`'s own
+   monkeypatches were updated to target `alpha_lab.refresh.X` by string
+   path too, matching the same established idiom the other test files
+   already used.
+3. **A missed re-fetch after an `IntegrityError` rollback**: the
+   `_persist` method's concurrent-write recovery (mirroring
+   `ExternalCalibrationService.refresh`'s own identical race handling)
+   initially omitted that method's own re-fetch of `existing` after
+   `session.rollback()` -- rollback expires every object the session was
+   tracking, so reusing the pre-rollback reference risked acting on stale
+   state. Caught by re-reading the method being mirrored side-by-side with
+   the new code, not by a failing test (this race is untested in the
+   original Donatien code too, for the same reason: it requires genuine
+   concurrent writes to trigger). Fixed by adding the identical re-fetch.
+
+**New tests** (`tests/test_research_refresh.py`, 17 tests): core skip/
+refresh/force/explicit-tickers semantics, the monkeypatch-leak regression
+above (asserts a string-path patch of `alpha_lab.refresh.run_core_refresh`
+is honored), tracked-universe-only scoping (an untracked catalog row never
+inflates a domain's coverage denominator), Analyst Consensus/News/Donatien
+domain rows reflecting real stored evidence, idempotency (repeated runs:
+same `version_id`, one snapshot row) and change detection (new evidence:
+new `version_id`, a second snapshot row), an empty tracked universe never
+crashing, `get_current_research_refresh_status`'s None-before-any-run and
+roundtrip cases, and the concurrency guard (identical shape to
+`run_core_refresh_guarded`'s own two tests, mirrored exactly).
+
+**`scripts/launch.py`/`app/dashboard/main.py` rewired**: both call sites
+that used to call `run_core_refresh`/`run_core_refresh_guarded` directly
+now go through `ResearchRefreshOrchestrator`/`run_research_refresh_guarded`
+instead -- `launch.py` unconditionally (core refresh-if-stale, exactly as
+before), the dashboard's auto-trigger passing its own pre-computed stale
+`tickers` subset (exactly as before), and the Full Refresh button passing
+`force_core=True` (exactly as before). A new read-only "Research state"
+expander renders `get_current_research_refresh_status`'s output as a
+table -- `version_id`, evaluation date, and every domain's status/
+coverage/freshness/detail -- directly below the Full Refresh button,
+never triggering a refresh itself.
+
+**Live-validated** against the real `data/alpha_lab.db` (backed up
+first): ran the orchestrator directly, confirmed `core.skipped=True`
+(prices were already fresh) and all 16 tracked tickers' scores byte-
+identical to before the run; confirmed `prices`/`fundamentals`/
+`securities` row counts completely unchanged while the two new tables
+were created with exactly one row each; ran it a second time and confirmed
+idempotency (same `version_id`, still exactly one snapshot row). Headless-
+browser screenshot of the live dashboard confirmed the new "Research
+state" expander renders correctly with real, honest per-domain numbers
+(e.g. AI Research Rating showing only 19% coverage across the tracked
+universe -- exactly the kind of gap this phase exists to surface, not
+hide). Full test suite green (same unrelated pre-existing `test_dependency_
+lock.py` failure), all three smoke tests unchanged in output, `git diff
+--check` clean.

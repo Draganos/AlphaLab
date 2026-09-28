@@ -788,3 +788,55 @@ class CurrentAIResearchAssessment(Base):
     computed_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )
+
+
+class CurrentResearchRefreshStatus(Base):
+    """Current (not historical) Research Refresh Status -- one row per
+    `scope` (today: a single "default" singleton, mirroring
+    `CurrentMacroAssessment`'s `scope` shape). This is the versioned
+    "research state" stamp `alpha_lab.research_refresh.ResearchRefreshOrchestrator`
+    establishes on every orchestrated refresh (launch, the dashboard's
+    auto-trigger, or the Full Refresh button): what the tracked universe's
+    evidence looked like -- per-domain coverage/freshness, core refresh
+    outcome -- at one specific moment, identified by `version_id`.
+
+    Upserted only by the orchestrator; never written by a read path. Purely
+    additive to the existing research pipeline: nothing here feeds
+    `alpha_lab.research`/`.screener`/`.strategy`/`.backtest` scoring --
+    this is evidence-about-the-evidence, the same role Donatien/Macro
+    Regime/Alignment already play for their own domains. A future AI
+    Research/Rating consumer (roadmap Phase 6) cites `version_id` as the
+    exact research state it computed against; this table does not itself
+    gate or call any AI/scoring path.
+    """
+
+    __tablename__ = "current_research_refresh_status"
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True)
+    version_id: Mapped[str] = mapped_column(String(64), index=True)
+    evaluation_date: Mapped[date] = mapped_column(Date)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+
+class ResearchRefreshStatusSnapshot(Base):
+    """Immutable, append-only historical Research Refresh Status
+    observation. Mirrors `ExternalCalibrationSnapshot`'s identity/hash
+    pattern exactly: `version_id` is a deterministic sha256 of the
+    orchestrator's assembled status payload (evaluation date, core
+    refresh outcome, per-domain coverage/freshness rows), so re-running
+    the orchestrator when nothing has actually changed is idempotent --
+    it updates `current_research_refresh_status`'s `computed_at` but
+    never inserts a duplicate historical row.
+    """
+
+    __tablename__ = "research_refresh_status_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    version_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(32), index=True)
+    evaluation_date: Mapped[date] = mapped_column(Date, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )

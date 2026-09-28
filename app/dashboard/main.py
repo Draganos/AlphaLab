@@ -18,11 +18,10 @@ from alpha_lab.data_quality import assess_freshness
 from alpha_lab.refresh import (
     MAX_AUTO_REFRESH_TICKERS,
     MAX_FULL_UNIVERSE_REFRESH_BATCH,
-    configured_universe_tickers,
     is_universe_price_stale,
-    run_core_refresh_guarded,
     stale_universe_tickers,
 )
+from alpha_lab.research_refresh import get_current_research_refresh_status, run_research_refresh_guarded
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.search import ScreenCriteria, ScreenRecord, apply_screen
 
@@ -179,28 +178,30 @@ if not st.session_state.get("auto_stale_refresh_attempted"):
             f"(price/fundamental data), then rebuilding research..."
         ):
             try:
-                _auto_result = run_core_refresh_guarded(
+                _auto_status = run_research_refresh_guarded(
                     engine, settings, st.session_state, tickers=_stale_tickers
                 )
             except Exception as _auto_error:  # noqa: BLE001 -- mirrors the Full Refresh
                 # button's own handling below: never let an unexpected automatic-
                 # refresh failure take the whole page down; existing research is
-                # unaffected either way (run_core_refresh never corrupts it).
+                # unaffected either way (the orchestrator's core refresh step
+                # never corrupts it).
                 st.warning(
                     f"Automatic refresh of stale data failed unexpectedly "
                     f"({_auto_error}); showing existing data."
                 )
             else:
-                if _auto_result is not None and _auto_result.ok:
+                if _auto_status is not None and _auto_status.core.research_error is None:
                     st.caption(
-                        f"Automatically refreshed {len(_auto_result.tickers_succeeded)}/"
-                        f"{len(_auto_result.tickers_attempted)} stale ticker(s) on session start."
+                        f"Automatically refreshed {_auto_status.core.tickers_succeeded}/"
+                        f"{_auto_status.core.tickers_attempted} stale ticker(s) on session start "
+                        f"(research state version {_auto_status.version_id[:12]})."
                     )
                     build_screener.clear()
-                elif _auto_result is not None and not _auto_result.ok:
+                elif _auto_status is not None and _auto_status.core.research_error is not None:
                     st.warning(
                         f"Automatic refresh of stale data failed "
-                        f"({_auto_result.research_error}); showing existing data."
+                        f"({_auto_status.core.research_error}); showing existing data."
                     )
 
 _render_staleness_banner()
@@ -212,31 +213,32 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
     # synchronous and atomic rather than kicking off background work.
     with st.spinner("Refreshing core data — price/fundamental ingestion, then research rebuild..."):
         try:
-            result = run_core_refresh_guarded(engine, settings, st.session_state)
-        except Exception as error:  # noqa: BLE001 -- run_core_refresh_guarded only
+            status = run_research_refresh_guarded(engine, settings, st.session_state, force_core=True)
+        except Exception as error:  # noqa: BLE001 -- run_research_refresh_guarded only
             # guarantees a per-ticker provider failure or a rebuild failure land on
-            # the returned CoreRefreshResult, never raised; an infrastructure-level
-            # failure outside those paths is deliberately left to propagate (see
-            # alpha_lab.refresh's module docstring). This button's own job is to
-            # never take the whole page down for that, so it's caught here and
+            # the returned status, never raised; an infrastructure-level failure
+            # outside those paths is deliberately left to propagate (see
+            # alpha_lab.research_refresh's module docstring). This button's own job
+            # is to never take the whole page down for that, so it's caught here and
             # shown the same way any other refresh failure is -- existing research
-            # is unaffected either way (run_core_refresh never corrupts it).
+            # is unaffected either way (the orchestrator's core refresh step never
+            # corrupts it).
             unexpected_error = str(error)
-            result = None
+            status = None
         else:
             unexpected_error = None
     if unexpected_error is not None:
         st.error(f"Full Refresh failed unexpectedly ({unexpected_error}); existing research is unchanged.")
-    elif result is None:
+    elif status is None:
         st.warning("A refresh is already in progress for this session.")
-    elif not result.ok:
+    elif status.core.research_error is not None:
         st.error(
-            f"Research rebuild failed ({result.research_error}); existing "
-            f"research is unchanged. Ingested {len(result.tickers_succeeded)}/"
-            f"{len(result.tickers_attempted)} ticker(s) ({len(result.tickers_failed)} failed)."
+            f"Research rebuild failed ({status.core.research_error}); existing "
+            f"research is unchanged. Ingested {status.core.tickers_succeeded}/"
+            f"{status.core.tickers_attempted} ticker(s) ({status.core.tickers_failed} failed)."
         )
     else:
-        _tracked_total = len(configured_universe_tickers(engine))
+        _tracked_total = status.tracked_universe_size
         if _tracked_total > MAX_FULL_UNIVERSE_REFRESH_BATCH:
             # See MAX_FULL_UNIVERSE_REFRESH_BATCH's own docstring: a universe
             # this large made one click a many-hour, feedback-free operation,
@@ -247,9 +249,10 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
             _remaining_stale = len(stale_universe_tickers(engine, _stale_price_days))
             st.success(
                 f"Large universe ({_tracked_total} tracked securities) — refreshed a batch "
-                f"of {len(result.tickers_succeeded)}/{len(result.tickers_attempted)} stale "
-                f"ticker(s) ({len(result.tickers_failed)} failed); research rebuilt for "
-                f"{result.research_record_count} securit(y/ies). "
+                f"of {status.core.tickers_succeeded}/{status.core.tickers_attempted} stale "
+                f"ticker(s) ({status.core.tickers_failed} failed); research rebuilt for "
+                f"{status.core.research_record_count} securit(y/ies). Research state "
+                f"version {status.version_id[:12]}. "
                 + (
                     f"{_remaining_stale} still stale — click Full Refresh again to continue "
                     "catching up."
@@ -259,9 +262,10 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
             )
         else:
             st.success(
-                f"Ingested {len(result.tickers_succeeded)}/{len(result.tickers_attempted)} "
-                f"ticker(s) ({len(result.tickers_failed)} failed); research rebuilt for "
-                f"{result.research_record_count} securit(y/ies)."
+                f"Ingested {status.core.tickers_succeeded}/{status.core.tickers_attempted} "
+                f"ticker(s) ({status.core.tickers_failed} failed); research rebuilt for "
+                f"{status.core.research_record_count} securit(y/ies). "
+                f"Research state version {status.version_id[:12]}."
             )
     # Deliberately no st.rerun() here: Streamlit already runs this script
     # top-to-bottom on the click that got us here, and build_screener() is
@@ -273,6 +277,34 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
     # could read it.
     build_screener.clear()
     _render_staleness_banner()
+
+_current_research_status = get_current_research_refresh_status(engine)
+if _current_research_status is not None:
+    with st.expander(
+        f"Research state: version {_current_research_status.version_id[:12]} -- "
+        f"{_current_research_status.tracked_universe_size} tracked securit(y/ies), "
+        f"evaluated {_current_research_status.evaluation_date}"
+    ):
+        st.caption(
+            "Read-only, pure-DB snapshot of what AlphaLab currently knows per evidence "
+            "domain across the tracked universe -- never triggers a refresh itself. See "
+            "alpha_lab.research_refresh's own module docstring."
+        )
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Domain": domain.label,
+                    "Scope": domain.scope,
+                    "Status": domain.status,
+                    "Coverage": f"{domain.coverage:.0%}" if domain.coverage is not None else "—",
+                    "Freshness": domain.freshness or "—",
+                    "Detail": domain.detail or "—",
+                }
+                for domain in _current_research_status.domains
+            ]),
+            hide_index=True,
+            use_container_width=True,
+        )
 
 st.header("Stock Screener")
 screen = build_screener()
