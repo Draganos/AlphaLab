@@ -698,6 +698,7 @@ _ETF_NOT_APPLICABLE = frozenset(
         "valuation",
         "analyst_revisions",
         "shareholder_return",
+        "ai_research",
     }
 )
 
@@ -771,15 +772,16 @@ def test_genuine_evidence_in_a_not_applicable_category_is_never_suppressed():
 
 def test_category_breadth_excludes_not_applicable_categories_for_etf():
     """The confidence factor category_breadth must average only over
-    applicable categories for an ETF -- diluting it with six categories
+    applicable categories for an ETF -- diluting it with seven categories
     that can never be filled would unfairly cap ETF confidence."""
     category_coverage = {name: 0.0 for name in CATEGORY_ORDER}
     category_coverage["momentum"] = 1.0
     research = build_stock_research(_etf_record(category_coverage=category_coverage))
-    # Only momentum and ai_research remain applicable for an ETF; momentum
-    # is fully covered and ai_research is not, so the mean is 0.5 -- not
-    # 1.0/8 = 0.125 as an applicability-blind average would compute.
-    assert research.confidence_breakdown.category_breadth == pytest.approx(0.5)
+    # Only momentum remains applicable for an ETF (ai_research is SEC-filing
+    # commentary, structurally inapplicable to a fund) and it is fully
+    # covered, so the mean is 1.0 -- not 1.0/8 = 0.125 as an
+    # applicability-blind average would compute.
+    assert research.confidence_breakdown.category_breadth == pytest.approx(1.0)
 
 
 def test_category_breadth_for_equity_is_unaffected_by_this_pr():

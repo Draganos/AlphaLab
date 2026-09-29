@@ -5283,3 +5283,71 @@ read-only behavior.
 identified by `(protocol_version, methodology key)`, so append-only storage
 can be added later without changing the protocol); no scoring/ranking/
 backtest integration; no change to `ai_rating.py` thresholds.
+
+## 53. Coverage-gap fixes: why MSFT/GDX (and most of the tracked universe) looked incomplete
+
+Triggered by "why do MSFT/GDX still show incomplete data". A read-only audit
+of all 16 tracked securities against the live database found the gaps were
+not one-offs but four independent workflow/classification defects, each
+affecting many securities:
+
+1. **`manage_universe.py add` never fetched the EPS revision trend** -- it
+   fetched estimates and rating changes and printed "supplemental research:
+   ok", and its docstring claimed it replaced every standalone
+   `refresh_*.py`, but `EstimateRevisionTrend` was never requested. Every
+   ticker added that way (MSFT, AAPL, AMZN, COST, GOOGL, JPM, META, AACP)
+   had 0 revision-trend rows; only NVDA/MA/AAL (loaded earlier via the
+   standalone script) had any. The provider returns this instantly (no
+   history accumulation needed). Fix: `add` now calls
+   `AnalystEventsService.refresh_all` (rating changes + revision trend, each
+   reported and failure-isolated) instead of duplicating half of it.
+2. **SEC filings were never ingested by any automatic path** -- documents
+   (the sole input to AI Research) came only from a manual script needing
+   explicit tickers and an env var, so only the 3 original tickers had any
+   (380/439/1063 documents; every other equity had 0 and a permanently 0%
+   AI Research category). Fix: `add` ingests filings for equities before its
+   research rebuild (which is what turns documents into an
+   `AIResearchAnalysis`); when `ALPHALAB_SEC_USER_AGENT` is unset it now says
+   so explicitly instead of silently skipping; ETFs are reported as not
+   applicable. `refresh_company_documents.py` now defaults to
+   `alpha_lab.refresh.filing_eligible_tickers` (tracked non-ETFs) so the
+   backfill is one command.
+3. **ETF `ai_research` was permanently counted as missing** -- document-
+   commentary AI over 10-K/10-Q text can never exist for a fund, but
+   `ai_research` had been left "applicable" to ETFs (§ PR #29 reasoned it was
+   independently gated). Every ETF (FTEC/GDX/QQQ/SPY/VT) therefore showed a
+   permanent gap indistinguishable from a real ingestion gap on an equity.
+   Now `NOT_APPLICABLE` for `ETF` (equities/`OTHER` unchanged -- an equity
+   with no filings ingested is a genuine gap). Verified against the real
+   data (disposable copy, full rebuild): `overall_score` is byte-identical
+   for every ticker checked (the score uses the unfiltered weights over
+   available categories only); only ETF coverage/confidence move (coverage
+   0.60 -> 1.00, confidence 8.0 -> 10.0). **Known consequence, not hidden:**
+   the only category still applicable to an ETF is `momentum`, so an ETF
+   with full momentum now reads 100% coverage from that one category; a
+   fund's real evidence lives in the separate Fund Evidence domain and is
+   not part of this coverage figure. Folding it in is a separate design
+   question.
+4. **Four refresh scripts defaulted to `settings.universe["us"]`**
+   (`refresh_supplemental_research`, `refresh_estimates`,
+   `refresh_estimate_revisions`, `refresh_analyst_events`) -- the static
+   config list, i.e. a second live-universe mechanism that drifts from
+   `Security.is_tracked` (Phase 1's rule: config must not be a live-universe
+   source). Now default to `configured_universe_tickers(engine)`; a guard
+   test fails if any reintroduces `settings.universe`.
+
+**Not fixable in code (and reported as such):** `analyst_revisions`'s
+`eps_revision_7d/30d/90d` are computed from accumulated `Estimate` snapshots
+and are genuinely time-gated (needs snapshots >=7/30/90 days apart; MSFT's
+only snapshot is 2026-09-27). Stale supplemental data for tickers refreshed
+only once (NVDA/MA/AAL/FTEC/GDX last refreshed 2026-09-21) needs the refresh
+scripts to actually be run -- no code path schedules them. The database in
+any given environment is the source of truth for data; these fixes change
+what the workflows do, not data already missing.
+
+**Tests:** ETF applicability (`test_security_type`, `test_stock_research_model`,
+`test_live_screener_safety_phase3` updated to the new set; equity/`OTHER`
+regression added); `add` fetches the revision trend and reports its failure
+without aborting; `_ingest_filings` reports a missing user agent, skips ETFs
+without contacting the SEC, ingests an equity and isolates an SEC failure;
+`filing_eligible_tickers`; script-default guard.

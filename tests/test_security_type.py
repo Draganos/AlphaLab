@@ -43,13 +43,21 @@ def test_etf_excludes_exactly_the_company_financial_statement_categories():
             "valuation",
             "analyst_revisions",
             "shareholder_return",
+            "ai_research",
         }
     )
 
 
-def test_momentum_and_ai_research_remain_applicable_to_etfs():
+def test_only_momentum_remains_applicable_to_etfs():
     assert is_category_applicable("momentum", SecurityType.ETF)
-    assert is_category_applicable("ai_research", SecurityType.ETF)
+    assert not is_category_applicable("ai_research", SecurityType.ETF)
+
+
+def test_ai_research_stays_applicable_to_equities_and_other():
+    """The document-commentary category is only structurally inapplicable
+    to a fund; an equity without filings ingested is a genuine gap."""
+    assert is_category_applicable("ai_research", SecurityType.EQUITY)
+    assert is_category_applicable("ai_research", SecurityType.OTHER)
 
 
 def test_is_category_applicable_matches_the_not_applicable_set():

@@ -126,6 +126,28 @@ def configured_universe_tickers(engine: Engine) -> list[str]:
         ))
 
 
+def filing_eligible_tickers(engine: Engine) -> list[str]:
+    """Tracked tickers for which SEC 10-K/10-Q ingestion is meaningful:
+    every `configured_universe_tickers` entry except funds, which file
+    neither (see `alpha_lab.research.security_type` -- AI Research is
+    structurally not-applicable to an ETF). This is the default target of
+    `scripts/refresh_company_documents.py`; a tracked equity with no
+    ingested documents otherwise shows a permanently empty AI Research
+    category with nothing in the workflow ever prompting to fill it."""
+    from alpha_lab.research.security_type import SecurityType, normalize_security_type
+
+    with Session(engine) as session:
+        rows = session.execute(
+            select(Security.ticker, Security.asset_type)
+            .where(Security.is_tracked.is_(True))
+            .order_by(Security.ticker)
+        ).all()
+    return [
+        ticker for ticker, asset_type in rows
+        if normalize_security_type(asset_type) is not SecurityType.ETF
+    ]
+
+
 def stale_universe_tickers(
     engine: Engine, stale_after_days: int, *, evaluation_date: date | None = None
 ) -> list[str]:

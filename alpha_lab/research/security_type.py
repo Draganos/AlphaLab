@@ -22,9 +22,18 @@ AlphaLab's current metric definitions:
   always will via this pipeline, for exactly this structural reason, not a
   fetch failure.
 
-``momentum`` (pure price history) and ``ai_research`` (attributable-
-document commentary, already independently gated by `ai_attributable` and
-left alone here) stay applicable to ETFs.
+* ``ai_research`` is document-commentary AI over SEC 10-K/10-Q filing
+  text (`alpha_lab.ai.documents`). A fund does not file those, so this
+  category can never be filled for an ETF -- the same "structurally
+  meaningless, always will be" case as the categories above. It was
+  originally left applicable, which permanently counted it as missing
+  evidence: confirmed against the live database, every ETF (FTEC/GDX/
+  QQQ/SPY/VT) had 0 documents and its coverage/confidence diluted by a
+  category that could never be filled, indistinguishable in the UI from a
+  genuine ingestion gap on an equity. (A fund's own evidence lives in
+  `alpha_lab.research.fund_evidence`, a separate domain.)
+
+``momentum`` (pure price history) stays applicable to ETFs.
 
 Before this module, all eight categories were treated as equally
 applicable to every security type, so an ETF's `category_coverage`/
@@ -100,6 +109,7 @@ NOT_APPLICABLE_CATEGORIES: dict[SecurityType, frozenset[str]] = {
             "valuation",
             "analyst_revisions",
             "shareholder_return",
+            "ai_research",
         }
     ),
     SecurityType.OTHER: frozenset(),

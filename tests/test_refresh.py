@@ -370,3 +370,36 @@ def test_the_in_progress_flag_is_cleared_even_when_the_refresh_raises(monkeypatc
     with pytest.raises(RuntimeError):
         run_core_refresh_guarded(engine, settings, state)
     assert state["core_refresh_in_progress"] is False
+
+
+def test_filing_eligible_tickers_are_tracked_non_etfs_only():
+    from alpha_lab.refresh import filing_eligible_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add_all([
+            Security(ticker="MSFT", asset_type="EQUITY", is_tracked=True),
+            Security(ticker="GDX", asset_type="ETF", is_tracked=True),
+            Security(ticker="OLD", asset_type="EQUITY", is_tracked=False),
+            Security(ticker="ODD", asset_type=None, is_tracked=True),
+        ])
+        session.commit()
+    assert filing_eligible_tickers(engine) == ["MSFT", "ODD"]
+
+
+def test_refresh_scripts_default_to_the_tracked_universe_not_the_config_list():
+    """Regression: refresh_supplemental_research/estimates/estimate_revisions/
+    analyst_events defaulted to `settings.universe["us"]` (config/default.yaml),
+    a second live-universe mechanism that drifts from `Security.is_tracked`
+    -- a ticker added via manage_universe.py was never refreshed by them."""
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    for name in (
+        "refresh_supplemental_research", "refresh_estimates",
+        "refresh_estimate_revisions", "refresh_analyst_events",
+    ):
+        source = (scripts / f"{name}.py").read_text()
+        assert "settings.universe" not in source, name
+        assert "configured_universe_tickers(engine)" in source, name
