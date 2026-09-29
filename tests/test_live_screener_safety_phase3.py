@@ -54,16 +54,17 @@ def test_applicable_rating_weights_returns_the_same_object_for_none():
 
 def test_applicable_rating_weights_excludes_and_renormalizes_for_etf():
     result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, "ETF")
-    assert set(result) == {"momentum", "ai_research"}
+    # Only momentum is applicable to an ETF: ai_research (SEC-filing
+    # commentary) is structurally inapplicable to a fund, see
+    # alpha_lab.research.security_type.
+    assert set(result) == {"momentum"}
     assert sum(result.values()) == pytest.approx(1.0)
-    # Original relative proportion (0.15 : 0.05 = 3 : 1) is preserved.
-    assert result["momentum"] == pytest.approx(0.75)
-    assert result["ai_research"] == pytest.approx(0.25)
+    assert result["momentum"] == pytest.approx(1.0)
 
 
 def test_applicable_rating_weights_is_case_insensitive():
     result = _applicable_rating_weights(_EIGHT_CATEGORY_WEIGHTS, "etf")
-    assert set(result) == {"momentum", "ai_research"}
+    assert set(result) == {"momentum"}
 
 
 def test_applicable_rating_weights_still_excludes_when_remainder_is_all_zero_weighted():
@@ -76,8 +77,8 @@ def test_applicable_rating_weights_still_excludes_when_remainder_is_all_zero_wei
     # function itself, but keeps this fixture realistic).
     weights["business_quality"] = weights["business_quality"] + 0.2
     result = _applicable_rating_weights(weights, "ETF")
-    assert set(result) == {"momentum", "ai_research"}
-    assert result == {"momentum": 0.0, "ai_research": 0.0}
+    assert set(result) == {"momentum"}
+    assert result == {"momentum": 0.0}
 
 
 def test_invalid_price_rows_do_not_satisfy_live_history():

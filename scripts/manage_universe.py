@@ -5,11 +5,16 @@ The one place a ticker's inclusion in AlphaLab's live research universe
 (`Security.is_tracked` -- see that model's own docstring) is added or
 removed.
 
-`add` is a full bootstrap, not just price/fundamental ingestion: analyst
-consensus, technical summary, AI research, estimates, analyst rating-
-change history, and news, then one research rebuild -- every domain the
-standalone `scripts/refresh_*.py` scripts would otherwise require running
-separately. This exists precisely because adding a ticker via
+`add` is a full bootstrap, not just price/fundamental ingestion: SEC
+filings (equities only, when `ALPHALAB_SEC_USER_AGENT` is set -- the input
+to AI Research), analyst consensus, technical summary, AI research
+rating, estimates, analyst rating-change history AND estimate revision
+trend, and news, then one research rebuild -- every domain the standalone
+`scripts/refresh_*.py` scripts would otherwise require running
+separately. (An earlier version silently omitted the revision trend and
+filings, leaving every ticker added this way with permanently empty
+"Revisions" and "AI Research" coverage while this docstring claimed
+otherwise; a skipped domain is now always reported explicitly.) This exists precisely because adding a ticker via
 `IngestionService.ingest` alone (which is what sets `is_tracked=True`)
 gives it real but partial coverage -- price/fundamentals only, missing
 analyst/technical/AI research entirely -- until someone remembers to run
@@ -28,26 +33,61 @@ untracked directory of tickers AlphaLab merely knows exist.
 from datetime import date, timedelta
 from pathlib import Path
 import argparse
+import os
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy.orm import Session  # noqa: E402
 
+from alpha_lab.ai.documents import ingest_company_documents  # noqa: E402
 from alpha_lab.config import load_settings  # noqa: E402
 from alpha_lab.database import create_schema, make_engine  # noqa: E402
 from alpha_lab.database.models import Security  # noqa: E402
 from alpha_lab.ingestion import IngestionService  # noqa: E402
-from alpha_lab.ingestion.analyst_events import snapshot_analyst_rating_changes  # noqa: E402
 from alpha_lab.ingestion.estimates import snapshot_estimates  # noqa: E402
 from alpha_lab.news import NewsService  # noqa: E402
 from alpha_lab.providers import ProviderError, YFinanceProvider  # noqa: E402
+from alpha_lab.providers.sec_edgar import SECClient  # noqa: E402
+from alpha_lab.providers.sec_filings import SECFilingDocumentProvider  # noqa: E402
 from alpha_lab.research import ResearchService  # noqa: E402
+from alpha_lab.research.analyst_events import AnalystEventsService  # noqa: E402
+from alpha_lab.research.security_type import SecurityType, normalize_security_type  # noqa: E402
 from alpha_lab.research.supplemental_service import SupplementalResearchService  # noqa: E402
 from alpha_lab.screener import MarketScreenerService  # noqa: E402
 from alpha_lab.utils.logging import configure_logging  # noqa: E402
 
 _DEFAULT_INGESTION_YEARS = 5
+
+
+def _ingest_filings(engine, ticker: str) -> None:
+    """SEC 10-K/10-Q text -> `CompanyDocument`, the only input to the
+    AI Research category. Never silent: an ETF (no filings exist, and the
+    category is structurally not-applicable to it) and a missing SEC user
+    agent are each reported explicitly rather than skipped without a
+    word. Must run before the research rebuild, which is what turns new
+    documents into an `AIResearchAnalysis`."""
+    with Session(engine) as session:
+        security = session.get(Security, ticker)
+        asset_type = None if security is None else security.asset_type
+    if normalize_security_type(asset_type) is SecurityType.ETF:
+        print("  SEC filings: not applicable (ETF -- funds file no 10-K/10-Q)")
+        return
+    user_agent = os.getenv("ALPHALAB_SEC_USER_AGENT")
+    if not user_agent:
+        print(
+            "  SEC filings: SKIPPED -- ALPHALAB_SEC_USER_AGENT is not set, so "
+            "AI Research coverage stays empty for this ticker. Set it to "
+            "'App contact@email' and run scripts/refresh_company_documents.py "
+            f"{ticker}."
+        )
+        return
+    try:
+        stored = ingest_company_documents(engine, SECFilingDocumentProvider(SECClient(user_agent)), ticker)
+    except Exception as error:  # noqa: BLE001 -- same isolation as refresh_company_documents.py
+        print(f"  SEC filings: FAILED ({error}); prior data preserved")
+    else:
+        print(f"  SEC filings: stored {stored} new filing document(s)")
 
 
 def add_tickers(engine, settings, tickers: list[str]) -> bool:
@@ -92,6 +132,7 @@ def add_tickers(engine, settings, tickers: list[str]) -> bool:
             continue
         print("  ok (now tracked)")
         ingested.append(ticker)
+        _ingest_filings(engine, ticker)
 
     if ingested:
         print()
@@ -131,20 +172,17 @@ def add_tickers(engine, settings, tickers: list[str]) -> bool:
             else:
                 print("  estimates: no coverage (not a failure)")
 
-        try:
-            events = provider.get_analyst_rating_changes(ticker)
-        except ProviderError as error:
+        outcome = AnalystEventsService(engine).refresh_all(ticker, provider)
+        if outcome.rating_changes_error is not None:
+            error = outcome.rating_changes_error
             print(f"  analyst rating-change history: FAILED ({error.kind.value} - {error.reason})")
         else:
-            if events:
-                inserted = snapshot_analyst_rating_changes(
-                    engine, ticker, events,
-                    provider=provider.provider_name,
-                    source="yfinance upgradeDowngradeHistory",
-                )
-                print(f"  analyst rating-change history: {inserted} new event(s)")
-            else:
-                print("  analyst rating-change history: no coverage (not a failure)")
+            print(f"  analyst rating-change history: {outcome.rating_changes_stored} new event(s)")
+        if outcome.revision_trend_error is not None:
+            error = outcome.revision_trend_error
+            print(f"  estimate revision trend: FAILED ({error.kind.value} - {error.reason})")
+        else:
+            print(f"  estimate revision trend: {outcome.revision_trend_stored} new observation(s)")
 
         try:
             news_result = news.refresh(provider, ticker)

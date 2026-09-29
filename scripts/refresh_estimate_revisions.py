@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from alpha_lab.database import create_schema, make_engine  # noqa: E402
 from alpha_lab.config import load_settings  # noqa: E402
+from alpha_lab.refresh import configured_universe_tickers  # noqa: E402
 from alpha_lab.ingestion.estimate_revisions import snapshot_estimate_revisions  # noqa: E402
 from alpha_lab.providers import ProviderError, YFinanceProvider  # noqa: E402
 from alpha_lab.utils.logging import configure_logging  # noqa: E402
@@ -72,7 +73,7 @@ def refresh_estimate_revisions(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tickers", nargs="*", help="US tickers; defaults to configured universe")
+    parser.add_argument("tickers", nargs="*", help="US tickers; defaults to the tracked research universe")
     args = parser.parse_args()
     configure_logging()
     settings = load_settings()
@@ -80,7 +81,7 @@ def main() -> int:
     create_schema(engine)
 
     provider = YFinanceProvider()
-    tickers = args.tickers or settings.universe["us"]
+    tickers = args.tickers or configured_universe_tickers(engine)
     result = refresh_estimate_revisions(engine, provider, tickers, date.today())
 
     print()

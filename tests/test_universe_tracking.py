@@ -84,6 +84,9 @@ class _FakeProvider(MarketDataProvider):
     def get_news(self, ticker):
         raise _NO_COVERAGE
 
+    def get_estimate_revision_trend(self, ticker, observation_date):
+        raise _NO_COVERAGE
+
     def get_fund_data(self, ticker):
         return None
 
@@ -361,3 +364,105 @@ def test_is_tracked_migration_is_additive_and_defaults_existing_rows_to_untracke
         security = session.get(Security, "LEGACY")
         assert security is not None
         assert security.is_tracked is False
+
+
+# --- coverage-gap fixes: `add` must not silently skip revision trend / filings ---
+
+
+class _RevisionTrendProvider(_FakeProvider):
+    provider_name = "FakeRevisionProvider"
+
+    def get_estimate_revision_trend(self, ticker, observation_date):
+        return [
+            {
+                "fiscal_period": date(2027, 1, 25),
+                "eps_trend_current": 9.30456, "eps_trend_7d_ago": 9.30741,
+                "eps_trend_30d_ago": 8.96264, "eps_trend_60d_ago": 8.9416,
+                "eps_trend_90d_ago": 8.92355,
+                "revisions_up_last_7d": 2, "revisions_up_last_30d": 39,
+                "revisions_down_last_7d": 0, "revisions_down_last_30d": 1,
+                "currency": "USD",
+            }
+        ]
+
+
+def test_manage_universe_add_fetches_the_estimate_revision_trend(monkeypatch, manage_universe):
+    """Regression: `add` fetched estimates and rating changes but never the
+    EPS revision trend, so every ticker added this way (MSFT, AAPL, ...)
+    had zero EstimateRevisionTrend rows despite the provider returning
+    them instantly."""
+    from alpha_lab.database.models import EstimateRevisionTrend
+
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    monkeypatch.delenv("ALPHALAB_SEC_USER_AGENT", raising=False)
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    monkeypatch.setattr(manage_universe, "YFinanceProvider", lambda: _RevisionTrendProvider())
+
+    assert manage_universe.add_tickers(engine, load_settings(), ["NEWCO"]) is True
+
+    with Session(engine) as session:
+        rows = session.scalars(select(EstimateRevisionTrend).where(EstimateRevisionTrend.ticker == "NEWCO")).all()
+    assert len(rows) >= 1
+
+
+def test_manage_universe_add_reports_a_revision_trend_failure_without_aborting(monkeypatch, manage_universe, capsys):
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    monkeypatch.delenv("ALPHALAB_SEC_USER_AGENT", raising=False)
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    monkeypatch.setattr(manage_universe, "YFinanceProvider", lambda: _FakeProvider())
+
+    assert manage_universe.add_tickers(engine, load_settings(), ["NEWCO"]) is True
+    assert "estimate revision trend: FAILED" in capsys.readouterr().out
+
+
+def _seed_security(engine, ticker: str, asset_type: str) -> None:
+    with Session(engine) as session:
+        session.add(Security(ticker=ticker, asset_type=asset_type, is_tracked=True))
+        session.commit()
+
+
+def test_ingest_filings_says_so_when_the_sec_user_agent_is_missing(monkeypatch, manage_universe, capsys):
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    _seed_security(engine, "MSFT", "EQUITY")
+    monkeypatch.delenv("ALPHALAB_SEC_USER_AGENT", raising=False)
+
+    manage_universe._ingest_filings(engine, "MSFT")
+
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out and "ALPHALAB_SEC_USER_AGENT" in out
+
+
+def test_ingest_filings_skips_an_etf_without_contacting_the_sec(monkeypatch, manage_universe, capsys):
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    _seed_security(engine, "GDX", "ETF")
+    monkeypatch.setenv("ALPHALAB_SEC_USER_AGENT", "Test test@example.com")
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("an ETF must never trigger an SEC request")
+
+    monkeypatch.setattr(manage_universe, "ingest_company_documents", _must_not_be_called)
+    manage_universe._ingest_filings(engine, "GDX")
+    assert "not applicable (ETF" in capsys.readouterr().out
+
+
+def test_ingest_filings_ingests_an_equity_and_isolates_a_sec_failure(monkeypatch, manage_universe, capsys):
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    _seed_security(engine, "MSFT", "EQUITY")
+    monkeypatch.setenv("ALPHALAB_SEC_USER_AGENT", "Test test@example.com")
+    monkeypatch.setattr(manage_universe, "SECClient", lambda ua: object())
+    monkeypatch.setattr(manage_universe, "SECFilingDocumentProvider", lambda client: object())
+    monkeypatch.setattr(manage_universe, "ingest_company_documents", lambda engine, provider, ticker: 3)
+    manage_universe._ingest_filings(engine, "MSFT")
+    assert "stored 3 new filing document(s)" in capsys.readouterr().out
+
+    def _boom(engine, provider, ticker):
+        raise RuntimeError("SEC down")
+
+    monkeypatch.setattr(manage_universe, "ingest_company_documents", _boom)
+    manage_universe._ingest_filings(engine, "MSFT")  # must not raise
+    assert "FAILED (SEC down); prior data preserved" in capsys.readouterr().out

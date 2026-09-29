@@ -20,12 +20,16 @@ from alpha_lab.ai.documents import ingest_company_documents  # noqa: E402
 from alpha_lab.config import load_settings  # noqa: E402
 from alpha_lab.database import create_schema, make_engine  # noqa: E402
 from alpha_lab.providers.sec_edgar import SECClient  # noqa: E402
+from alpha_lab.refresh import filing_eligible_tickers  # noqa: E402
 from alpha_lab.providers.sec_filings import SECFilingDocumentProvider  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tickers", nargs="+", help="US ticker symbols")
+    parser.add_argument(
+        "tickers", nargs="*",
+        help="US ticker symbols; defaults to every tracked non-ETF security (funds file no 10-K/10-Q)",
+    )
     parser.add_argument("--user-agent", default=os.getenv("ALPHALAB_SEC_USER_AGENT"))
     args = parser.parse_args()
     if not args.user_agent:
@@ -36,7 +40,8 @@ def main() -> int:
     try:
         create_schema(engine)
         provider = SECFilingDocumentProvider(SECClient(args.user_agent))
-        for ticker in (value.upper() for value in args.tickers):
+        tickers = args.tickers or filing_eligible_tickers(engine)
+        for ticker in (value.upper() for value in tickers):
             try:
                 stored = ingest_company_documents(engine, provider, ticker)
                 print(f"{ticker}: stored {stored} new filing document(s)")
