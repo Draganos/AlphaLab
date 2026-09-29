@@ -5416,3 +5416,55 @@ unused names and a false-positive closure warning.
   decision, not made here.
 - **ETF coverage now reads 100% from `momentum` alone** (§53); folding the
   separate Fund Evidence domain into ETF coverage is an open design question.
+
+## 55. Empty tracked universe: the `is_tracked` migration silently untracked every existing security
+
+Triggered by a real Full Refresh on the user's database printing `Ingested
+0/0 ticker(s) (0 failed); research rebuilt for 0 securit(y/ies)`, above a
+Data Quality table listing hundreds of "stale" tickers (EJH, EL, ELAB, ...).
+
+**Root cause (§48 migration gap).** `securities.is_tracked` was added with
+`DEFAULT 0` and no backfill, so on any database created before it every
+existing security -- including everything the user had researched -- left the
+live universe the moment the column appeared. From then on
+`configured_universe_tickers` returned `[]`, so Full Refresh, the on-session
+refresh and the launch check ingested nothing (a no-op reported as success),
+and nothing ever re-tracked anything because membership is only set by
+ingestion. Reproduced against a copy of the real database with every security
+set untracked: `core refresh -> attempted 0 ... rebuilt True records 0`
+(existing research is preserved, since a rebuild with no tracked securities is
+not persisted -- but nothing updates either). Because §53's refresh scripts
+now default to the tracked universe, on such a database they were silently
+no-ops too. §52 ("bug checks miss workflow gaps") applies again: §48's tests
+covered the additive column and the ORM path, never "an upgraded database
+still has a live universe".
+
+**Fixes**
+1. `create_schema` backfills at the moment the column is first added: every
+   security in the latest current research build (what the dashboard was
+   treating as the live universe) stays tracked. Runs only once per database,
+   so a later deliberate `manage_universe remove` is never undone by it.
+2. `manage_universe.py adopt-current` /
+   `alpha_lab.refresh.adopt_current_research_tickers`: the repair for a
+   database already migrated without the backfill. Adds only, idempotent, no
+   network. Deliberately explicit rather than automatic: an empty tracked
+   universe can also be the result of `remove`, and an unpersisted empty
+   rebuild leaves the old build in place, so an automatic adopt would
+   resurrect removed tickers.
+3. The dashboard now says so: a persistent warning when nothing is tracked and
+   an honest Full Refresh result naming the repair command instead of "Ingested
+   0/0 ... rebuilt for 0".
+4. **The main-page Data Quality table listed every ticker with any price row**
+   (thousands of untracked catalog securities and macro-proxy tickers) -- a
+   wall of "stale" rows that Full Refresh, which only touches the tracked
+   universe, could never clear, and inconsistent with the staleness banner
+   above it. Now restricted to the tracked universe.
+
+Verified on a copy of the real database in the user's state (all untracked):
+0 tracked -> `adopt-current` re-tracks all 16 -> dashboard loads with no
+exception or warning. Tests: legacy database without the column keeps the
+latest build's securities tracked and leaves catalog rows untracked; the
+backfill does not rerun (a `remove` survives the next `create_schema`);
+adopt adds only, is idempotent, and does nothing with no build; the command;
+Data Quality shows tracked securities only; the empty-universe warning and
+Full Refresh message.

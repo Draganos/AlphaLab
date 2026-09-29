@@ -20,6 +20,7 @@ from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import Price, Security
 from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
 from alpha_lab.ingestion import IngestionService
+from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
 from alpha_lab.refresh import configured_universe_tickers
@@ -466,3 +467,118 @@ def test_ingest_filings_ingests_an_equity_and_isolates_a_sec_failure(monkeypatch
     monkeypatch.setattr(manage_universe, "ingest_company_documents", _boom)
     manage_universe._ingest_filings(engine, "MSFT")  # must not raise
     assert "FAILED (SEC down); prior data preserved" in capsys.readouterr().out
+
+
+# --- empty tracked universe after the is_tracked migration ---------------
+
+
+def _legacy_database_without_is_tracked(path, tickers, *, built_tickers):
+    """A database as it existed before `securities.is_tracked`: the column is
+    absent, and the latest current research build contains `built_tickers`."""
+    import sqlite3
+
+    engine = make_engine(f"sqlite:///{path}")
+    create_schema(engine)
+    engine.dispose()
+    con = sqlite3.connect(path)
+    con.execute("ALTER TABLE securities DROP COLUMN is_tracked")
+    for ticker in tickers:
+        con.execute("INSERT INTO securities (ticker) VALUES (?)", (ticker,))
+    con.execute(
+        "INSERT INTO current_research_builds (id, evaluation_date, built_at, score_version, config_hash, security_count) "
+        "VALUES (1, '2026-09-01', '2026-09-01 00:00:00', 'v', 'h', ?)", (len(built_tickers),),
+    )
+    for ticker in built_tickers:
+        con.execute(
+            "INSERT INTO current_research_snapshots (build_id, ticker, payload) VALUES (1, ?, '{}')", (ticker,)
+        )
+    con.commit()
+    con.close()
+
+
+def test_migration_keeps_the_latest_builds_securities_tracked(tmp_path):
+    """Regression: the column was added with DEFAULT 0 and no backfill, so
+    every pre-existing security silently left the live universe -- Full
+    Refresh then found 0 tickers ("Ingested 0/0 ... rebuilt for 0")."""
+    path = tmp_path / "legacy.db"
+    _legacy_database_without_is_tracked(path, ["MSFT", "GDX", "CATALOG1", "CATALOG2"], built_tickers=["MSFT", "GDX"])
+
+    engine = make_engine(f"sqlite:///{path}")
+    create_schema(engine)
+    assert configured_universe_tickers(engine) == ["GDX", "MSFT"]
+    with Session(engine) as session:
+        assert session.get(Security, "CATALOG1").is_tracked is False
+
+
+def test_migration_backfill_runs_only_when_the_column_is_first_added(tmp_path):
+    path = tmp_path / "legacy.db"
+    _legacy_database_without_is_tracked(path, ["MSFT", "GDX"], built_tickers=["MSFT", "GDX"])
+    engine = make_engine(f"sqlite:///{path}")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.get(Security, "GDX").is_tracked = False  # a deliberate `remove`
+        session.commit()
+    create_schema(engine)  # e.g. the next script start
+    assert configured_universe_tickers(engine) == ["MSFT"]
+
+
+def test_adopt_current_research_tickers_only_adds_and_is_idempotent(tmp_path):
+    from alpha_lab.refresh import adopt_current_research_tickers
+
+    path = tmp_path / "migrated.db"
+    engine = make_engine(f"sqlite:///{path}")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in ("MSFT", "GDX", "OTHER"):
+            session.add(Security(ticker=ticker, is_tracked=False))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_adopt_record("MSFT"), _adopt_record("GDX")])
+
+    assert adopt_current_research_tickers(engine) == ["GDX", "MSFT"]
+    assert configured_universe_tickers(engine) == ["GDX", "MSFT"]
+    assert adopt_current_research_tickers(engine) == []  # nothing left to adopt
+    with Session(engine) as session:
+        assert session.get(Security, "OTHER").is_tracked is False
+
+
+def test_adopt_current_research_tickers_with_no_build_does_nothing():
+    from alpha_lab.refresh import adopt_current_research_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="MSFT", is_tracked=False))
+        session.commit()
+    assert adopt_current_research_tickers(engine) == []
+
+
+def _adopt_record(ticker):
+    from alpha_lab.research import CATEGORY_ORDER
+    from alpha_lab.screener import LiveResearchRecord
+
+    return LiveResearchRecord(
+        ticker=ticker, company=f"{ticker} Inc", price=100.0, market_cap=1_000.0,
+        country="US", exchange="NASDAQ", sector="Technology", industry="Software",
+        asset_type="equity", themes=[], ethical_status="PASS", data_quality_status="valid",
+        overall_score=70.0, overall_rank=1,
+        category_scores={name: None for name in CATEGORY_ORDER},
+        category_coverage={name: 0.0 for name in CATEGORY_ORDER},
+        raw_metrics={}, percentile_metrics={}, overall_live_coverage=0.5,
+        quantitative_coverage=0.5, ai_coverage=0.0, historical_coverage=0.0,
+        confidence="Moderate", provenance={}, last_refreshed=None,
+        rating_version="test-v1", configuration_hash="test-config", evaluation_date=date.today(),
+    )
+
+
+def test_manage_universe_adopt_current_command(monkeypatch, manage_universe, capsys):
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="MSFT", is_tracked=False))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_adopt_record("MSFT")])
+
+    assert manage_universe.adopt_current(engine) is True
+    assert "Re-tracked 1" in capsys.readouterr().out
+    assert configured_universe_tickers(engine) == ["MSFT"]
+    assert manage_universe.adopt_current(engine) is False  # idempotent

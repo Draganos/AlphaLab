@@ -103,6 +103,7 @@ def create_schema(engine: Engine) -> None:
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:
             inspector = inspect(connection)
+            is_tracked_added = False
             for table, columns in additions.items():
                 existing = {column["name"] for column in inspector.get_columns(table)}
                 for name, definition in columns.items():
@@ -112,6 +113,23 @@ def create_schema(engine: Engine) -> None:
                                 f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'
                             )
                         )
+                        if (table, name) == ("securities", "is_tracked"):
+                            is_tracked_added = True
+            if is_tracked_added:
+                # `is_tracked` defaults to 0, so without this every security
+                # in an existing database silently left the live research
+                # universe the moment the column appeared: Full Refresh then
+                # found nothing to ingest ("Ingested 0/0 ... rebuilt for 0")
+                # and no path ever re-tracked anything. Preserve membership:
+                # whatever the latest current research build contained is
+                # what the dashboard was treating as the live universe.
+                connection.execute(
+                    text(
+                        "UPDATE securities SET is_tracked = 1 WHERE ticker IN ("
+                        "SELECT ticker FROM current_research_snapshots WHERE build_id = "
+                        "(SELECT MAX(id) FROM current_research_builds))"
+                    )
+                )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_factor_scores_config_hash ON factor_scores (config_hash)"
