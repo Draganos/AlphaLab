@@ -215,6 +215,18 @@ def test_get_documents_skips_a_single_failed_fetch_without_aborting_the_rest():
     assert "OK" in documents[0]["text"]
 
 
+def test_a_skipped_filing_fetch_is_logged_not_silent(caplog):
+    submissions = _submissions_payload(
+        forms=["10-K"], filed_dates=["2026-02-25"],
+        accessions=["0001045810-26-000021"], primary_documents=["nvda-10k.htm"],
+    )
+    client = _FakeClient({"0001045810": submissions}, document_html_sequence=[None])
+    with caplog.at_level("WARNING", logger="alpha_lab.providers.sec_filings"):
+        documents = SECFilingDocumentProvider(client).get_documents("NVDA")
+    assert documents == []
+    assert any("Skipped NVDA 10-K filed 2026-02-25" in record.message for record in caplog.records)
+
+
 def test_get_documents_produces_real_extracted_text_not_raw_html():
     submissions = _submissions_payload(
         forms=["10-K"], filed_dates=["2026-02-25"],

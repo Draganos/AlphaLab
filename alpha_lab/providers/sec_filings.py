@@ -16,10 +16,13 @@ missing, never invented" pattern applied to filings instead of articles.
 from datetime import date
 from html.parser import HTMLParser
 from typing import Any
+import logging
 import re
 
 from alpha_lab.providers.interfaces import CompanyDocumentProvider
 from alpha_lab.providers.sec_edgar import SUPPORTED_FORMS, SECClient, SECCompanyFactsProvider
+
+logger = logging.getLogger(__name__)
 
 # A defensive upper bound on extracted plain text per filing, not a
 # content judgement -- purely a guard against a pathological filing
@@ -190,6 +193,11 @@ class SECFilingDocumentProvider(CompanyDocumentProvider):
             # re-run never re-downloads one already fetched.
             html = self.client.get_text(source_url)
             if html is None:
+                # Skipping one filing is intentional, but never silent: with
+                # every fetch failing (blocked user agent, SEC outage) the
+                # result is an empty list indistinguishable from "no new
+                # filings", so callers reported "stored 0" as success.
+                logger.warning("Skipped %s %s filed %s: fetch failed (%s)", normalized, form, filed_date, source_url)
                 continue
             documents.append({
                 "document_date": filed_date,

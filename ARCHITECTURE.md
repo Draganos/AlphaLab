@@ -5351,3 +5351,68 @@ regression added); `add` fetches the revision trend and reports its failure
 without aborting; `_ingest_filings` reports a missing user agent, skips ETFs
 without contacting the SEC, ingests an equity and isolates an SEC failure;
 `filing_eligible_tickers`; script-default guard.
+
+## 54. Full-stack bug check (data, workflow, code, runtime) and why earlier checks missed §53's gaps
+
+Requested after §53 ("why was this missing in the bug checks previously").
+**Why earlier checks missed it:** every prior bug check (§30-§52) reviewed a
+PR's *diff* against synthetic in-memory fixtures. None audited the *live
+tracked universe end to end*, so a gap that spans many securities but sits in
+no single diff was invisible: (a) `manage_universe add` was written to mirror
+"the standalone scripts" but its docstring claim was never checked against
+what it actually called (revision trend and filings were absent); (b) the ETF
+`ai_research` applicability call was *documented as intentional* in §29, so a
+diff-scoped reviewer had no reason to challenge it; (c) tests asserted what
+the code did exercise, never "every tracked security has every applicable
+domain populated"; (d) the entry-point-parity question -- which domains does
+*any* automatic path refresh -- was never asked. This check is data-first:
+a per-domain completeness/age matrix over all 16 tracked securities, table
+integrity queries, static analysis, all smoke tests, and every dashboard page
+(plus Company Research for each of the 16 tickers) under `AppTest`.
+
+**Bugs found and fixed here**
+
+1. **Price rows appended for float jitter** (`IngestionService.ingest`).
+   Revision detection used exact `!=`; the provider returns `adjusted_close`
+   differing in the last float32 bits on every re-fetch, so each refresh
+   appended duplicate rows: 3,137 surplus rows of 25,589 (14%) after three
+   ingest days, growing with every refresh. The measured distribution is
+   cleanly bimodal -- all jitter <= 5e-7 relative, every genuine dividend/
+   split/roll restatement >= 1e-3, nothing between -- so a 1e-5 relative
+   tolerance separates them with ~2 orders of magnitude margin each side.
+   Replaying the real duplicates: 2,632 would have been suppressed, 505 kept
+   as genuine revisions. Point-in-time semantics for real revisions are
+   unchanged (a 0.1% restatement still appends; tested). Existing surplus
+   rows are left in place (deleting stored history is a separate decision).
+2. **SEC per-document fetch failures were silent**
+   (`SECFilingDocumentProvider.get_documents`). Skipping one failed filing is
+   intended, but with every fetch failing the result was an empty list
+   indistinguishable from "no new filings" and callers printed "stored 0" as
+   success. Now logged as a warning per skipped filing.
+
+**Verified clean:** all three smoke tests; every dashboard page and Company
+Research for all 16 tracked tickers load with zero exceptions; no orphan or
+duplicate news/estimate/revision rows; `Fundamental`'s 343 rows over 138
+(ticker, period) keys are legitimate point-in-time history (every extra row
+differs in `publication_date`/provenance -- the same period restated in a
+later filing), not jitter; static analysis (F, B, S110/S112) found only two
+unused names and a false-positive closure warning.
+
+**Findings reported, not changed (design decisions)**
+
+- **No automatic path refreshes anything but prices/fundamentals.** The
+  launch check, the on-session-start refresh and the Full Refresh button all
+  run the core refresh only. News, analyst consensus/technical/fund evidence,
+  estimates, revision trend, rating events, SEC filings, macro, Donatien and
+  alignment each need their own script or per-page button (§49's orchestrator
+  reports their freshness but by design does not refresh them). Measured
+  ages today: analyst/technical 2-8 days, news 3-19 days, macro 9 days,
+  Donatien/alignment 15 days. This is the root of the recurring "incomplete
+  data" reports; a single evidence-refresh entry point is the proposed fix.
+- **`stale_price_days = 5` (calendar days) tolerates 2-3 missed trading
+  days**: latest MSFT close is 2026-09-25 on Tuesday 2026-09-29 and is not
+  flagged stale, so no automatic refresh fires. The same value feeds the
+  freshness/confidence factors, so changing it is a scoring-semantics
+  decision, not made here.
+- **ETF coverage now reads 100% from `momentum` alone** (§53); folding the
+  separate Fund Evidence domain into ETF coverage is an open design question.

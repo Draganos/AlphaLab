@@ -25,6 +25,23 @@ _PRICE_FIELDS = (
 )
 
 
+# Relative tolerance below which two numeric price fields are the same bar.
+# Measured on the live database: re-fetching an unchanged bar makes the
+# provider return `adjusted_close` differing in the last float32 bits
+# (every observed jitter <= 5e-7 relative), while every genuine dividend/
+# split restatement was >= 1e-3 -- nothing in between -- so 1e-5 separates
+# the two with two orders of magnitude of margin on each side. Exact `!=`
+# treated the jitter as a revision and appended a duplicate row (14% surplus
+# rows after three ingests), growing with every refresh.
+_PRICE_RELATIVE_TOLERANCE = 1e-5
+
+
+def _price_field_changed(new: object, old: object) -> bool:
+    if isinstance(new, (int, float)) and isinstance(old, (int, float)):
+        return not math.isclose(new, old, rel_tol=_PRICE_RELATIVE_TOLERANCE, abs_tol=1e-9)
+    return new != old
+
+
 class IngestionService:
     def __init__(self, provider: MarketDataProvider, engine: Engine):
         self.provider, self.engine = provider, engine
@@ -112,7 +129,8 @@ class IngestionService:
                     for field in _PRICE_FIELDS
                 }
                 if latest is None or any(
-                    merged[field] != getattr(latest, field) for field in _PRICE_FIELDS
+                    _price_field_changed(merged[field], getattr(latest, field))
+                    for field in _PRICE_FIELDS
                 ):
                     session.add(Price(ticker=symbol, date=price_date, **merged))
             for row in financials.to_dict("records"):
