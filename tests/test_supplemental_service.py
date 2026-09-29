@@ -406,3 +406,106 @@ def test_get_technical_summary_as_of_never_returns_none(engine):
     assert summary is not None
     assert summary.overall_rating == TechnicalRating.REVIEW
     assert summary.coverage == 0.0
+
+
+# --- roadmap Phase 6: refresh_ai_research_assessment_from_state -----------
+
+
+def _minimal_research_state(research: StockResearch, *, research_refresh_version_id="refresh-v1"):
+    """A ResearchState with only `stock_research` set and every other
+    domain honestly NOT_COMPUTED -- built directly (not via
+    `get_research_state`) since these tests only exercise
+    `SupplementalResearchService`, not the assembler itself (see
+    tests/test_research_state.py and tests/test_research_state_ai_evidence.py
+    for that)."""
+    from alpha_lab.research_state import ResearchField, ResearchState
+
+    not_computed = ResearchField(status="NOT_COMPUTED")
+    return ResearchState(
+        ticker=research.ticker, evaluation_date=research.evaluation_date,
+        research_refresh_version_id=research_refresh_version_id,
+        stock_research=research,
+        fundamentals=not_computed, analyst_activity=not_computed, technicals=not_computed,
+        news=not_computed, news_impact=not_computed, macro=not_computed,
+        donatien=not_computed, donatien_alignment=not_computed, ethics=not_computed,
+        deterministic_score=not_computed, ai_research=not_computed, ai_rating=not_computed,
+    )
+
+
+def test_refresh_from_state_requires_stock_research(engine):
+    from alpha_lab.research_state import ResearchField, ResearchState
+
+    service = SupplementalResearchService(engine)
+    not_computed = ResearchField(status="NOT_COMPUTED")
+    state = ResearchState(
+        ticker="NVDA", evaluation_date=date.today(), stock_research=None,
+        fundamentals=not_computed, analyst_activity=not_computed, technicals=not_computed,
+        news=not_computed, news_impact=not_computed, macro=not_computed,
+        donatien=not_computed, donatien_alignment=not_computed, ethics=not_computed,
+        deterministic_score=not_computed, ai_research=not_computed, ai_rating=not_computed,
+    )
+    with pytest.raises(ValueError):
+        service.refresh_ai_research_assessment_from_state(state)
+
+
+def test_refresh_from_state_persists_version_id_and_first_run_has_no_material_changes(engine):
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    research = _stub_research(overall_coverage=1.0)
+    state = _minimal_research_state(research)
+
+    assessment = service.refresh_ai_research_assessment_from_state(state)
+    assert assessment.research_refresh_version_id == "refresh-v1"
+    assert assessment.material_changes == []
+
+    read_back = service.get_ai_research_assessment("NVDA")
+    assert read_back is not None
+    assert read_back.research_refresh_version_id == "refresh-v1"
+
+
+def test_refresh_from_state_is_reproducible_given_unchanged_evidence(engine):
+    """Design-review requirement: given the same ResearchState (and the
+    deterministic provider, which is pure/rule-based), refreshing twice in
+    a row must yield identical score/rating/confidence/dimensions/thesis/
+    evidence_provenance both times, and the second run's material_changes
+    must be empty -- nothing in the input actually changed between runs."""
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    research = _stub_research(overall_coverage=1.0)
+    state = _minimal_research_state(research)
+
+    first = service.refresh_ai_research_assessment_from_state(state)
+    second = service.refresh_ai_research_assessment_from_state(state)
+
+    assert first.score == second.score
+    assert first.rating == second.rating
+    assert first.confidence == second.confidence
+    assert first.dimensions == second.dimensions
+    assert first.thesis == second.thesis
+    assert first.invalidation_conditions == second.invalidation_conditions
+    assert first.evidence_provenance == second.evidence_provenance
+    assert first.research_refresh_version_id == second.research_refresh_version_id
+    assert second.material_changes == []
+
+
+def test_refresh_from_state_reports_material_changes_when_evidence_changes(engine):
+    """A macro regime appearing between two refreshes is a new evidence
+    domain the deterministic provider doesn't band into any dimension
+    (see DeterministicAIRatingProvider's docstring), but a genuine change
+    in an already-banded fundamental category must surface in
+    material_changes."""
+    _seed_security_with_prices(engine)
+    service = SupplementalResearchService(engine)
+    low_quality = _stub_research(overall_coverage=1.0)
+    service.refresh_ai_research_assessment_from_state(_minimal_research_state(low_quality))
+
+    categories = dict(low_quality.categories)
+    categories["business_quality"] = CategoryResult(
+        name="business_quality", label=CATEGORY_LABELS["business_quality"],
+        score=10.0, coverage=1.0, status=CategoryStatus.AVAILABLE,
+        metrics=[], evidence=[], unavailable_metrics=[], sources=[],
+    )
+    downgraded = low_quality.model_copy(update={"categories": categories})
+    second = service.refresh_ai_research_assessment_from_state(_minimal_research_state(downgraded))
+
+    assert second.material_changes != []

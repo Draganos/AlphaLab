@@ -6,7 +6,7 @@ mapping, REVIEW behaviour, and provenance. No network call is ever made --
 DeterministicAIRatingProvider is rule-based, and OpenAIRatingProvider is
 never invoked in these tests."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -19,13 +19,16 @@ from alpha_lab.research.ai_rating import (
     AIDimensionValue,
     AIEvidenceCoverage,
     AIEvidenceItem,
+    AIInvalidationCondition,
     AIRawDimensions,
+    AIThesis,
     DeterministicAIRatingProvider,
     EvidenceViolation,
     build_ai_research_assessment,
     build_evidence_coverage,
     build_evidence_payload,
     compute_confidence,
+    compute_material_changes,
     compute_score,
     validate_evidence_ids,
 )
@@ -931,4 +934,179 @@ def test_mutating_legacy_ai_research_category_does_not_change_the_resulting_ai_r
     # And it produced a real, substantive rating in the first place --
     # this is not vacuously true because everything landed on REVIEW.
     assert very_positive_legacy.rating != AIDimensionValue.REVIEW
-    assert very_positive_legacy.score is not None
+
+
+# --- roadmap Phase 6: thesis/invalidation citations, material_changes, provenance ---
+
+
+def test_raw_dimensions_without_thesis_or_invalidation_conditions_still_builds():
+    """Backward compatibility: a provider fixture built before these fields
+    existed (thesis=None, invalidation_conditions=[] by default) must keep
+    working unchanged -- exactly the existing `_raw()` helper used
+    throughout this file."""
+    raw = _raw()
+    assert raw.thesis is None
+    assert raw.invalidation_conditions == []
+    evidence = [AIEvidenceItem(evidence_id="fundamental:business_quality", description="x", source="y")]
+    assessment = build_ai_research_assessment(
+        ticker="NVDA", raw=raw, evidence=evidence, evidence_coverage=_coverage(),
+        research_schema_version="stockresearch-v2", as_of=date.today(),
+    )
+    assert assessment.thesis is None
+    assert assessment.invalidation_conditions == []
+
+
+def test_thesis_citing_evidence_outside_the_payload_is_rejected():
+    """A synthesis-level claim is held to the same citation standard as a
+    dimension's own supporting_evidence_ids -- a thesis is not exempt from
+    the evidence boundary."""
+    evidence = [AIEvidenceItem(evidence_id="fundamental:business_quality", description="x", source="y")]
+    raw = _raw(thesis=AIThesis(statement="Fabricated claim", evidence_ids=["fabricated:not_offered"]))
+    with pytest.raises(EvidenceViolation):
+        validate_evidence_ids(raw, {item.evidence_id for item in evidence})
+
+
+def test_invalidation_condition_citing_evidence_outside_the_payload_is_rejected():
+    evidence = [AIEvidenceItem(evidence_id="fundamental:business_quality", description="x", source="y")]
+    raw = _raw(
+        invalidation_conditions=[
+            AIInvalidationCondition(condition="Made up", evidence_ids=["fabricated:not_offered"])
+        ]
+    )
+    with pytest.raises(EvidenceViolation):
+        validate_evidence_ids(raw, {item.evidence_id for item in evidence})
+
+
+def test_thesis_and_invalidation_conditions_citing_real_evidence_are_accepted():
+    evidence = [AIEvidenceItem(evidence_id="fundamental:business_quality", description="x", source="y")]
+    raw = _raw(
+        thesis=AIThesis(statement="Durable moat", evidence_ids=["fundamental:business_quality"]),
+        invalidation_conditions=[
+            AIInvalidationCondition(
+                condition="Business quality deteriorates", evidence_ids=["fundamental:business_quality"]
+            )
+        ],
+    )
+    validate_evidence_ids(raw, {item.evidence_id for item in evidence})  # must not raise
+    assessment = build_ai_research_assessment(
+        ticker="NVDA", raw=raw, evidence=evidence, evidence_coverage=_coverage(),
+        research_schema_version="stockresearch-v2", as_of=date.today(),
+    )
+    assert assessment.thesis.statement == "Durable moat"
+    assert assessment.invalidation_conditions[0].condition == "Business quality deteriorates"
+
+
+def test_deterministic_provider_synthesizes_a_citation_safe_thesis():
+    """`DeterministicAIRatingProvider`'s thesis must never cite an
+    evidence_id it wasn't given -- exercised through the real provider and
+    the real evidence-boundary validator, not a hand-built fixture."""
+    evidence = build_evidence_payload(categories=_substantive_categories())
+    raw = DeterministicAIRatingProvider().assess("NVDA", evidence)
+    assert raw.thesis is not None
+    assert raw.invalidation_conditions == []
+    validate_evidence_ids(raw, {item.evidence_id for item in evidence})  # must not raise
+
+
+def test_deterministic_provider_thesis_is_honest_when_no_dimension_is_assessable():
+    raw = DeterministicAIRatingProvider().assess("NVDA", [])
+    assert raw.thesis.statement == "Insufficient evidence to synthesize a thesis."
+    assert raw.thesis.evidence_ids == []
+
+
+def test_material_changes_is_empty_with_no_prior_assessment():
+    raw = _all_dimensions(AIDimensionValue.POSITIVE)
+    dimensions = raw.dimensions()
+    assert compute_material_changes(None, dimensions, raw, rating=AIDimensionValue.POSITIVE, score=75.0) == []
+
+
+def _assessment(**overrides) -> "AIResearchAssessment":
+    from alpha_lab.research.ai_rating import AIResearchAssessment
+
+    base = dict(
+        ticker="NVDA", score=75.0, rating=AIDimensionValue.POSITIVE, confidence=0.6,
+        dimensions={name: _dimension(AIDimensionValue.POSITIVE) for name in DIMENSION_NAMES},
+        evidence_coverage=_coverage(), positives=[], risks=["Risk A"], catalysts=["Catalyst A"],
+        contradictions=[], evidence_gaps=[], supporting_evidence=[],
+        prompt_version="v1", model="m", model_fingerprint=None,
+        research_schema_version="stockresearch-v2", generated_at=datetime.now(UTC),
+        as_of=date.today(), source="test-provider",
+    )
+    base.update(overrides)
+    return AIResearchAssessment(**base)
+
+
+def test_material_changes_detects_rating_and_score_change():
+    previous = _assessment(rating=AIDimensionValue.NEUTRAL, score=50.0)
+    raw = _all_dimensions(AIDimensionValue.POSITIVE)
+    changes = compute_material_changes(
+        previous, raw.dimensions(), raw, rating=AIDimensionValue.POSITIVE, score=75.0
+    )
+    assert any("Overall rating changed" in change for change in changes)
+    assert any("Score changed" in change for change in changes)
+
+
+def test_material_changes_detects_dimension_value_change():
+    previous = _assessment(
+        dimensions={
+            name: _dimension(AIDimensionValue.NEUTRAL if name == "growth_prospects" else AIDimensionValue.POSITIVE)
+            for name in DIMENSION_NAMES
+        }
+    )
+    raw = _all_dimensions(AIDimensionValue.POSITIVE)
+    changes = compute_material_changes(
+        previous, raw.dimensions(), raw, rating=AIDimensionValue.POSITIVE, score=75.0
+    )
+    assert any("growth_prospects" in change for change in changes)
+
+
+def test_material_changes_detects_new_and_resolved_risks():
+    previous = _assessment(risks=["Old risk"])
+    raw = _all_dimensions(AIDimensionValue.POSITIVE, risks=["New risk"])
+    changes = compute_material_changes(
+        previous, raw.dimensions(), raw, rating=AIDimensionValue.POSITIVE, score=75.0
+    )
+    assert any("New risk(s): New risk" in change for change in changes)
+    assert any("Resolved risk(s): Old risk" in change for change in changes)
+
+
+def test_material_changes_is_empty_when_nothing_tracked_differs():
+    raw = _all_dimensions(AIDimensionValue.POSITIVE, risks=["Risk A"], catalysts=["Catalyst A"])
+    previous = _assessment(
+        rating=AIDimensionValue.POSITIVE, score=75.0,
+        dimensions=raw.dimensions(), risks=["Risk A"], catalysts=["Catalyst A"],
+    )
+    changes = compute_material_changes(
+        previous, raw.dimensions(), raw, rating=AIDimensionValue.POSITIVE, score=75.0
+    )
+    assert changes == []
+
+
+def test_build_assessment_threads_material_changes_provenance_and_version_id():
+    evidence = [AIEvidenceItem(evidence_id="fundamental:business_quality", description="x", source="y")]
+    previous = _assessment(rating=AIDimensionValue.NEUTRAL, score=50.0)
+    raw = _all_dimensions(AIDimensionValue.POSITIVE)
+    assessment = build_ai_research_assessment(
+        ticker="NVDA", raw=raw, evidence=evidence, evidence_coverage=_coverage(),
+        research_schema_version="stockresearch-v2", as_of=date.today(),
+        previous=previous,
+        research_refresh_version_id="refresh-version-abc",
+        evidence_provenance={"fundamental:business_quality": "prov-123"},
+    )
+    assert assessment.material_changes != []
+    assert assessment.research_refresh_version_id == "refresh-version-abc"
+    assert assessment.evidence_provenance == {"fundamental:business_quality": "prov-123"}
+
+
+def test_build_assessment_defaults_provenance_fields_when_omitted():
+    """A caller that never passes previous/research_refresh_version_id/
+    evidence_provenance (the pre-Phase-6 call site) gets exactly the old
+    behavior: no material_changes claim, no version identity."""
+    evidence = [AIEvidenceItem(evidence_id="fundamental:business_quality", description="x", source="y")]
+    raw = _all_dimensions(AIDimensionValue.POSITIVE)
+    assessment = build_ai_research_assessment(
+        ticker="NVDA", raw=raw, evidence=evidence, evidence_coverage=_coverage(),
+        research_schema_version="stockresearch-v2", as_of=date.today(),
+    )
+    assert assessment.material_changes == []
+    assert assessment.research_refresh_version_id is None
+    assert assessment.evidence_provenance == {}

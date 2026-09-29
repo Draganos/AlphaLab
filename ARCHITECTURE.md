@@ -5038,3 +5038,152 @@ field, which carries a raw `date` inside an `Any`-typed value, still
 serializes correctly). Full test suite green (same unrelated pre-existing
 `test_dependency_lock.py` failure), all three smoke tests unchanged in
 output, `git diff --check` clean.
+
+## 51. AI Research: extending the existing evidence-bounded rating, not building a second one
+
+**Roadmap Phase 6**, design-gated ("Design first, then continue"). The
+audit that grounded the design found `alpha_lab.research.ai_rating` (a
+mature, pre-existing 900-line module, not built in this phase) already
+implements most of the roadmap's Phase 6 wishlist: bounded, namespaced
+evidence (`build_evidence_payload`), citation enforcement that rejects a
+fabricated evidence id rather than dropping it (`validate_evidence_ids`),
+provider output limited to qualitative per-dimension judgments with score/
+rating/confidence always computed afterward in pure Python
+(`build_ai_research_assessment`), and `supporting_evidence`/`catalysts`/
+`risks`/`contradictions`/`evidence_gaps`/`confidence` already on
+`AIResearchAssessment`. Rather than a second AI synthesis system, this
+phase is an integration/evolution of that one -- extend, not duplicate, per
+the explicit design-review instruction. Three real gaps were closed:
+
+**1. Evidence sourcing bypassed `ResearchState`.** The existing call site
+(`SupplementalResearchService.refresh_ai_research_assessment`) built
+evidence from four separately-passed objects (`StockResearch`,
+`AnalystConsensus`, `TechnicalSummary`, `FundEvidence`) and had zero
+visibility into Macro/Donatien/Alignment/News/Ethics -- domains §50's
+`ResearchState` already assembles. New module `alpha_lab/research_state_
+ai_evidence.py`, `build_evidence_payload_from_research_state(state) ->
+ResearchStateEvidence(items, provenance)`: calls the existing
+`build_evidence_payload` unchanged for the StockResearch-derived part
+(confirmed byte-identical by a dedicated regression test), then adds
+`macro:regime`/`donatien:dominant_regime`/`alignment:overall`/`ethics:
+status`/`news:impact_categories` -- each only when that `ResearchField`'s
+own `status` indicates real evidence, same "never fabricate, never
+promote unavailable to available" discipline `build_evidence_payload`
+already applies to `StockResearch` categories. New method
+`SupplementalResearchService.refresh_ai_research_assessment_from_state
+(research_state)` is the new call site; the original `refresh_ai_research_
+assessment`/`refresh_all` are untouched -- existing callers, tests, and
+the live `scripts/refresh_supplemental_research.py` cron path keep their
+exact current behavior. Wiring that script to the new state-based path is
+a deliberate, separate follow-up (per this roadmap's own small-PR
+pattern), not bundled into this phase.
+
+**2. `thesis`/`invalidation_conditions` were missing, and held to a
+stricter citation standard than free-text `positives`/`risks`** (per
+design review: these are higher-level synthesis claims, not observations,
+so they must be traceable). Two new structured models:
+
+```python
+class AIThesis(BaseModel):
+    statement: str
+    evidence_ids: list[str] = []
+
+class AIInvalidationCondition(BaseModel):
+    condition: str
+    evidence_ids: list[str] = []
+```
+
+Added to `AIRawDimensions` (provider output) and `AIResearchAssessment`
+(persisted result), both optional/defaulted so every pre-Phase-6 fixture
+and persisted payload keeps deserializing unchanged.
+`validate_evidence_ids` now checks `thesis.evidence_ids`/each
+`invalidation_conditions[i].evidence_ids` against the same bounded
+`allowed_ids` set as every dimension's `supporting_evidence_ids` -- a
+fabricated citation in the thesis is rejected exactly like a fabricated
+dimension citation, never silently dropped.
+`DeterministicAIRatingProvider` gained `_default_thesis`: a plain factual
+join of whichever dimensions were actually assessable, citing only the
+evidence those dimensions themselves already cite -- never a claim beyond
+what `_assess_dimension` established. `invalidation_conditions` is left
+honestly empty for this rule-based provider (same treatment as
+`positives`/`risks` already got) -- a threshold blend of existing evidence
+has no basis to reason about hypothetical future conditions; a live
+LLM-backed provider is expected to populate it (its prompt's schema is
+derived from `AIRawDimensions.model_json_schema()`, so it picks up both
+new fields automatically, no `OpenAIRatingProvider` change needed).
+
+**3. `material_changes` -- deterministic, never provider-authored,** per
+the design review ("don't let the LLM tell us what materially changed").
+New pure function `compute_material_changes(previous, dimensions, raw, *,
+rating, score) -> list[str]`: diffs the new assessment against the
+previously persisted one for this ticker (rating change, score change,
+any of the six dimension values, set differences in risks/catalysts/
+contradictions) -- every field it reads is itself already persisted on
+`AIResearchAssessment`, so the diff is always independently recomputable
+from two stored assessments alone, never dependent on the provider call
+that produced them. `[]` both when there is no prior assessment and when
+nothing tracked here changed -- deliberately not distinguished, since a
+fabricated "first assessment" note would itself be an unearned claim.
+`refresh_ai_research_assessment_from_state` reads the ticker's current
+`CurrentAIResearchAssessment` (before its own upsert) as `previous`.
+
+**4. Provenance made first-class.** `AIResearchAssessment` gained
+`research_refresh_version_id: str | None` (from `ResearchState.research_
+refresh_version_id`, §49's whole-refresh-cycle identity) and
+`evidence_provenance: dict[str, str | None]` (evidence_id -> the
+originating `ResearchField.provenance_id`) -- so a persisted assessment
+can answer "which exact research state, and which exact per-domain
+evidence, produced this" (closing the Phase 2 amendment's original ask).
+`evidence_provenance` only covers the five domains this phase's adapter
+newly contributes (macro/donatien/alignment/ethics/news) -- the
+`fundamental:*`/`metric:*`/`analyst:*`/`technical:*`/`fund:*`/`analyst_
+events:*`/`estimate_revision:*` families inherited from the existing
+`build_evidence_payload` are deliberately left unmapped rather than
+fabricating a false one-to-one association with the coarser `fundamentals`/
+`analyst_activity`/`technicals` `ResearchField`s (`ResearchState` has no
+dedicated `fund_evidence` field at all yet -- a real, documented gap, not
+papered over).
+
+**Regression guarantee** (the design review's explicit ask): `tests/
+test_research_state_ai_evidence.py::test_regression_unchanged_state_
+reproduces_old_assessment_except_new_fields` builds a `ResearchState` with
+every non-fundamental domain `NOT_COMPUTED`, runs both the pre-Phase-6
+call path and the new state-based path from identical underlying
+`StockResearch`, and asserts score/rating/confidence/dimensions/
+positives/risks/catalysts/contradictions/evidence_gaps/supporting_
+evidence/evidence_coverage are exactly equal -- only the explicitly-added
+fields are allowed to differ. A reproducibility test (`tests/test_
+supplemental_service.py::test_refresh_from_state_is_reproducible_given_
+unchanged_evidence`) confirms two consecutive refreshes of an unchanged
+`ResearchState`, through the deterministic (pure, rule-based) provider,
+yield identical score/rating/confidence/dimensions/thesis/
+evidence_provenance, and an empty `material_changes` on the second run.
+
+**Hard boundaries preserved, unchanged from before this phase:** no new
+arbitrary aggregate/conviction score (`material_changes` is a diff of
+already-persisted fields, not a new score); AI output never touches
+`StockResearch.overall_score` or any deterministic ranking/backtest path;
+`alpha_lab.ai.research`'s separate document-commentary AI system (feeding
+the *different*, pre-existing `ai_research` `StockResearch` category) is
+untouched and still explicitly excluded from this rating's own evidence
+(`_EXCLUDED_CATEGORIES`); no AI integration into ranking -- that is still
+explicitly Phase 7's question, not this one's.
+
+**New/changed files:** `alpha_lab/research/ai_rating.py` (extended, not
+rewritten -- `AIThesis`/`AIInvalidationCondition`/`compute_material_
+changes`, extended `AIRawDimensions`/`AIResearchAssessment`/
+`build_ai_research_assessment`/`validate_evidence_ids`/
+`DeterministicAIRatingProvider`); new `alpha_lab/research_state_ai_
+evidence.py`; `alpha_lab/research/supplemental_service.py` (additive new
+method only). **New tests:** `tests/test_ai_rating.py` (+13),
+`tests/test_research_state_ai_evidence.py` (new, 7), `tests/test_
+supplemental_service.py` (+4). Full suite green (same unrelated
+pre-existing `test_dependency_lock.py` lockfile-drift failure as every
+prior phase). Live-validated against the real database (NVDA/AACP/FTEC,
+via a disposable copy, never touching `data/alpha_lab.db`): real Macro/
+Donatien/Alignment/Ethics/News evidence items generated with real
+provenance ids; NVDA (which already had a prior AI assessment from the
+legacy call path) correctly reported real `material_changes` between
+runs; AACP/FTEC (no prior assessment) correctly reported `[]`; FTEC's thin
+evidence correctly still gated to `REVIEW`/`score=None` under the
+existing minimum-evidence rule, untouched by this phase.

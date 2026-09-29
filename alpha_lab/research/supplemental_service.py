@@ -20,6 +20,7 @@ preparation) happens before any database write, exactly mirroring
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from typing import TYPE_CHECKING
 
 import pandas as pd
 from sqlalchemy import Engine
@@ -49,6 +50,13 @@ from alpha_lab.research.fund_evidence import FundEvidence, build_fund_evidence
 from alpha_lab.research.security_type import normalize_security_type
 from alpha_lab.research.model import StockResearch
 from alpha_lab.research.technical import TechnicalSummary, build_technical_summary
+
+if TYPE_CHECKING:
+    # Deferred to avoid a circular import at module load: alpha_lab.research_state
+    # imports alpha_lab.research (this package) for ResearchService, so this
+    # module must not import it eagerly at the top level -- see
+    # refresh_ai_research_assessment_from_state's own local import below.
+    from alpha_lab.research_state import ResearchState
 
 
 @dataclass
@@ -272,6 +280,72 @@ class SupplementalResearchService:
             research_schema_version="stockresearch-v2",
             as_of=research.evaluation_date,
             generated_at=datetime.now(UTC),
+        )
+        self._upsert(CurrentAIResearchAssessment, symbol, assessment.model_dump(mode="json"))
+        return assessment
+
+    def refresh_ai_research_assessment_from_state(
+        self, research_state: "ResearchState"
+    ) -> AIResearchAssessment:
+        """roadmap Phase 6: the `alpha_lab.research_state.ResearchState`-driven
+        upgrade to `refresh_ai_research_assessment` above -- that method is
+        left completely unchanged (existing callers/tests keep its exact
+        current evidence set and behavior); this is an additive new entry
+        point, not a replacement.
+
+        Sources evidence via `alpha_lab.research_state_ai_evidence.
+        build_evidence_payload_from_research_state`, which extends the same
+        evidence `refresh_ai_research_assessment` already saw
+        (fundamentals/analyst/technical/fund, all read here from
+        `research_state.stock_research` rather than passed in separately)
+        with Macro/Donatien/Donatien-Alignment/News Impact/Ethics evidence
+        -- domains the old call site never reached. Threads `research_state.
+        research_refresh_version_id` and per-evidence-item provenance
+        through to the persisted `AIResearchAssessment`, and diffs against
+        the ticker's currently persisted assessment (read before this
+        call's own upsert) to populate `material_changes` deterministically
+        -- see `compute_material_changes`.
+
+        Raises `ValueError` if `research_state.stock_research` is `None`:
+        a ticker with no fundamental research yet has nothing to
+        synthesize an assessment from, the same precondition
+        `refresh_ai_research_assessment` already has via its own required
+        `research` parameter.
+        """
+        from alpha_lab.research_state_ai_evidence import (
+            build_evidence_payload_from_research_state,
+        )
+
+        research = research_state.stock_research
+        if research is None:
+            raise ValueError(
+                "refresh_ai_research_assessment_from_state requires "
+                f"research_state.stock_research for {research_state.ticker} "
+                "(no fundamental research computed yet)"
+            )
+        symbol = research_state.ticker
+        payload = build_evidence_payload_from_research_state(research_state)
+        evidence_coverage = build_evidence_coverage(
+            fundamental_coverage=research.overall_coverage,
+            analyst_consensus=research.analyst_consensus,
+            technical_summary=research.technical_summary,
+            fund_evidence=research.fund_evidence,
+            security_type=normalize_security_type(research.security_type),
+        )
+        previous = self.get_ai_research_assessment(symbol)
+        provider = configured_ai_rating_provider()
+        raw = provider.assess(symbol, payload.items)
+        assessment = build_ai_research_assessment(
+            ticker=symbol,
+            raw=raw,
+            evidence=payload.items,
+            evidence_coverage=evidence_coverage,
+            research_schema_version="stockresearch-v2",
+            as_of=research_state.evaluation_date,
+            generated_at=datetime.now(UTC),
+            previous=previous,
+            research_refresh_version_id=research_state.research_refresh_version_id,
+            evidence_provenance=payload.provenance,
         )
         self._upsert(CurrentAIResearchAssessment, symbol, assessment.model_dump(mode="json"))
         return assessment
