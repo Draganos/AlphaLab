@@ -5187,3 +5187,99 @@ legacy call path) correctly reported real `material_changes` between
 runs; AACP/FTEC (no prior assessment) correctly reported `[]`; FTEC's thin
 evidence correctly still gated to `REVIEW`/`score=None` under the
 existing minimum-evidence rule, untouched by this phase.
+
+## 52. AI Rating validation protocol (frozen v1): measuring whether the AI rating carries information
+
+**Roadmap Phase 7**, design approved with amendments. Measurement only:
+nothing here touches `HistoricalScoringService`, the backtester,
+`AIResearchAssessment`'s own score/rating math, or any ranking path. A
+validation result is evidence a relationship existed historically, not a
+licence for the signal to influence decisions -- the eventual sequence stays
+validation -> methodology/version validation -> out-of-sample/backtest ->
+interaction with the deterministic score -> conflict/conviction research ->
+portfolio/risk rules -> only then any trading-agent consideration.
+
+New module `alpha_lab/analytics/ai_rating_validation.py` (additive;
+`signal_predictive_value.py` is untouched and its `_correlate`/
+`_price_series`/`_forward_return_from` are reused so the "first trading day
+strictly after the snapshot" anchoring has one implementation). CLI:
+`scripts/validate_ai_rating.py` (read-only, no persistence).
+
+**Amendments from the design review, as implemented:**
+
+1. **Independence is horizon-specific, not calendar-week.** §33 flagged, and
+   a live check confirmed (two NVDA snapshots 45 minutes apart, identical
+   score), that snapshots cluster. One-per-week does not fix long horizons:
+   weekly snapshots' 60-day windows overlap almost entirely. For each
+   horizon `h`, same-ticker observations are kept only if their entry
+   trading-day positions are >= `h` apart (`select_independent_observations`,
+   earliest of a cluster wins, deterministic). The 30-observation floor is
+   evaluated per horizon on that horizon's own set, so the same snapshots are
+   never assumed independent for all of 5/20/60. Also >= 8 distinct tickers
+   per horizon. Below the floors a horizon reports counts only -- **no
+   correlation is computed**, so no impressive-looking number can come from
+   thin data.
+2. **Criterion D is an incremental association analysis, not "partial
+   correlation".** Plain OLS `forward_return ~ z(deterministic_score) +
+   z(ai_score)` on the same observations (the deterministic score is the
+   `overall_score` frozen in the same snapshot, so it is point-in-time by
+   construction). Passes when the AI coefficient is positive with t >= 2.0.
+   The t-stat assumes independent residuals; cross-ticker same-period
+   dependence remains (stated in the module docstring), so passing is
+   necessary evidence, not proof. Collinear/degenerate designs return `None`
+   and count as FAIL, never PASS.
+3. **The protocol is frozen and versioned.** `AI_RATING_VALIDATION_PROTOCOL_V1`
+   is a frozen dataclass; a test pins every value. Any threshold change is a
+   new protocol version; reports carry `protocol_version` and a later
+   protocol never overwrites an earlier verdict.
+4. **Methodology versioning.** Observations are grouped by
+   `AIMethodologyKey(methodology_version, provider, model, prompt_version)`
+   read from each persisted assessment; one report per key, never pooled.
+   Each observation also carries `research_refresh_version_id` (Phase 6) for
+   audit.
+5. **Confidence rule is fixed, not a median split.** High = confidence >=
+   0.75; each bucket needs >= 15 observations else NOT_TESTABLE. "Consistent
+   with confidence being informative" requires the high bucket to be positive
+   and stronger by >= 0.10 Spearman **and** significant under a Fisher-z
+   comparison of two independent correlations (z >= 1.645). The z condition
+   was added during implementation after a synthetic check showed a fixed
+   0.10 gap alone passes by chance between two equally informative buckets
+   (~30% of seeds at n=20/bucket); it was tightened before any production
+   result existed. E is informational and does not gate the status.
+
+**Status and criteria** (criterion-level results, no combined score):
+A `min_history` (>= 2 testable horizons), B `association_consistency`
+(Pearson/Spearman agree in every testable horizon), C `horizon_stability`
+(supported = both correlations positive and Spearman >= 2/sqrt(n) in >= 2
+testable horizons), D `incremental_information` (>= 2 testable horizons),
+E `confidence_calibration` (informational). Status: `NOT_TESTABLE` (no scored
+assessments for the methodology), `INSUFFICIENT_HISTORY` (no horizon
+testable), `TESTABLE_NO_VALIDATION` (fewer than 2 testable horizons),
+`VALIDATION_SUPPORTED` (A-D pass), `VALIDATION_NOT_SUPPORTED`. REVIEW
+assessments (`score is None`) are counted as `review_excluded`, never given
+an invented score.
+
+**Live result** (real DB, read-only, DB byte-identical before/after):
+methodology `ai-research-rating-v3 / deterministic-rule-based`: 13 scored
+snapshots (7 REVIEW excluded), **0 independent observations at every
+horizon** (all snapshots are from the last ~9 days, so no 5-trading-day
+forward window has completed for most) -> `INSUFFICIENT_HISTORY`, no
+statistics reported. This is the expected and correct outcome.
+
+**Tests:** `tests/test_ai_rating_validation.py` (25): protocol pin +
+immutability; horizon spacing scales with horizon, same-day cluster counts
+once, weekly snapshots overlap at 60d; no statistics below the floors;
+incremental analysis (real information found, redundant signal not found,
+degenerate inputs -> `None`); confidence split (stronger high bucket passes,
+equal strength fails, chance gap rejected, tiny bucket NOT_TESTABLE); every
+status reachable (`NOT_TESTABLE`, `INSUFFICIENT_HISTORY`,
+`TESTABLE_NO_VALIDATION`, `VALIDATION_SUPPORTED`, `VALIDATION_NOT_SUPPORTED`
+via noise and via a signal that only restates the deterministic score); E
+never gates; reproducibility; DB tests for methodology grouping without
+pooling, REVIEW exclusion, same-day dedup from real snapshots, and
+read-only behavior.
+
+**Deliberately not done:** no persistence of verdict history (a verdict is
+identified by `(protocol_version, methodology key)`, so append-only storage
+can be added later without changing the protocol); no scoring/ranking/
+backtest integration; no change to `ai_rating.py` thresholds.
