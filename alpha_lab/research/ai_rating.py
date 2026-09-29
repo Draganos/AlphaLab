@@ -107,6 +107,23 @@ class AIDimensionAssessment(BaseModel):
     supporting_evidence_ids: list[str] = Field(default_factory=list)
 
 
+class AIThesis(BaseModel):
+    """The synthesized investment/business thesis -- a higher-level claim
+    than `positives`/`risks`, so (unlike those free-text lists) it must
+    cite the evidence it is built from; see `validate_evidence_ids`."""
+
+    statement: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AIInvalidationCondition(BaseModel):
+    """One condition that, if observed, would invalidate the thesis --
+    also citation-bound, for the same reason as `AIThesis`."""
+
+    condition: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class AIRawDimensions(BaseModel):
     """What a provider returns. No score, rating, or overall confidence --
     those are computed deterministically in Python, never by the provider."""
@@ -123,6 +140,11 @@ class AIRawDimensions(BaseModel):
     catalysts: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     evidence_gaps: list[str] = Field(default_factory=list)
+    # Optional (default None/[]) so existing callers/fixtures built before
+    # these fields existed keep working unchanged -- see this module's own
+    # roadmap Phase 6 note on `build_ai_research_assessment`.
+    thesis: AIThesis | None = None
+    invalidation_conditions: list[AIInvalidationCondition] = Field(default_factory=list)
     provider: str
     model: str
     model_fingerprint: str | None = None
@@ -216,6 +238,26 @@ class AIResearchAssessment(BaseModel):
     contradictions: list[str]
     evidence_gaps: list[str]
     supporting_evidence: list[str]
+    # roadmap Phase 6: the synthesized thesis and its invalidation
+    # conditions, both citation-bound (see AIThesis/AIInvalidationCondition).
+    # `thesis` stays optional so a payload persisted before this field
+    # existed still deserializes.
+    thesis: AIThesis | None = None
+    invalidation_conditions: list[AIInvalidationCondition] = Field(default_factory=list)
+    # Deterministic diff against the previously persisted assessment for
+    # this ticker -- never provider-authored; see `compute_material_changes`.
+    # [] both when there was no prior assessment to compare against and
+    # when nothing tracked here changed -- the two are not distinguished
+    # here, since a fabricated "no prior assessment" note would itself be a
+    # claim this field otherwise never makes on the provider's behalf.
+    material_changes: list[str] = Field(default_factory=list)
+    # roadmap Phase 4/5 provenance, threaded through so this assessment is
+    # addressable back to the exact canonical Research State it was
+    # computed from -- see alpha_lab.research_state.ResearchState. Both
+    # None/{} when computed outside that path (e.g. the pre-Phase-6
+    # `refresh_ai_research_assessment` call site, which passes no state).
+    research_refresh_version_id: str | None = None
+    evidence_provenance: dict[str, str | None] = Field(default_factory=dict)
     methodology_version: str = AI_RATING_METHODOLOGY_VERSION
     prompt_version: str
     model: str
@@ -436,10 +478,17 @@ class EvidenceViolation(ValueError):
 
 def validate_evidence_ids(raw: AIRawDimensions, allowed_ids: set[str]) -> None:
     """Raise loudly if the provider cited evidence that was never offered --
-    never silently drop or ignore a fabricated citation."""
+    never silently drop or ignore a fabricated citation. `thesis`/
+    `invalidation_conditions` are held to the same standard as each
+    dimension's `supporting_evidence_ids`: a higher-level synthesis claim
+    is not exempt from being traceable to the bounded evidence payload."""
     cited: set[str] = set()
     for name in DIMENSION_NAMES:
         cited.update(getattr(raw, name).supporting_evidence_ids)
+    if raw.thesis is not None:
+        cited.update(raw.thesis.evidence_ids)
+    for condition in raw.invalidation_conditions:
+        cited.update(condition.evidence_ids)
     unknown = cited - allowed_ids
     if unknown:
         raise EvidenceViolation(f"AI cited evidence outside the supplied payload: {sorted(unknown)}")
@@ -534,6 +583,53 @@ def _meets_minimum_evidence(
     )
 
 
+def compute_material_changes(
+    previous: "AIResearchAssessment | None",
+    dimensions: dict[str, AIDimensionAssessment],
+    raw: AIRawDimensions,
+    *,
+    rating: AIDimensionValue,
+    score: float | None,
+) -> list[str]:
+    """Deterministic diff against the previously persisted assessment for
+    this ticker -- never provider-authored, so a provider cannot
+    manufacture a sense of urgency by simply asserting something changed.
+
+    `[]` when there is no `previous` to compare against (a first-ever
+    assessment has nothing to have changed from) or when nothing tracked
+    here differs. Tracks: overall rating, overall score, any of the six
+    dimension values, and set differences in risks/catalysts/contradictions
+    -- the same fields `AIResearchAssessment` itself persists, so this diff
+    can always be recomputed from two stored assessments alone.
+    """
+    if previous is None:
+        return []
+    changes: list[str] = []
+    if previous.rating != rating:
+        changes.append(f"Overall rating changed: {previous.rating.value} -> {rating.value}")
+    if previous.score != score:
+        prev_display = "REVIEW" if previous.score is None else f"{previous.score:.1f}"
+        new_display = "REVIEW" if score is None else f"{score:.1f}"
+        changes.append(f"Score changed: {prev_display} -> {new_display}")
+    for name, assessment in dimensions.items():
+        prior_assessment = previous.dimensions.get(name)
+        if prior_assessment is not None and prior_assessment.value != assessment.value:
+            changes.append(f"{name}: {prior_assessment.value.value} -> {assessment.value.value}")
+    new_risks = sorted(set(raw.risks) - set(previous.risks))
+    resolved_risks = sorted(set(previous.risks) - set(raw.risks))
+    new_catalysts = sorted(set(raw.catalysts) - set(previous.catalysts))
+    new_contradictions = sorted(set(raw.contradictions) - set(previous.contradictions))
+    if new_risks:
+        changes.append(f"New risk(s): {'; '.join(new_risks)}")
+    if resolved_risks:
+        changes.append(f"Resolved risk(s): {'; '.join(resolved_risks)}")
+    if new_catalysts:
+        changes.append(f"New catalyst(s): {'; '.join(new_catalysts)}")
+    if new_contradictions:
+        changes.append(f"New contradiction(s): {'; '.join(new_contradictions)}")
+    return changes
+
+
 def build_ai_research_assessment(
     *,
     ticker: str,
@@ -543,6 +639,9 @@ def build_ai_research_assessment(
     research_schema_version: str,
     as_of: date,
     generated_at: datetime | None = None,
+    previous: "AIResearchAssessment | None" = None,
+    research_refresh_version_id: str | None = None,
+    evidence_provenance: dict[str, str | None] | None = None,
 ) -> AIResearchAssessment:
     """Validate provider evidence citations, then deterministically compute
     score/rating/confidence. Raises EvidenceViolation if the provider cited
@@ -556,6 +655,15 @@ def build_ai_research_assessment(
     is allowed to stay low-but-nonzero in that case: REVIEW + low
     confidence is the honest combination for sparse evidence, never a
     guessed Positive/Negative rating.
+
+    `previous` (roadmap Phase 6) is the prior assessment for this ticker,
+    if any -- passed through to `compute_material_changes` only; it plays
+    no part in computing this assessment's own score/rating/confidence.
+    `research_refresh_version_id`/`evidence_provenance` (also Phase 6) are
+    opaque passthrough identity, supplied by a caller that assembled
+    `evidence` from a `alpha_lab.research_state.ResearchState` -- both
+    default to None/{} for a caller (e.g. the pre-Phase-6 call site) that
+    did not.
     """
     allowed_ids = {item.evidence_id for item in evidence}
     validate_evidence_ids(raw, allowed_ids)
@@ -572,6 +680,7 @@ def build_ai_research_assessment(
         score = None
         rating = AIDimensionValue.REVIEW
     supporting = sorted({eid for d in dimensions.values() for eid in d.supporting_evidence_ids})
+    material_changes = compute_material_changes(previous, dimensions, raw, rating=rating, score=score)
     return AIResearchAssessment(
         ticker=ticker.upper(),
         score=score,
@@ -585,6 +694,11 @@ def build_ai_research_assessment(
         contradictions=raw.contradictions,
         evidence_gaps=raw.evidence_gaps,
         supporting_evidence=supporting,
+        thesis=raw.thesis,
+        invalidation_conditions=raw.invalidation_conditions,
+        material_changes=material_changes,
+        research_refresh_version_id=research_refresh_version_id,
+        evidence_provenance=evidence_provenance or {},
         methodology_version=AI_RATING_METHODOLOGY_VERSION,
         prompt_version=raw.prompt_version,
         model=raw.model,
@@ -707,6 +821,19 @@ def _dimension_value_for_evidence(evidence_id: str, value: float | str) -> AIDim
     return None
 
 
+def _default_thesis(assessments: dict[str, AIDimensionAssessment]) -> AIThesis:
+    """`DeterministicAIRatingProvider`'s thesis: a plain factual summary of
+    whichever dimensions were actually assessable, citing exactly the
+    evidence those dimensions themselves already cite -- never a claim
+    beyond what `_assess_dimension` already established."""
+    usable = [(name, a) for name, a in assessments.items() if a.value != AIDimensionValue.REVIEW]
+    if not usable:
+        return AIThesis(statement="Insufficient evidence to synthesize a thesis.", evidence_ids=[])
+    parts = [f"{name.replace('_', ' ')}: {a.value.value}" for name, a in usable]
+    evidence_ids = sorted({eid for _, a in usable for eid in a.supporting_evidence_ids})
+    return AIThesis(statement="; ".join(parts) + ".", evidence_ids=evidence_ids)
+
+
 class DeterministicAIRatingProvider(AIRatingProvider):
     """Rule-based, offline, no network. Each dimension is derived only from
     the evidence domains actually supplied for it -- see `_DIMENSION_SOURCES`
@@ -799,6 +926,12 @@ class DeterministicAIRatingProvider(AIRatingProvider):
             catalysts=[],
             contradictions=contradictions,
             evidence_gaps=evidence_gaps,
+            thesis=_default_thesis(assessments),
+            # A rule-based blend of already-computed evidence has no basis
+            # to reason about hypothetical future conditions -- left empty,
+            # same honest treatment as `positives`/`risks` above (a live
+            # LLM-backed provider is expected to populate this).
+            invalidation_conditions=[],
             provider="deterministic-rule-based",
             model="category-threshold-v2",
             prompt_version=AI_RATING_PROMPT_VERSION,
