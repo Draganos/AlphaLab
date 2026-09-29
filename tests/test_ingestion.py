@@ -107,6 +107,59 @@ def test_price_re_ingesting_an_unchanged_bar_is_a_true_no_op():
         ) == 1
 
 
+class _AdjustedCloseProvider(FakeProvider):
+    def __init__(self, close: float, adjusted_close: float):
+        self._close, self._adjusted = close, adjusted_close
+
+    def get_price_history(self, ticker, start, end):
+        return pd.DataFrame(
+            {"close": [self._close], "adjusted_close": [self._adjusted]},
+            index=pd.to_datetime(["2024-01-01"]),
+        )
+
+
+def _price_row_count(engine, ticker):
+    with Session(engine) as session:
+        return session.scalar(select(func.count()).select_from(Price).where(Price.ticker == ticker))
+
+
+def test_float_precision_jitter_in_adjusted_close_is_not_a_revision():
+    """Regression: re-fetching an unchanged bar returns adjusted_close
+    differing in the last float32 bits (~1e-7 relative, measured on the live
+    database). Exact `!=` appended a duplicate row for it on every refresh
+    (14% surplus rows after three ingests)."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    IngestionService(_AdjustedCloseProvider(399.6000061035156, 397.08087158203125), engine).ingest(
+        "JIT", date(2024, 1, 1), date(2024, 2, 1)
+    )
+    IngestionService(_AdjustedCloseProvider(399.6000061035156, 397.0808410644531), engine).ingest(
+        "JIT", date(2024, 1, 1), date(2024, 2, 1)
+    )
+    assert _price_row_count(engine, "JIT") == 1
+
+
+def test_a_genuine_dividend_restatement_of_adjusted_close_still_appends():
+    """The tolerance must not swallow real revisions: a 0.1% restatement
+    (the smallest genuine dividend adjustment observed) is still a change."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    IngestionService(_AdjustedCloseProvider(100.0, 100.0), engine).ingest("DIV", date(2024, 1, 1), date(2024, 2, 1))
+    IngestionService(_AdjustedCloseProvider(100.0, 99.9), engine).ingest("DIV", date(2024, 1, 1), date(2024, 2, 1))
+    assert _price_row_count(engine, "DIV") == 2
+
+
+def test_a_change_from_or_to_a_missing_value_is_still_a_revision():
+    from alpha_lab.ingestion.service import _price_field_changed
+
+    assert _price_field_changed(None, 1.0)
+    assert _price_field_changed(1.0, None)
+    assert not _price_field_changed(None, None)
+    assert _price_field_changed("a", "b")
+    assert not _price_field_changed(1_000_000, 1_000_000)
+    assert _price_field_changed(592.0, 165697.0)  # volume restated
+
+
 def test_market_provider_cannot_replace_canonical_universe_exchange():
     engine = make_engine("sqlite:///:memory:")
     create_schema(engine)
