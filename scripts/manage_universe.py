@@ -48,7 +48,11 @@ from alpha_lab.ingestion import IngestionService  # noqa: E402
 from alpha_lab.ingestion.estimates import snapshot_estimates  # noqa: E402
 from alpha_lab.news import NewsService  # noqa: E402
 from alpha_lab.providers import ProviderError, YFinanceProvider  # noqa: E402
-from alpha_lab.refresh import adopt_current_research_tickers  # noqa: E402
+from alpha_lab.refresh import (  # noqa: E402
+    UniverseTooLargeToAdopt,
+    adopt_current_research_tickers,
+    set_tracked_tickers,
+)
 from alpha_lab.providers.sec_edgar import SECClient  # noqa: E402
 from alpha_lab.providers.sec_filings import SECFilingDocumentProvider  # noqa: E402
 from alpha_lab.research import ResearchService  # noqa: E402
@@ -206,7 +210,11 @@ def adopt_current(engine) -> bool:
     repair for a database whose `is_tracked` column was added without a
     backfill (every security became untracked, so Full Refresh ingested
     0/0). Adds only; never removes; no network."""
-    adopted = adopt_current_research_tickers(engine)
+    try:
+        adopted = adopt_current_research_tickers(engine)
+    except UniverseTooLargeToAdopt as error:
+        print(error)
+        return False
     if adopted:
         print(f"Re-tracked {len(adopted)} securit(y/ies) from the latest research build: {', '.join(adopted)}")
         return True
@@ -215,6 +223,28 @@ def adopt_current(engine) -> bool:
         "(or no build exists). Use `add TICKER ...` to start tracking a ticker."
     )
     return False
+
+
+def set_tracked(engine, settings, tickers: list[str]) -> bool:
+    """Make the tracked universe exactly `tickers`. Flags only -- nothing is
+    deleted or fetched -- then one research rebuild so the dashboard reflects
+    it. A ticker with no `Security` row is reported: it needs `add`."""
+    try:
+        result = set_tracked_tickers(engine, tickers)
+    except ValueError as error:
+        print(error)
+        return False
+    print(f"Tracked universe is now exactly {len(result.tracked)} securit(y/ies): {', '.join(result.tracked)}")
+    if result.newly_tracked:
+        print(f"  newly tracked: {', '.join(result.newly_tracked)}")
+    print(f"  untracked {result.untracked_count} other securit(y/ies) (history preserved)")
+    if result.missing:
+        print(f"  NOT FOUND (run `add {' '.join(result.missing)}` to ingest them): {', '.join(result.missing)}")
+    print()
+    print("Rebuilding current research for the tracked universe...")
+    records = MarketScreenerService(engine, settings).rebuild_current_research()
+    print(f"Research rebuilt for {len(records)} tracked securit(y/ies).")
+    return not result.missing
 
 
 def remove_tickers(engine, settings, tickers: list[str]) -> bool:
@@ -254,6 +284,11 @@ def main() -> int:
         "adopt-current",
         help="Re-track every security in the latest research build (repair for an empty tracked universe)",
     )
+    set_parser = subparsers.add_parser(
+        "set-tracked",
+        help="Make the tracked universe exactly these tickers (untracks all others; history preserved)",
+    )
+    set_parser.add_argument("tickers", nargs="+")
     remove_parser = subparsers.add_parser(
         "remove", help="Remove ticker(s) from the tracked research universe (history preserved)"
     )
@@ -265,6 +300,8 @@ def main() -> int:
     engine = make_engine(settings.database_url)
     create_schema(engine)
 
+    if args.action == "set-tracked":
+        return 0 if set_tracked(engine, settings, [t.upper().strip() for t in args.tickers]) else 1
     if args.action == "adopt-current":
         return 0 if adopt_current(engine) else 1
     tickers = [ticker.upper().strip() for ticker in args.tickers]

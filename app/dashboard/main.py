@@ -128,7 +128,8 @@ NO_TRACKED_UNIVERSE_MESSAGE = (
     "No securities are tracked, so Full Refresh and the automatic refresh have nothing to "
     "update. If this database predates the tracked-universe model, run "
     "`python scripts/manage_universe.py adopt-current` to re-track the securities in the "
-    "latest research build; otherwise `python scripts/manage_universe.py add TICKER ...`."
+    "latest research build (it refuses a build over 200 securities: pick them with "
+    "`set-tracked TICKER ...`); otherwise `python scripts/manage_universe.py add TICKER ...`."
 )
 
 

@@ -39,6 +39,9 @@ def make_engine(url: str) -> Engine:
     return engine
 
 
+_MAX_BACKFILL_TRACKED = 200
+
+
 def create_schema(engine: Engine) -> None:
     if engine.dialect.name == "sqlite":
         _migrate_legacy_fundamentals(engine)
@@ -123,13 +126,18 @@ def create_schema(engine: Engine) -> None:
                 # and no path ever re-tracked anything. Preserve membership:
                 # whatever the latest current research build contained is
                 # what the dashboard was treating as the live universe.
-                connection.execute(
-                    text(
-                        "UPDATE securities SET is_tracked = 1 WHERE ticker IN ("
-                        "SELECT ticker FROM current_research_snapshots WHERE build_id = "
-                        "(SELECT MAX(id) FROM current_research_builds))"
-                    )
+                # Skipped above the full-refresh cap (kept equal to
+                # alpha_lab.refresh.MAX_FULL_UNIVERSE_REFRESH_BATCH; a test
+                # pins the two together): a build that large is the
+                # pre-tracking "every security in the table" universe this
+                # column exists to end, and re-tracking it would recreate it.
+                latest_build = "(SELECT MAX(id) FROM current_research_builds)"
+                in_build = (
+                    "SELECT ticker FROM current_research_snapshots WHERE build_id = " + latest_build
                 )
+                build_size = connection.execute(text(f"SELECT COUNT(*) FROM ({in_build})")).scalar() or 0
+                if build_size <= _MAX_BACKFILL_TRACKED:
+                    connection.execute(text(f"UPDATE securities SET is_tracked = 1 WHERE ticker IN ({in_build})"))
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_factor_scores_config_hash ON factor_scores (config_hash)"

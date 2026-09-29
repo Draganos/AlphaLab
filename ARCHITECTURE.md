@@ -5468,3 +5468,25 @@ backfill does not rerun (a `remove` survives the next `create_schema`);
 adopt adds only, is idempotent, and does nothing with no build; the command;
 Data Quality shows tracked securities only; the empty-universe warning and
 Full Refresh message.
+
+**Addendum to §55 -- the first real run of `adopt-current` re-created the bloat it was meant to fix.**
+On the user's database the latest current research build held **5,149
+securities** (the pre-tracking "every security in the table" universe, §48),
+so `adopt-current` re-tracked all 5,149 -- and the migration backfill above
+would have done the same on any database whose latest build was that large.
+"Whatever the latest build contained" is only a faithful migration when the
+build was a curated universe. Fixes: (1) `adopt_current_research_tickers` and
+the `create_schema` backfill refuse/skip above 200 securities
+(`MAX_FULL_UNIVERSE_REFRESH_BATCH`, the same cap that already marks a
+universe too large to refresh in one call; a test pins the two constants
+together); the CLI explains and points at (2) `manage_universe.py
+set-tracked TICKER ...` / `alpha_lab.refresh.set_tracked_tickers`: makes the
+tracked universe *exactly* the named tickers (flags only -- nothing deleted or
+fetched), reports unknown tickers (they need `add`), refuses to leave the
+universe empty, then rebuilds research. Verified on a copy simulating the
+5,149-security state: `adopt-current` refuses; `set-tracked` yields exactly
+the named securities, rebuilds, and the dashboard loads with no exception or
+warning. Lesson recorded: a repair that adopts existing state needs a
+sanity bound derived from what the state is *for*, and should have been
+exercised against a database shaped like the one that motivated it, not only
+the 16-ticker one.
