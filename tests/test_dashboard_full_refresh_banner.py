@@ -206,3 +206,34 @@ def test_a_fully_fresh_universe_never_triggers_the_automatic_refresh(tmp_path, m
     assert not at.exception
     assert fake.calls == []
     assert at.session_state["auto_stale_refresh_attempted"] is True
+
+
+def test_an_empty_tracked_universe_is_called_out_not_reported_as_a_successful_refresh(tmp_path, monkeypatch):
+    """Regression for a real report: on a database where nothing is tracked,
+    Full Refresh printed "Ingested 0/0 ticker(s) ... research rebuilt for 0
+    securit(y/ies)" as if it had worked. It must instead say nothing is
+    tracked and name the repair command."""
+    db_path = tmp_path / "dashboard.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="MSFT", country="US", currency="USD", is_tracked=False))
+        session.add(Price(
+            ticker="MSFT", date=date.today(), close=100.0, high=101.0, low=99.0,
+            provider="fixture", currency="USD", source="test",
+        ))
+        session.commit()
+    engine.dispose()
+    monkeypatch.setenv("ALPHALAB_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: _FakeProvider())
+
+    at = AppTest.from_file(_MAIN_PATH)
+    at.session_state["auto_stale_refresh_attempted"] = True
+    at.run(timeout=60)
+    assert not at.exception
+    assert any("adopt-current" in warning.value for warning in at.warning)
+
+    at.button[0].click().run(timeout=120)
+    assert not at.exception
+    assert any("adopt-current" in warning.value for warning in at.warning)
+    assert not any("Ingested 0/0" in success.value for success in at.success)

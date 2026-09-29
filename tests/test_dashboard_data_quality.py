@@ -57,8 +57,8 @@ def test_data_quality_reports_each_tickers_true_latest_date_not_just_any_row(tmp
     create_schema(engine)
     today = date.today()
     with Session(engine) as session:
-        session.add(Security(ticker="AAPL", country="US", currency="USD"))
-        session.add(Security(ticker="MSFT", country="US", currency="USD"))
+        session.add(Security(ticker="AAPL", country="US", currency="USD", is_tracked=True))
+        session.add(Security(ticker="MSFT", country="US", currency="USD", is_tracked=True))
         # Inserted out of date order, and with several rows per ticker --
         # the old code's ORDER BY ticker, date DESC relied on insertion
         # producing a sorted result; a GROUP BY MAX must be correct
@@ -81,5 +81,33 @@ def test_data_quality_reports_each_tickers_true_latest_date_not_just_any_row(tmp
     try:
         assert module.latest_by_ticker["AAPL"] == today - timedelta(days=0)
         assert module.latest_by_ticker["MSFT"] == today - timedelta(days=1)
+    finally:
+        module.engine.dispose()
+
+
+def test_data_quality_lists_only_tracked_securities(tmp_path, monkeypatch):
+    """Regression: the table listed every ticker with any price row --
+    thousands of untracked catalog securities and macro-proxy tickers --
+    as "stale", a wall of rows that Full Refresh (tracked universe only)
+    could never clear."""
+    db_path = tmp_path / "dashboard.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    old = date.today() - timedelta(days=40)
+    with Session(engine) as session:
+        session.add(Security(ticker="MSFT", country="US", currency="USD", is_tracked=True))
+        session.add(Security(ticker="ELF", country="US", currency="USD", is_tracked=False))
+        session.add(Security(ticker="^VIX", country="US", currency="USD", is_tracked=False))
+        for ticker in ("MSFT", "ELF", "^VIX"):
+            session.add(Price(
+                ticker=ticker, date=old, close=10.0, high=11.0, low=9.0,
+                provider="fixture", currency="USD", source="test",
+            ))
+        session.commit()
+    engine.dispose()
+
+    module = _import_main(db_path, monkeypatch)
+    try:
+        assert set(module.latest_by_ticker) == {"MSFT"}
     finally:
         module.engine.dispose()

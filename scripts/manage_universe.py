@@ -48,6 +48,7 @@ from alpha_lab.ingestion import IngestionService  # noqa: E402
 from alpha_lab.ingestion.estimates import snapshot_estimates  # noqa: E402
 from alpha_lab.news import NewsService  # noqa: E402
 from alpha_lab.providers import ProviderError, YFinanceProvider  # noqa: E402
+from alpha_lab.refresh import adopt_current_research_tickers  # noqa: E402
 from alpha_lab.providers.sec_edgar import SECClient  # noqa: E402
 from alpha_lab.providers.sec_filings import SECFilingDocumentProvider  # noqa: E402
 from alpha_lab.research import ResearchService  # noqa: E402
@@ -200,6 +201,22 @@ def add_tickers(engine, settings, tickers: list[str]) -> bool:
     return all_succeeded
 
 
+def adopt_current(engine) -> bool:
+    """Re-track every security in the latest current research build. The
+    repair for a database whose `is_tracked` column was added without a
+    backfill (every security became untracked, so Full Refresh ingested
+    0/0). Adds only; never removes; no network."""
+    adopted = adopt_current_research_tickers(engine)
+    if adopted:
+        print(f"Re-tracked {len(adopted)} securit(y/ies) from the latest research build: {', '.join(adopted)}")
+        return True
+    print(
+        "Nothing to adopt: the latest research build has no untracked securities "
+        "(or no build exists). Use `add TICKER ...` to start tracking a ticker."
+    )
+    return False
+
+
 def remove_tickers(engine, settings, tickers: list[str]) -> bool:
     """Flip `is_tracked` off. Never deletes the `Security` row or any
     historical data -- see this module's own docstring. Returns False if
@@ -233,6 +250,10 @@ def main() -> int:
         "add", help="Add ticker(s) to the tracked research universe (full bootstrap)"
     )
     add_parser.add_argument("tickers", nargs="+")
+    subparsers.add_parser(
+        "adopt-current",
+        help="Re-track every security in the latest research build (repair for an empty tracked universe)",
+    )
     remove_parser = subparsers.add_parser(
         "remove", help="Remove ticker(s) from the tracked research universe (history preserved)"
     )
@@ -244,6 +265,8 @@ def main() -> int:
     engine = make_engine(settings.database_url)
     create_schema(engine)
 
+    if args.action == "adopt-current":
+        return 0 if adopt_current(engine) else 1
     tickers = [ticker.upper().strip() for ticker in args.tickers]
     if args.action == "add":
         ok = add_tickers(engine, settings, tickers)

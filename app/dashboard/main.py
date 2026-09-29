@@ -16,6 +16,7 @@ from alpha_lab.database.models import Price
 from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.refresh import (
+    configured_universe_tickers,
     MAX_AUTO_REFRESH_TICKERS,
     MAX_FULL_UNIVERSE_REFRESH_BATCH,
     is_universe_price_stale,
@@ -123,6 +124,12 @@ right.write(f"Paper starting value setting: AED {settings.paper_trading['initial
 st.divider()
 _stale_price_days = settings.data_quality["stale_price_days"]
 _staleness_banner = st.empty()
+NO_TRACKED_UNIVERSE_MESSAGE = (
+    "No securities are tracked, so Full Refresh and the automatic refresh have nothing to "
+    "update. If this database predates the tracked-universe model, run "
+    "`python scripts/manage_universe.py adopt-current` to re-track the securities in the "
+    "latest research build; otherwise `python scripts/manage_universe.py add TICKER ...`."
+)
 
 
 def _render_staleness_banner() -> None:
@@ -132,7 +139,9 @@ def _render_staleness_banner() -> None:
     # would keep showing "stale" even immediately after a refresh that just
     # fixed it, contradicting the success message rendered further down in
     # this exact same script run.
-    if is_universe_price_stale(engine, _stale_price_days):
+    if not configured_universe_tickers(engine):
+        _staleness_banner.warning(NO_TRACKED_UNIVERSE_MESSAGE)
+    elif is_universe_price_stale(engine, _stale_price_days):
         _staleness_banner.warning(
             f"Some tracked securities have price data older than the configured "
             f"{_stale_price_days}-day observation limit."
@@ -237,6 +246,8 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
             f"research is unchanged. Ingested {status.core.tickers_succeeded}/"
             f"{status.core.tickers_attempted} ticker(s) ({status.core.tickers_failed} failed)."
         )
+    elif status.tracked_universe_size == 0:
+        st.warning(NO_TRACKED_UNIVERSE_MESSAGE)
     else:
         _tracked_total = status.tracked_universe_size
         if _tracked_total > MAX_FULL_UNIVERSE_REFRESH_BATCH:
@@ -352,7 +363,14 @@ with Session(engine) as session:
     # avoidable cost that scales with total price rows (~500/ticker/year),
     # not with the universe size this table actually needs.
     latest_prices = session.execute(select(Price.ticker, func.max(Price.date)).group_by(Price.ticker)).all()
-latest_by_ticker: dict[str, date] = dict(latest_prices)
+# Only the tracked universe: the price-freshness banner and Full Refresh
+# both operate on it, so listing every catalog security or macro-proxy
+# ticker that merely has a price row showed a wall of "stale" rows that no
+# refresh could ever clear.
+_tracked_for_quality = set(configured_universe_tickers(engine))
+latest_by_ticker: dict[str, date] = {
+    ticker: observed for ticker, observed in latest_prices if ticker in _tracked_for_quality
+}
 quality_rows = []
 for ticker, observed in latest_by_ticker.items():
     issue = assess_freshness("price", observed, date.today(), settings.data_quality["stale_price_days"])

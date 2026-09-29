@@ -126,6 +126,38 @@ def configured_universe_tickers(engine: Engine) -> list[str]:
         ))
 
 
+def adopt_current_research_tickers(engine: Engine) -> list[str]:
+    """Mark every ticker in the latest current research build as tracked;
+    returns the tickers newly marked (already-tracked ones are untouched, so
+    this only ever adds and is idempotent).
+
+    Repair for a database migrated before `create_schema` backfilled
+    `is_tracked`: there every pre-existing security became untracked, so
+    `configured_universe_tickers` was empty and Full Refresh silently did
+    nothing. Deliberately an explicit action (`scripts/manage_universe.py
+    adopt-current`), never automatic: an empty tracked universe can also be
+    a deliberate result of `manage_universe remove`, and a rebuild with no
+    tracked securities is not persisted, so the latest build would
+    otherwise resurrect removed tickers."""
+    from alpha_lab.database.models import CurrentResearchBuild, CurrentResearchSnapshot
+
+    with Session(engine) as session:
+        build_id = session.scalar(select(func.max(CurrentResearchBuild.id)))
+        if build_id is None:
+            return []
+        candidates = session.scalars(
+            select(Security)
+            .join(CurrentResearchSnapshot, CurrentResearchSnapshot.ticker == Security.ticker)
+            .where(CurrentResearchSnapshot.build_id == build_id, Security.is_tracked.is_(False))
+            .order_by(Security.ticker)
+        ).all()
+        adopted = [security.ticker for security in candidates]
+        for security in candidates:
+            security.is_tracked = True
+        session.commit()
+    return adopted
+
+
 def filing_eligible_tickers(engine: Engine) -> list[str]:
     """Tracked tickers for which SEC 10-K/10-Q ingestion is meaningful:
     every `configured_universe_tickers` entry except funds, which file
