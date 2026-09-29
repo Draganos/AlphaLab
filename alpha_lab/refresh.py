@@ -126,7 +126,20 @@ def configured_universe_tickers(engine: Engine) -> list[str]:
         ))
 
 
-def adopt_current_research_tickers(engine: Engine) -> list[str]:
+class UniverseTooLargeToAdopt(ValueError):
+    """The latest research build is far larger than any curated research
+    universe (see `MAX_FULL_UNIVERSE_REFRESH_BATCH`)."""
+
+    def __init__(self, count: int, cap: int):
+        super().__init__(
+            f"The latest research build holds {count} untracked securities (cap {cap}): that is the "
+            "pre-tracking 'every security in the table' universe, not a curated research universe. "
+            "Choose the tickers explicitly: `manage_universe.py set-tracked TICKER ...`."
+        )
+        self.count, self.cap = count, cap
+
+
+def adopt_current_research_tickers(engine: Engine, *, max_tickers: int = MAX_FULL_UNIVERSE_REFRESH_BATCH) -> list[str]:
     """Mark every ticker in the latest current research build as tracked;
     returns the tickers newly marked (already-tracked ones are untouched, so
     this only ever adds and is idempotent).
@@ -138,7 +151,12 @@ def adopt_current_research_tickers(engine: Engine) -> list[str]:
     adopt-current`), never automatic: an empty tracked universe can also be
     a deliberate result of `manage_universe remove`, and a rebuild with no
     tracked securities is not persisted, so the latest build would
-    otherwise resurrect removed tickers."""
+    otherwise resurrect removed tickers.
+
+    Refuses (`UniverseTooLargeToAdopt`) above `max_tickers`: on the first
+    real database this was run against, the latest build held 5,149
+    securities -- the pre-tracking universe that `is_tracked` exists to end
+    -- so adopting "whatever the build had" recreated exactly that."""
     from alpha_lab.database.models import CurrentResearchBuild, CurrentResearchSnapshot
 
     with Session(engine) as session:
@@ -151,11 +169,51 @@ def adopt_current_research_tickers(engine: Engine) -> list[str]:
             .where(CurrentResearchSnapshot.build_id == build_id, Security.is_tracked.is_(False))
             .order_by(Security.ticker)
         ).all()
+        if len(candidates) > max_tickers:
+            raise UniverseTooLargeToAdopt(len(candidates), max_tickers)
         adopted = [security.ticker for security in candidates]
         for security in candidates:
             security.is_tracked = True
         session.commit()
     return adopted
+
+
+@dataclass
+class SetTrackedResult:
+    tracked: list[str]
+    newly_tracked: list[str]
+    untracked_count: int
+    missing: list[str]
+
+
+def set_tracked_tickers(engine: Engine, tickers: list[str]) -> SetTrackedResult:
+    """Make the tracked universe exactly `tickers`: flag them tracked and
+    every other tracked security untracked. Only flags change -- no
+    `Security` row or any history is ever deleted, and nothing is fetched.
+    A ticker with no `Security` row is reported in `missing` (it needs
+    `manage_universe.py add`, which ingests it). Raises `ValueError` rather
+    than leave the universe empty when none of `tickers` exist."""
+    wanted = list(dict.fromkeys(ticker.strip().upper() for ticker in tickers if ticker.strip()))
+    with Session(engine) as session:
+        existing = {
+            security.ticker: security
+            for security in session.scalars(select(Security).where(Security.ticker.in_(wanted)))
+        }
+        if not existing:
+            raise ValueError("None of the requested tickers exist; refusing to leave the tracked universe empty.")
+        newly_tracked = sorted(t for t, sec in existing.items() if not sec.is_tracked)
+        for security in existing.values():
+            security.is_tracked = True
+        others = session.scalars(
+            select(Security).where(Security.is_tracked.is_(True), Security.ticker.not_in(list(existing)))
+        ).all()
+        for security in others:
+            security.is_tracked = False
+        session.commit()
+        return SetTrackedResult(
+            tracked=sorted(existing), newly_tracked=newly_tracked,
+            untracked_count=len(others), missing=[t for t in wanted if t not in existing],
+        )
 
 
 def filing_eligible_tickers(engine: Engine) -> list[str]:

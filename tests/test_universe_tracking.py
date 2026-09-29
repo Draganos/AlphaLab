@@ -582,3 +582,108 @@ def test_manage_universe_adopt_current_command(monkeypatch, manage_universe, cap
     assert "Re-tracked 1" in capsys.readouterr().out
     assert configured_universe_tickers(engine) == ["MSFT"]
     assert manage_universe.adopt_current(engine) is False  # idempotent
+
+
+# --- adopting an oversized build; set-tracked --------------------------------
+
+
+def test_adopt_refuses_a_build_larger_than_a_curated_universe():
+    """Regression: on a real database the latest build held 5,149 securities
+    (the pre-tracking 'every security' universe) and adopting it recreated
+    exactly the bloat `is_tracked` exists to end."""
+    from alpha_lab.refresh import UniverseTooLargeToAdopt, adopt_current_research_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    tickers = ["AAA", "BBB", "CCC"]
+    with Session(engine) as session:
+        for ticker in tickers:
+            session.add(Security(ticker=ticker, is_tracked=False))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_adopt_record(t) for t in tickers])
+
+    with pytest.raises(UniverseTooLargeToAdopt):
+        adopt_current_research_tickers(engine, max_tickers=2)
+    assert configured_universe_tickers(engine) == []  # nothing changed
+    assert adopt_current_research_tickers(engine, max_tickers=3) == tickers
+
+
+def test_migration_backfill_is_skipped_for_an_oversized_build(tmp_path):
+    from alpha_lab.database.session import _MAX_BACKFILL_TRACKED
+
+    path = tmp_path / "legacy_big.db"
+    tickers = [f"T{i:04d}" for i in range(_MAX_BACKFILL_TRACKED + 1)]
+    _legacy_database_without_is_tracked(path, tickers, built_tickers=tickers)
+    engine = make_engine(f"sqlite:///{path}")
+    create_schema(engine)
+    assert configured_universe_tickers(engine) == []
+
+
+def test_backfill_cap_matches_the_full_refresh_cap():
+    from alpha_lab.database.session import _MAX_BACKFILL_TRACKED
+    from alpha_lab.refresh import MAX_FULL_UNIVERSE_REFRESH_BATCH
+
+    assert _MAX_BACKFILL_TRACKED == MAX_FULL_UNIVERSE_REFRESH_BATCH
+
+
+def test_set_tracked_makes_the_universe_exactly_the_named_tickers():
+    from alpha_lab.refresh import set_tracked_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in ("MSFT", "GDX", "JUNK1", "JUNK2"):
+            session.add(Security(ticker=ticker, is_tracked=ticker.startswith("JUNK")))
+        session.commit()
+
+    result = set_tracked_tickers(engine, ["msft", "GDX", "SPY", "MSFT"])
+
+    assert configured_universe_tickers(engine) == ["GDX", "MSFT"]
+    assert result.newly_tracked == ["GDX", "MSFT"]
+    assert result.untracked_count == 2
+    assert result.missing == ["SPY"]
+    with Session(engine) as session:
+        assert session.get(Security, "JUNK1") is not None  # flag flipped, row kept
+        assert session.get(Security, "JUNK1").is_tracked is False
+    assert set_tracked_tickers(engine, ["MSFT", "GDX"]).untracked_count == 0  # idempotent
+
+
+def test_set_tracked_never_leaves_the_universe_empty():
+    from alpha_lab.refresh import set_tracked_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="MSFT", is_tracked=True))
+        session.commit()
+    with pytest.raises(ValueError):
+        set_tracked_tickers(engine, ["TYPO"])
+    assert configured_universe_tickers(engine) == ["MSFT"]
+
+
+def test_manage_universe_set_tracked_command(monkeypatch, manage_universe, capsys):
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="MSFT", is_tracked=False))
+        session.add(Security(ticker="JUNK", is_tracked=True))
+        session.commit()
+
+    ok = manage_universe.set_tracked(engine, load_settings(), ["MSFT", "SPY"])
+
+    out = capsys.readouterr().out
+    assert ok is False  # SPY is unknown: reported, and the exit status says so
+    assert "NOT FOUND" in out and "add SPY" in out
+    assert configured_universe_tickers(engine) == ["MSFT"]
+
+
+def test_manage_universe_adopt_current_reports_an_oversized_build(monkeypatch, manage_universe, capsys):
+    from alpha_lab.refresh import UniverseTooLargeToAdopt
+
+    def _too_big(engine):
+        raise UniverseTooLargeToAdopt(5149, 200)
+
+    monkeypatch.setattr(manage_universe, "adopt_current_research_tickers", _too_big)
+    assert manage_universe.adopt_current(make_engine("sqlite:///:memory:")) is False
+    assert "set-tracked" in capsys.readouterr().out
