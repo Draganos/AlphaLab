@@ -403,3 +403,75 @@ def test_refresh_scripts_default_to_the_tracked_universe_not_the_config_list():
         source = (scripts / f"{name}.py").read_text()
         assert "settings.universe" not in source, name
         assert "configured_universe_tickers(engine)" in source, name
+
+
+# --- provider circuit breaker / stalest-first batching ----------------------
+
+def _rate_limited() -> ProviderError:
+    return ProviderError(ProviderErrorKind.RATE_LIMITED, "yfinance", "Yahoo Finance rate-limited the request")
+
+
+def _tracked_engine(tickers):
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in tickers:
+            session.add(Security(ticker=ticker, country="US", currency="USD", is_tracked=True))
+        session.commit()
+    return engine
+
+
+def test_a_rate_limited_batch_stops_instead_of_grinding_through_every_ticker(monkeypatch):
+    """Observed: a 200-ticker batch under Yahoo throttling ran ~30 minutes
+    and cleared ~50 tickers, every remaining ticker burning its own retries.
+    After MAX_CONSECUTIVE_PROVIDER_FAILURES consecutive rate-limit failures
+    the batch must stop and name the untouched remainder."""
+    import alpha_lab.refresh as refresh_module
+
+    tickers = [f"T{i:02d}" for i in range(12)]
+    engine = _tracked_engine(tickers)
+    fake = _FakeProvider(failing={ticker: _rate_limited() for ticker in tickers})
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: fake)
+    monkeypatch.setattr("alpha_lab.refresh.MarketScreenerService.rebuild_current_research", lambda self: [])
+
+    result = run_core_refresh(engine, load_settings())
+
+    limit = refresh_module.MAX_CONSECUTIVE_PROVIDER_FAILURES
+    assert len(result.tickers_failed) == limit  # no ticker past the breaker was touched
+    assert result.tickers_attempted == tickers[:limit]
+    assert result.tickers_not_attempted == tickers[limit:]
+    assert "RATE_LIMITED" in result.stopped_early
+    assert result.research_rebuilt is True  # rebuild still runs on what exists
+
+
+def test_a_success_resets_the_breaker_and_no_data_never_trips_it(monkeypatch):
+    tickers = [f"T{i:02d}" for i in range(12)]
+    engine = _tracked_engine(tickers)
+    no_data = ProviderError(ProviderErrorKind.NO_DATA, "yfinance", "no such ticker")
+    failing = {t: no_data for t in tickers[:8]}  # 8 NO_DATA in a row: never counts
+    failing.update({t: _rate_limited() for t in tickers[8:11]})  # 3 rate limits...
+    fake = _FakeProvider(failing=failing)  # ...then T11 succeeds, still under the limit
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: fake)
+    monkeypatch.setattr("alpha_lab.refresh.MarketScreenerService.rebuild_current_research", lambda self: [])
+
+    result = run_core_refresh(engine, load_settings())
+
+    assert result.stopped_early is None and result.tickers_not_attempted == []
+    assert len(result.tickers_attempted) == 12
+    assert result.tickers_succeeded == ["T11"]
+
+
+def test_capped_batch_takes_never_fetched_tickers_before_merely_stale_ones(monkeypatch):
+    import alpha_lab.refresh as refresh_module
+
+    monkeypatch.setattr(refresh_module, "MAX_FULL_UNIVERSE_REFRESH_BATCH", 2)
+    engine = _tracked_engine(["MSFT"])  # alphabetically last, never fetched
+    _seed_security_with_price(engine, "AAA", date.today() - timedelta(days=30))
+    _seed_security_with_price(engine, "BBB", date.today() - timedelta(days=60))
+    fake = _FakeProvider()
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: fake)
+    monkeypatch.setattr("alpha_lab.refresh.MarketScreenerService.rebuild_current_research", lambda self: [])
+
+    result = run_core_refresh(engine, load_settings())
+
+    assert result.tickers_attempted == ["MSFT", "BBB"]  # no price first, then the oldest

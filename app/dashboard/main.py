@@ -279,6 +279,24 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
                 f"{status.core.research_record_count} securit(y/ies). "
                 f"Research state version {status.version_id[:12]}."
             )
+    if status is not None and (status.core.stopped_early or status.core.failure_reasons):
+        _notes = []
+        if status.core.stopped_early:
+            _notes.append(
+                f"Refresh {status.core.stopped_early}. {status.core.tickers_not_attempted} "
+                "ticker(s) were not attempted."
+            )
+        if status.core.failure_reasons:
+            _notes.append(
+                "Failures: "
+                + "; ".join(
+                    f"{count}× {reason}"
+                    for reason, count in sorted(
+                        status.core.failure_reasons.items(), key=lambda item: -item[1]
+                    )[:3]
+                )
+            )
+        st.warning(" ".join(_notes))
     # Deliberately no st.rerun() here: Streamlit already runs this script
     # top-to-bottom on the click that got us here, and build_screener() is
     # called later in this SAME run (below) -- clearing its cache now is

@@ -47,6 +47,7 @@ from alpha_lab.data_quality import assess_freshness
 from alpha_lab.database.models import Price, Security
 from alpha_lab.ingestion import IngestionService
 from alpha_lab.providers import ProviderError, YFinanceProvider
+from alpha_lab.providers.errors import ProviderErrorKind
 from alpha_lab.screener import MarketScreenerService
 
 DEFAULT_INGESTION_YEARS = 2
@@ -95,6 +96,17 @@ MAX_AUTO_REFRESH_TICKERS = 200
 # deterministically without ever double-processing an already-fresh
 # ticker.
 MAX_FULL_UNIVERSE_REFRESH_BATCH = MAX_AUTO_REFRESH_TICKERS
+
+# Circuit breaker for one ingestion batch. When Yahoo starts throttling (or
+# the network is down) every further ticker just burns its own retries and
+# backoff and fails the same way -- a 200-ticker batch then runs for tens of
+# minutes while clearing almost nothing (observed: ~30 min, ~50 tickers).
+# After this many *consecutive* RATE_LIMITED/NETWORK_UNAVAILABLE failures the
+# batch stops and reports the untouched remainder; any success resets the
+# count, and NO_DATA / unclassified per-ticker failures never count (those
+# are about that ticker, not the provider).
+MAX_CONSECUTIVE_PROVIDER_FAILURES = 5
+_BREAKER_KINDS = frozenset({ProviderErrorKind.RATE_LIMITED, ProviderErrorKind.NETWORK_UNAVAILABLE})
 
 
 def _latest_price_by_ticker(engine: Engine) -> dict[str, date]:
@@ -307,6 +319,11 @@ class CoreRefreshResult:
     # already present -- only the rebuild step itself raising is captured
     # here.
     research_error: str | None = None
+    # Set when the ingestion loop stopped early (see
+    # MAX_CONSECUTIVE_PROVIDER_FAILURES); `tickers_not_attempted` is then the
+    # untouched remainder of the batch. Both empty on a complete batch.
+    stopped_early: str | None = None
+    tickers_not_attempted: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -361,9 +378,14 @@ def run_core_refresh(
         target_tickers = configured_universe_tickers(engine)
         if len(target_tickers) > MAX_FULL_UNIVERSE_REFRESH_BATCH:
             stale_after_days = settings.data_quality["stale_price_days"]
-            target_tickers = stale_universe_tickers(engine, stale_after_days)[
-                :MAX_FULL_UNIVERSE_REFRESH_BATCH
-            ]
+            latest_by_ticker = _latest_price_by_ticker(engine)
+            # Stalest first: a ticker with no price at all (never fetched)
+            # before one merely a few days old. The sort is stable, so ties
+            # keep the universe's own order.
+            target_tickers = sorted(
+                stale_universe_tickers(engine, stale_after_days),
+                key=lambda ticker: latest_by_ticker.get(ticker, date.min),
+            )[:MAX_FULL_UNIVERSE_REFRESH_BATCH]
     else:
         target_tickers = list(tickers)
     ingestion_service = IngestionService(YFinanceProvider(), engine)
@@ -372,14 +394,35 @@ def run_core_refresh(
 
     succeeded: list[str] = []
     failed: dict[str, str] = {}
-    for ticker in target_tickers:
+    stopped_early: str | None = None
+    not_attempted: list[str] = []
+    consecutive_provider_failures = 0
+    for index, ticker in enumerate(target_tickers):
         try:
             ingestion_service.ingest(ticker, start, end)
             succeeded.append(ticker)
+            consecutive_provider_failures = 0
         except ProviderError as error:
             failed[ticker] = str(error)
+            if error.kind in _BREAKER_KINDS:
+                consecutive_provider_failures += 1
+            else:
+                consecutive_provider_failures = 0
+            if consecutive_provider_failures >= MAX_CONSECUTIVE_PROVIDER_FAILURES:
+                not_attempted = target_tickers[index + 1 :]
+                stopped_early = (
+                    f"stopped after {consecutive_provider_failures} consecutive "
+                    f"{error.kind.value} failures ({error}); wait a few minutes and run again"
+                )
+                break
 
-    result = CoreRefreshResult(tickers_attempted=target_tickers, tickers_succeeded=succeeded, tickers_failed=failed)
+    result = CoreRefreshResult(
+        tickers_attempted=target_tickers[: len(target_tickers) - len(not_attempted)],
+        tickers_succeeded=succeeded,
+        tickers_failed=failed,
+        stopped_early=stopped_early,
+        tickers_not_attempted=not_attempted,
+    )
     try:
         records = MarketScreenerService(engine, settings).rebuild_current_research()
         result.research_rebuilt = True

@@ -40,6 +40,7 @@ section for the full rationale):
 
 from datetime import UTC, date, datetime
 from typing import Any
+from collections import Counter
 import hashlib
 import json
 
@@ -105,6 +106,13 @@ class CoreRefreshSummary(BaseModel):
     research_rebuilt: bool
     research_record_count: int = 0
     research_error: str | None = None
+    # Why the ingestion batch ended early, and how many tickers it never got
+    # to (see refresh.MAX_CONSECUTIVE_PROVIDER_FAILURES), plus the distinct
+    # per-ticker failure reasons with counts. Display-only: deliberately left
+    # out of the version hash (`_version_id`) so existing identities hold.
+    stopped_early: str | None = None
+    tickers_not_attempted: int = 0
+    failure_reasons: dict[str, int] = {}
 
 
 class ResearchRefreshStatus(BaseModel):
@@ -142,7 +150,7 @@ def _version_id(*, evaluation_date: date, core: CoreRefreshSummary, domains: lis
     `retrieved_at`/`created_at` for the identical reason."""
     identity = {
         "evaluation_date": evaluation_date.isoformat(),
-        "core": core.model_dump(),
+        "core": core.model_dump(exclude={"stopped_early", "tickers_not_attempted", "failure_reasons"}),
         "domains": [
             domain.model_dump(exclude={"detail"})
             for domain in sorted(domains, key=lambda item: item.domain)
@@ -237,6 +245,9 @@ class ResearchRefreshOrchestrator:
                 research_rebuilt=core_result.research_rebuilt,
                 research_record_count=core_result.research_record_count,
                 research_error=core_result.research_error,
+                stopped_early=core_result.stopped_early,
+                tickers_not_attempted=len(core_result.tickers_not_attempted),
+                failure_reasons=dict(Counter(core_result.tickers_failed.values())),
             )
             if core_result is not None
             else CoreRefreshSummary(skipped=True, tickers_attempted=0, tickers_succeeded=0, tickers_failed=0, research_rebuilt=False)
