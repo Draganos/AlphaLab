@@ -315,7 +315,7 @@ if _current_research_status is not None:
                 for domain in _current_research_status.domains
             ]),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
 st.header("Stock Screener")
