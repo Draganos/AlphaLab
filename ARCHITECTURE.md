@@ -5490,3 +5490,11 @@ warning. Lesson recorded: a repair that adopts existing state needs a
 sanity bound derived from what the state is *for*, and should have been
 exercised against a database shaped like the one that motivated it, not only
 the 16-ticker one.
+
+**Follow-up (review finding on #60):** the 200-ticker cap bounded only the
+untracked candidates, so a build with 200 already-tracked + 200 untracked
+securities passed and grew the tracked universe to 400. `adopt_current_
+research_tickers` now refuses when either the latest build's total size or
+the tracked universe adoption would leave (already-tracked + adopted,
+including tracked securities outside the build) exceeds the cap; tests cover
+both shapes.

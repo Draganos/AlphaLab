@@ -127,13 +127,14 @@ def configured_universe_tickers(engine: Engine) -> list[str]:
 
 
 class UniverseTooLargeToAdopt(ValueError):
-    """The latest research build is far larger than any curated research
-    universe (see `MAX_FULL_UNIVERSE_REFRESH_BATCH`)."""
+    """Adopting the latest research build would leave a tracked universe
+    larger than any curated research universe (see
+    `MAX_FULL_UNIVERSE_REFRESH_BATCH`)."""
 
-    def __init__(self, count: int, cap: int):
+    def __init__(self, count: int, cap: int, *, what: str = "the latest research build"):
         super().__init__(
-            f"The latest research build holds {count} untracked securities (cap {cap}): that is the "
-            "pre-tracking 'every security in the table' universe, not a curated research universe. "
+            f"{what} holds {count} securities (cap {cap}): that is the pre-tracking 'every security "
+            "in the table' universe, not a curated research universe. "
             "Choose the tickers explicitly: `manage_universe.py set-tracked TICKER ...`."
         )
         self.count, self.cap = count, cap
@@ -153,24 +154,38 @@ def adopt_current_research_tickers(engine: Engine, *, max_tickers: int = MAX_FUL
     tracked securities is not persisted, so the latest build would
     otherwise resurrect removed tickers.
 
-    Refuses (`UniverseTooLargeToAdopt`) above `max_tickers`: on the first
-    real database this was run against, the latest build held 5,149
-    securities -- the pre-tracking universe that `is_tracked` exists to end
-    -- so adopting "whatever the build had" recreated exactly that."""
+    Refuses (`UniverseTooLargeToAdopt`) when either the latest build's total
+    size or the tracked universe that adoption would leave (already-tracked
+    plus newly adopted) exceeds `max_tickers`: on the first real database
+    this was run against, the latest build held 5,149 securities -- the
+    pre-tracking universe that `is_tracked` exists to end -- so adopting
+    "whatever the build had" recreated exactly that. Bounding only the
+    untracked candidates would let a build of 200 already-tracked plus 200
+    untracked securities through and grow the universe to 400."""
     from alpha_lab.database.models import CurrentResearchBuild, CurrentResearchSnapshot
 
     with Session(engine) as session:
         build_id = session.scalar(select(func.max(CurrentResearchBuild.id)))
         if build_id is None:
             return []
+        build_size = session.scalar(
+            select(func.count()).select_from(CurrentResearchSnapshot).where(CurrentResearchSnapshot.build_id == build_id)
+        ) or 0
+        if build_size > max_tickers:
+            raise UniverseTooLargeToAdopt(build_size, max_tickers)
         candidates = session.scalars(
             select(Security)
             .join(CurrentResearchSnapshot, CurrentResearchSnapshot.ticker == Security.ticker)
             .where(CurrentResearchSnapshot.build_id == build_id, Security.is_tracked.is_(False))
             .order_by(Security.ticker)
         ).all()
-        if len(candidates) > max_tickers:
-            raise UniverseTooLargeToAdopt(len(candidates), max_tickers)
+        tracked_now = session.scalar(
+            select(func.count()).select_from(Security).where(Security.is_tracked.is_(True))
+        ) or 0
+        if tracked_now + len(candidates) > max_tickers:
+            raise UniverseTooLargeToAdopt(
+                tracked_now + len(candidates), max_tickers, what="the tracked universe after adoption"
+            )
         adopted = [security.ticker for security in candidates]
         for security in candidates:
             security.is_tracked = True

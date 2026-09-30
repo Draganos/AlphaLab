@@ -687,3 +687,41 @@ def test_manage_universe_adopt_current_reports_an_oversized_build(monkeypatch, m
     monkeypatch.setattr(manage_universe, "adopt_current_research_tickers", _too_big)
     assert manage_universe.adopt_current(make_engine("sqlite:///:memory:")) is False
     assert "set-tracked" in capsys.readouterr().out
+
+
+def test_adopt_cap_bounds_the_whole_build_not_just_the_untracked_part():
+    """Regression (review finding on #60): with 2 already-tracked + 2
+    untracked securities in the build and a cap of 3, bounding only the
+    untracked candidates let adoption through and grew the universe to 4."""
+    from alpha_lab.refresh import UniverseTooLargeToAdopt, adopt_current_research_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    tickers = ["AAA", "BBB", "CCC", "DDD"]
+    with Session(engine) as session:
+        for ticker in tickers:
+            session.add(Security(ticker=ticker, is_tracked=ticker in ("AAA", "BBB")))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_adopt_record(t) for t in tickers])
+
+    with pytest.raises(UniverseTooLargeToAdopt):
+        adopt_current_research_tickers(engine, max_tickers=3)
+    assert configured_universe_tickers(engine) == ["AAA", "BBB"]  # unchanged
+
+
+def test_adopt_cap_bounds_the_resulting_tracked_universe_including_tickers_outside_the_build():
+    from alpha_lab.refresh import UniverseTooLargeToAdopt, adopt_current_research_tickers
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in ("OUT1", "OUT2"):  # tracked, but not in the latest build
+            session.add(Security(ticker=ticker, is_tracked=True))
+        for ticker in ("AAA", "BBB"):
+            session.add(Security(ticker=ticker, is_tracked=False))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_adopt_record("AAA"), _adopt_record("BBB")])
+
+    with pytest.raises(UniverseTooLargeToAdopt):
+        adopt_current_research_tickers(engine, max_tickers=3)  # 2 tracked + 2 adopted = 4
+    assert adopt_current_research_tickers(engine, max_tickers=4) == ["AAA", "BBB"]
