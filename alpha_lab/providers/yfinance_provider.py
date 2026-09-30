@@ -45,6 +45,8 @@ class YFinanceProvider(
             lambda: self._ticker(ticker).history(start=start, end=end, auto_adjust=False),
             provider=self.provider_name,
         )
+        if frame is None:
+            return pd.DataFrame()
         if frame.empty:
             return frame
         frame = frame.rename(columns={"Adj Close": "adjusted_close"})
@@ -97,17 +99,19 @@ class YFinanceProvider(
             lambda: self._ticker(ticker).get_info(),
             provider=self.provider_name,
         )
+        if not isinstance(info, dict):
+            info = {}
         return {
             "ticker": ticker.upper(),
-            "company_name": info.get("longName"),
-            "exchange": info.get("exchange"),
-            "country": info.get("country"),
-            "sector": info.get("sector"),
-            "currency": info.get("currency"),
-            "industry": info.get("industry"),
-            "asset_type": info.get("quoteType"),
+            "company_name": _text(info.get("longName")),
+            "exchange": _text(info.get("exchange")),
+            "country": _text(info.get("country")),
+            "sector": _text(info.get("sector")),
+            "currency": _text(info.get("currency")),
+            "industry": _text(info.get("industry")),
+            "asset_type": _text(info.get("quoteType")),
             "market_cap": _number(info.get("marketCap"), positive=True),
-            "business_description": info.get("longBusinessSummary"),
+            "business_description": _text(info.get("longBusinessSummary")),
             "metadata_provider": self.provider_name,
             "metadata_source": "yfinance quoteSummary",
         }
@@ -126,6 +130,9 @@ class YFinanceProvider(
             lambda: ticker_obj.quarterly_balance_sheet,
             provider=self.provider_name,
         )
+        statement = pd.DataFrame() if statement is None else statement
+        cashflow = pd.DataFrame() if cashflow is None else cashflow
+        balance = pd.DataFrame() if balance is None else balance
         if statement.empty:
             return pd.DataFrame()
         rows: list[dict[str, Any]] = []
@@ -197,6 +204,8 @@ class YFinanceProvider(
             provider=self.provider_name,
         )
         counts = _current_recommendation_counts(recommendations)
+        if not isinstance(targets, dict):
+            targets = {}
         return {
             "ticker": ticker.upper(),
             "as_of": date.today(),
@@ -643,10 +652,9 @@ def _current_recommendation_counts(frame: pd.DataFrame) -> dict[str, int | None]
     row = current.iloc[0]
     result: dict[str, int | None] = {}
     for column in ("strongBuy", "buy", "hold", "sell", "strongSell"):
-        if column not in row or pd.isna(row[column]):
-            result[column] = None
-        else:
-            result[column] = int(row[column])
+        count = _int_or_none(row[column]) if column in row else None
+        # An analyst count is never negative; a negative value is junk, not data.
+        result[column] = count if count is not None and count >= 0 else None
     return result
 
 
@@ -711,7 +719,7 @@ def _int_or_none(value: Any) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

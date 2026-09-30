@@ -316,3 +316,73 @@ def test_ai_research_field_respects_the_pit_upper_bound(monkeypatch):
 
     now = get_research_state(engine, settings, "AAA")
     assert now.ai_research.status == "FULL"
+
+
+# --- deterministic_score is ranked against the tracked universe ---------------
+
+
+def _seed_scorable(engine, ticker: str, *, drift: float, tracked: bool = True, days: int = 300) -> None:
+    """A security with enough recent, liquid price history to be scored; `drift`
+    differentiates the tickers' momentum so their percentile ranks differ."""
+    with Session(engine) as session:
+        session.add(Security(ticker=ticker, country="US", currency="USD", sector="Technology", is_tracked=tracked))
+        price = 100.0
+        for offset in range(days, -1, -1):
+            price *= 1 + drift
+            session.add(Price(
+                ticker=ticker, date=date.today() - timedelta(days=offset), close=price, adjusted_close=price,
+                high=price * 1.01, low=price * 0.99, volume=1e7, provider="fixture", currency="USD", source="test",
+            ))
+        session.commit()
+
+
+def test_deterministic_score_is_ranked_against_the_tracked_universe_not_the_ticker_alone(monkeypatch):
+    """Regression: scoring `tickers=[ticker]` ranked a security against itself
+    alone, so every ticker scored exactly 100.0."""
+    from alpha_lab.strategy import HistoricalScoringService
+
+    engine, settings = _make(monkeypatch)
+    for ticker, drift in (("LOW", -0.004), ("MID", 0.001), ("HIGH", 0.006)):
+        _seed_scorable(engine, ticker, drift=drift)
+
+    expected = {
+        item.ticker: item.score
+        for item in HistoricalScoringService(engine, settings).score_universe_as_of(
+            date.today(), min_score=0, minimum_coverage=0
+        )
+    }
+    states = {t: get_research_state(engine, settings, t) for t in ("LOW", "MID", "HIGH")}
+    scores = {t: state.deterministic_score.value["score"] for t, state in states.items()}
+
+    assert scores == expected
+    assert len(set(scores.values())) == 3  # the tickers are distinguished, not all 100.0
+    assert scores["HIGH"] > scores["MID"] > scores["LOW"]
+    assert all(state.deterministic_score.detail.startswith("ranked against 3 securities") for state in states.values())
+
+
+def test_an_untracked_ticker_is_ranked_alongside_the_tracked_universe(monkeypatch):
+    engine, settings = _make(monkeypatch)
+    _seed_scorable(engine, "A", drift=-0.004)
+    _seed_scorable(engine, "B", drift=0.006)
+    _seed_scorable(engine, "CATALOG", drift=0.001, tracked=False)
+    state = get_research_state(engine, settings, "CATALOG")
+    assert state.deterministic_score.value is not None
+    assert state.deterministic_score.detail.startswith("ranked against 3 securities")
+
+
+def test_precomputed_universe_scores_are_used_without_rescoring(monkeypatch):
+    from alpha_lab.strategy import HistoricalScoringService
+
+    engine, settings = _make(monkeypatch)
+    for ticker, drift in (("A", -0.004), ("B", 0.006)):
+        _seed_scorable(engine, ticker, drift=drift)
+    universe_scores = HistoricalScoringService(engine, settings).score_universe_as_of(
+        date.today(), min_score=0, minimum_coverage=0
+    )
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("must not rescore when universe_scores is supplied")
+
+    monkeypatch.setattr(HistoricalScoringService, "score_universe_as_of", _forbidden)
+    state = get_research_state(engine, settings, "B", universe_scores=universe_scores)
+    assert state.deterministic_score.value["score"] == next(i.score for i in universe_scores if i.ticker == "B")

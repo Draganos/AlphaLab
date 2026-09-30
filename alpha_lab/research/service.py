@@ -70,13 +70,10 @@ class ResearchService:
         categories/metrics are UNAVAILABLE (research exists; evidence is
         simply missing). This never touches historical snapshot storage.
 
-        Note for a caller iterating many tickers (e.g. a universe-wide
-        view): finding the one matching record still reads and
-        re-deserializes every persisted record via ``list_current_research``
-        (see ``_find_record``), so calling this once per ticker in a loop is
-        O(n²) in universe size. Call ``list_current_research()`` once and
-        pass each record to ``build_research_for_record`` instead — see
-        that method's docstring.
+        A keyed lookup (`_find_record`): cost is independent of universe
+        size. A caller that needs *every* ticker should still call
+        ``list_current_research()`` once and pass each record to
+        ``build_research_for_record`` -- see that method's docstring.
         """
         record = self._find_record(ticker)
         if record is None:
@@ -112,15 +109,11 @@ class ResearchService:
         )
 
     def _find_record(self, ticker: str) -> LiveResearchRecord | None:
-        normalized = ticker.strip().upper()
-        return next(
-            (
-                record
-                for record in self.list_current_research()
-                if record.ticker == normalized
-            ),
-            None,
-        )
+        # A keyed lookup: this used to read and deserialize every persisted
+        # record just to pick one, so each Company Research render and each
+        # `get_research_state` call cost O(universe) (measured 42 ms at 50
+        # securities, 153 ms at 400, ~1.3 s at 5,000).
+        return self._screener.read_current_record(ticker.strip().upper())
 
     # --- Historical snapshots -----------------------------------------
 

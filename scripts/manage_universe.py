@@ -147,20 +147,26 @@ def add_tickers(engine, settings, tickers: list[str]) -> bool:
     for ticker in ingested:
         print(f"--- {ticker}: supplemental research ---")
         base_research = research_service.get_stock_research(ticker)
+        supplemental_ok = True
         if base_research is None:
             try:
                 supplemental.refresh_analyst_consensus(ticker, provider)
             except ProviderError as error:
+                supplemental_ok = False
                 print(f"  analyst consensus: FAILED ({error.kind.value} - {error.reason})")
             supplemental.refresh_technical_summary(ticker)
         else:
             result = supplemental.refresh_all(ticker, provider, base_research)
             if result.analyst_error is not None:
+                supplemental_ok = False
                 print(
                     f"  analyst consensus: FAILED "
                     f"({result.analyst_error.kind.value} - {result.analyst_error.reason})"
                 )
-        print("  supplemental research (analyst/technical/AI/fund evidence): ok")
+        if supplemental_ok:
+            print("  supplemental research (analyst/technical/AI/fund evidence): ok")
+        else:
+            print("  supplemental research: INCOMPLETE (see failure above; AI rating not refreshed)")
 
         try:
             observations = provider.get_estimates(ticker, end)
