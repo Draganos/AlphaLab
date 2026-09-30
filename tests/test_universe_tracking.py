@@ -676,6 +676,10 @@ def test_manage_universe_set_tracked_command(monkeypatch, manage_universe, capsy
     assert ok is False  # SPY is unknown: reported, and the exit status says so
     assert "NOT FOUND" in out and "add SPY" in out
     assert configured_universe_tickers(engine) == ["MSFT"]
+    # MSFT is now tracked but has never been ingested: the command must say
+    # so and name the fix, not leave it to surface later as "missing price".
+    assert "no current price data" in out and "MSFT" in out.split("no current price data")[1]
+    assert "Full Refresh" in out
 
 
 def test_manage_universe_adopt_current_reports_an_oversized_build(monkeypatch, manage_universe, capsys):
