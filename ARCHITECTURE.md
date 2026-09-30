@@ -5556,3 +5556,30 @@ consensus failure; it now says INCOMPLETE.
 **Result:** 1,126 tests pass (only the pre-existing lockfile-drift failure,
 deselected); all smoke tests pass; every dashboard page and Company Research
 for all 16 tickers load with zero exceptions.
+
+## 57. Full Refresh under provider throttling: circuit breaker, stalest-first batches, visible reasons
+
+**Incident:** a Full Refresh on an oversized tracked universe ran ~30 minutes
+and cleared ~50 tickers. Single-ticker ingest measures ~2 s end to end
+(provider ~1.3 s, database writes ~0.7 s), so the time was Yahoo throttling:
+every ticker after the first 429 spent its own retries and backoff and failed
+the same way, and nothing ever stopped the loop. The result line showed only
+"N failed", with no reason.
+
+**Fixes (all in `alpha_lab/refresh.py` / `research_refresh.py` / dashboard):**
+- `MAX_CONSECUTIVE_PROVIDER_FAILURES = 5`: after that many *consecutive*
+  `RATE_LIMITED`/`NETWORK_UNAVAILABLE` failures the ingestion loop stops and
+  reports `stopped_early` plus the untouched `tickers_not_attempted`. A success
+  resets the count; `NO_DATA` and unclassified failures never count (they are
+  about the ticker, not the provider). The research rebuild still runs.
+- When the batch is capped, tickers are now ordered stalest-first (no price at
+  all before merely old), as the cap's docstring always claimed; previously it
+  was universe (alphabetical) order, so a never-fetched ticker late in the
+  alphabet waited behind hundreds of others.
+- `CoreRefreshSummary` gains display-only `stopped_early`,
+  `tickers_not_attempted`, `failure_reasons` (excluded from the version hash so
+  existing version ids are unchanged); the Full Refresh message lists the top
+  failure reasons and what was skipped.
+
+Deliberately not changed: ingestion stays sequential (parallel requests would
+make throttling worse, not better).

@@ -237,3 +237,28 @@ def test_an_empty_tracked_universe_is_called_out_not_reported_as_a_successful_re
     assert not at.exception
     assert any("adopt-current" in warning.value for warning in at.warning)
     assert not any("Ingested 0/0" in success.value for success in at.success)
+
+
+def test_a_rate_limited_full_refresh_says_why_it_stopped_and_what_it_skipped(tmp_path, monkeypatch):
+    from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
+    from alpha_lab.refresh import MAX_CONSECUTIVE_PROVIDER_FAILURES
+
+    class _Throttled(_FakeProvider):
+        def get_company_info(self, ticker):
+            raise ProviderError(ProviderErrorKind.RATE_LIMITED, "yfinance", "Yahoo Finance rate-limited the request")
+
+    db_path = tmp_path / "dashboard.db"
+    for index in range(MAX_CONSECUTIVE_PROVIDER_FAILURES + 3):
+        _seed_security(db_path, f"T{index:02d}", None)
+    monkeypatch.setenv("ALPHALAB_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setattr("alpha_lab.refresh.YFinanceProvider", lambda: _Throttled())
+
+    at = AppTest.from_file(_MAIN_PATH)
+    at.session_state["auto_stale_refresh_attempted"] = True
+    at.run(timeout=60)
+    at.button[0].click().run(timeout=120)
+
+    assert not at.exception
+    text = " ".join(warning.value for warning in at.warning)
+    assert "RATE_LIMITED" in text and "3 ticker(s) were not attempted" in text
+    assert f"{MAX_CONSECUTIVE_PROVIDER_FAILURES}× " in text
