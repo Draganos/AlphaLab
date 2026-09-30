@@ -5498,3 +5498,61 @@ research_tickers` now refuses when either the latest build's total size or
 the tracked universe adoption would leave (already-tracked + adopted,
 including tracked securities outside the build) exceeds the cap; tests cover
 both shapes.
+
+## 56. Payload flow test, parsing hardening, bottleneck pass, and a wrong `deterministic_score`
+
+**Flow test (real provider data).** A fresh scratch database driven through the
+whole pipeline with real yfinance payloads for MSFT (equity), GDX (ETF), BRK.B
+(dotted ticker) and AACP (recent listing): `manage_universe add` (26 s for 4
+tickers) -> research rebuild -> Research State -> AI rating from state ->
+validation protocol -> macro/Donatien/alignment -> every dashboard page.
+Stored data was clean (0 NaN/inf across every table, all JSON valid, no
+stray whitespace); a re-run was idempotent (0 duplicate rating events).
+
+**Parsing hardening (found by fuzzing, each with a regression test).**
+Hostile shapes were thrown at the provider parsers (a fake yfinance `Ticker`),
+ingestion, technical summary, HTML text extraction and news classification.
+Technical summary (16 pathological price frames incl. zeros, NaN runs, flat,
+inf, unsorted, duplicate index), `html_to_text` and news impact were already
+robust. Fixed:
+- `IngestionService`: a price row with a NaT date, a financial row with an
+  unparseable/NaT period, or a non-numeric string **aborted the whole ticker's
+  ingest and rolled back every good row**. Such rows are now skipped with a
+  `ingestion_rows_skipped` warning; `_number`/`_date` never raise.
+- `YFinanceProvider`: a `None` response for info/financials/price history/price
+  targets crashed instead of meaning "no data"; inf/non-numeric/negative
+  recommendation counts overflowed or violated the model; info string fields
+  could carry NaN through to storage. All now become None/empty.
+
+**Bottlenecks (measured at 50/400/2,000 synthetic securities).** Rebuild is
+linear (~27-32 ms per security: ~1 minute at 2,000). Fixed the one superlinear
+path: `ResearchService._find_record` read and deserialized **every** security's
+current research to return one, so each Company Research render and each
+`get_research_state` call was O(universe) (42 ms at 50, 153 ms at 400, ~1.3 s
+at 5,000). Now a keyed lookup (`Phase3Repository.latest_current_payload_for`,
+`MarketScreenerService.read_current_record`): 38 ms at 50, 44 ms at 400.
+Measured and deliberately left: a composite price index does not help (5.2 ->
+5.1 ms; ORM hydration of ~500 `Price` objects dominates, and changing the
+return type touches every caller); the orchestrator's per-ticker status read is
+an N+1 (~4 ms/ticker, 8 s at 2,000) that only matters far above the 200-ticker
+refresh cap; Evidence Coverage's first load is 8 s at 2,000.
+
+**A real correctness bug in §50, missed by §52's check:**
+`get_research_state` scored `tickers=[ticker]`, ranking a security against a
+universe of one, so **every ticker's `deterministic_score` was 100.0** (MSFT
+100 vs 75.0 ranked against the tracked universe, NVDA 100 vs 70.4, GDX 100 vs
+56.9). §52 flagged only the *cost* of that call. The test suite asserted the
+score's provenance stability but never its value, so it passed. Now ranked
+against the tracked universe plus the requested ticker (so untracked/historical
+queries still work); the field's `detail` states the universe size
+("ranked against N securities") so a score ranked among 1-2 securities is never
+read as market-wide; batch callers pass `universe_scores` once to stay O(N).
+Tests assert the actual values, that tickers are distinguished, and that
+supplied scores are not recomputed (verified to fail on the old code).
+
+Also: `manage_universe add` printed "supplemental research: ok" right after a
+consensus failure; it now says INCOMPLETE.
+
+**Result:** 1,126 tests pass (only the pre-existing lockfile-drift failure,
+deselected); all smoke tests pass; every dashboard page and Company Research
+for all 16 tickers load with zero exceptions.

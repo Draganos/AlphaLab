@@ -230,6 +230,26 @@ class Phase3Repository:
             session.commit()
             return build
 
+    def latest_current_payload_for(self, ticker: str) -> dict | None:
+        """The latest complete build's payload for one ticker -- a keyed
+        lookup, never reading or deserializing the rest of the universe.
+        Same "latest build" rule as `latest_current_payloads`; `None` when
+        there is no build or the ticker is not in it."""
+        with Session(self.engine, expire_on_commit=False) as session:
+            build = session.scalar(
+                select(CurrentResearchBuild).order_by(
+                    CurrentResearchBuild.built_at.desc(), CurrentResearchBuild.id.desc()
+                )
+            )
+            if build is None:
+                return None
+            return session.scalar(
+                select(CurrentResearchSnapshot.payload).where(
+                    CurrentResearchSnapshot.build_id == build.id,
+                    CurrentResearchSnapshot.ticker == ticker,
+                )
+            )
+
     def latest_current_payloads(self) -> tuple[CurrentResearchBuild | None, list[dict]]:
         """Read the latest complete build without invoking providers or writing state."""
         with Session(self.engine, expire_on_commit=False) as session:

@@ -88,6 +88,7 @@ from alpha_lab.providers.donatien import DonatienCalibration
 from alpha_lab.research import ResearchService
 from alpha_lab.research.snapshots import ResearchSnapshotRepository
 from alpha_lab.research.model import StockResearch
+from alpha_lab.refresh import configured_universe_tickers
 from alpha_lab.research_refresh import get_current_research_refresh_status
 from alpha_lab.strategy import HistoricalScoringService
 
@@ -174,6 +175,7 @@ def _upper_bound(as_of: date) -> datetime:
 
 def get_research_state(
     engine: Engine, settings: Settings, ticker: str, evaluation_date: date | None = None,
+    *, universe_scores: list | None = None,
 ) -> ResearchState:
     """Zero network calls, zero writes -- every read below is either
     already-established as point-in-time-safe, or genuinely read-only
@@ -213,10 +215,20 @@ def get_research_state(
         ticker, as_of=evaluation_date
     )
 
-    scores = HistoricalScoringService(engine, settings).score_universe_as_of(
-        evaluation_date, tickers=[ticker], min_score=0, minimum_coverage=0
-    )
-    score = scores[0] if scores else None
+    # Percentile-ranked scoring is only meaningful against a universe: scoring
+    # `tickers=[ticker]` ranks a security against itself alone, so every
+    # ticker came out 100.0 (MSFT 100 vs 75.0 against the tracked universe).
+    # Rank against the tracked universe plus this ticker (an untracked or
+    # historical query must still work). A caller assembling many states
+    # computes `universe_scores` once and passes it in, keeping a loop O(N)
+    # rather than O(N^2).
+    if universe_scores is None:
+        universe_scores = HistoricalScoringService(engine, settings).score_universe_as_of(
+            evaluation_date,
+            tickers=sorted(set(configured_universe_tickers(engine)) | {ticker}),
+            min_score=0, minimum_coverage=0,
+        )
+    score = next((item for item in universe_scores if item.ticker == ticker), None)
 
     with Session(engine) as session:
         ai_analysis = session.scalar(
@@ -249,7 +261,7 @@ def get_research_state(
         donatien=_donatien_field(donatien_snapshot, donatien_calibration),
         donatien_alignment=_alignment_field(alignment_snapshot, alignment_assessment),
         ethics=_ethics_field(ethics_row),
-        deterministic_score=_score_field(ticker, evaluation_date, score),
+        deterministic_score=_score_field(ticker, evaluation_date, score, len(universe_scores)),
         ai_research=_ai_research_field(ai_analysis),
         ai_rating=_ai_rating_field(ticker, evaluation_date, research),
         coverage=coverage,
@@ -384,16 +396,20 @@ def _ethics_field(ethics_row) -> ResearchField:
     )
 
 
-def _score_field(ticker: str, evaluation_date: date, score) -> ResearchField:
+def _score_field(ticker: str, evaluation_date: date, score, universe_size: int = 0) -> ResearchField:
     if score is None:
         return ResearchField(status="NOT_COMPUTED")
     value = asdict(score)
+    # A percentile rank only means something relative to its universe; state
+    # the size so a score ranked among 1-2 securities is never read as a
+    # market-wide figure.
+    ranked = f"ranked against {universe_size} securit{'y' if universe_size == 1 else 'ies'}"
     return ResearchField(
         value=value,
         observed_at=_iso(score.evaluation_date),
         status=_status_for(score.coverage),
         provenance_id=_computed_provenance_id("deterministic_score", ticker, evaluation_date, value),
-        detail=score.exclusion_reason,
+        detail=ranked if not score.exclusion_reason else f"{ranked}; {score.exclusion_reason}",
     )
 
 

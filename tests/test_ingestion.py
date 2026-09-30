@@ -160,6 +160,74 @@ def test_a_change_from_or_to_a_missing_value_is_still_a_revision():
     assert _price_field_changed(592.0, 165697.0)  # volume restated
 
 
+class _RawProvider(FakeProvider):
+    """Returns exactly the frames it is given -- for hostile-payload tests."""
+
+    def __init__(self, prices=None, financials=None):
+        self._prices, self._financials = prices, financials
+
+    def get_price_history(self, ticker, start, end):
+        return self._prices if self._prices is not None else super().get_price_history(ticker, start, end)
+
+    def get_financials(self, ticker):
+        return self._financials if self._financials is not None else pd.DataFrame()
+
+
+def _counts(engine, ticker):
+    with Session(engine) as session:
+        return (
+            session.scalar(select(func.count()).select_from(Price).where(Price.ticker == ticker)),
+            session.scalar(select(func.count()).select_from(Fundamental).where(Fundamental.ticker == ticker)),
+        )
+
+
+def test_a_price_row_with_no_date_is_skipped_not_fatal(caplog):
+    """Regression (found by payload fuzzing): a NaT row date raised mid-ingest,
+    aborting the whole ticker and rolling back every good row with it."""
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    index = pd.DatetimeIndex(["2024-01-02", pd.NaT, "2024-01-04"])
+    frame = pd.DataFrame({"close": [1.0, 2.0, 3.0], "adjusted_close": [1.0, 2.0, 3.0]}, index=index)
+    with caplog.at_level("WARNING", logger="alpha_lab.ingestion.service"):
+        IngestionService(_RawProvider(prices=frame), engine).ingest("NAT", date(2024, 1, 1), date(2024, 2, 1))
+    assert _counts(engine, "NAT")[0] == 2
+    assert any(record.message == "ingestion_rows_skipped" for record in caplog.records)
+
+
+def test_a_financial_row_with_an_unusable_period_is_skipped_not_fatal():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    financials = pd.DataFrame([
+        {"period": date(2023, 12, 31), "publication_date": None, "eps": 1.0},
+        {"period": "not a date", "publication_date": None, "eps": 2.0},
+        {"period": pd.NaT, "publication_date": None, "eps": 3.0},
+    ])
+    IngestionService(_RawProvider(financials=financials), engine).ingest("BADP", date(2024, 1, 1), date(2024, 2, 1))
+    assert _counts(engine, "BADP") == (1, 1)  # prices and the one good period both stored
+
+
+def test_non_numeric_strings_and_nonfinite_numbers_become_none_not_errors():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    index = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    frame = pd.DataFrame(
+        {"close": ["1.5", "abc", float("inf")], "adjusted_close": [1.0, float("nan"), 3.0]}, index=index
+    )
+    IngestionService(_RawProvider(prices=frame), engine).ingest("STR", date(2024, 1, 1), date(2024, 2, 1))
+    with Session(engine) as session:
+        closes = [row.close for row in session.scalars(select(Price).where(Price.ticker == "STR").order_by(Price.date))]
+    assert closes == [1.5, None, None]
+
+
+def test_unparseable_publication_date_is_none_not_an_error():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    financials = pd.DataFrame([{"period": date(2023, 12, 31), "publication_date": "garbage", "eps": 1.0}])
+    IngestionService(_RawProvider(financials=financials), engine).ingest("PUB", date(2024, 1, 1), date(2024, 2, 1))
+    with Session(engine) as session:
+        assert session.scalar(select(Fundamental.publication_date).where(Fundamental.ticker == "PUB")) is None
+
+
 def test_market_provider_cannot_replace_canonical_universe_exchange():
     engine = make_engine("sqlite:///:memory:")
     create_schema(engine)

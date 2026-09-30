@@ -197,6 +197,12 @@ class MarketScreenerService:
         _, payloads = Phase3Repository(self.engine).latest_current_payloads()
         return [LiveResearchRecord.model_validate(payload) for payload in payloads]
 
+    def read_current_record(self, ticker: str) -> LiveResearchRecord | None:
+        """One ticker's current research record (same read-only contract as
+        `read_current_research`), without loading the whole universe."""
+        payload = Phase3Repository(self.engine).latest_current_payload_for(ticker)
+        return None if payload is None else LiveResearchRecord.model_validate(payload)
+
     def build_live_records(self) -> list[LiveResearchRecord]:
         evaluation = date.today()
         EthicalClassificationService(

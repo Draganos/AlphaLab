@@ -98,6 +98,7 @@ class IngestionService:
             if mark_tracked:
                 security.is_tracked = True
             security.metadata_updated_at = datetime.now(UTC)
+            skipped_prices = skipped_fundamentals = 0
             for index, row in prices.iterrows():
                 values = {
                     key: self._number(row.get(key))
@@ -115,7 +116,10 @@ class IngestionService:
                     provider=provider_name,
                     source=self._text(row.get("source")),
                 )
-                price_date = pd.Timestamp(index).date()
+                price_date = self._date(index)
+                if price_date is None:
+                    skipped_prices += 1
+                    continue
                 latest = session.scalars(
                     select(Price)
                     .where(Price.ticker == symbol, Price.date == price_date)
@@ -134,7 +138,10 @@ class IngestionService:
                 ):
                     session.add(Price(ticker=symbol, date=price_date, **merged))
             for row in financials.to_dict("records"):
-                period = pd.Timestamp(row.pop("period")).date()
+                period = self._date(row.pop("period", None))
+                if period is None:
+                    skipped_fundamentals += 1
+                    continue
                 values = {
                     key: (
                         self._date(value)
@@ -165,6 +172,18 @@ class IngestionService:
                             **values,
                         )
                     )
+        if skipped_prices or skipped_fundamentals:
+            # A row with no usable date cannot be stored honestly; skipping it
+            # (and saying so) beats aborting the ticker -- and rolling back
+            # every good row alongside it.
+            logger.warning(
+                "ingestion_rows_skipped",
+                extra={
+                    "ticker": symbol,
+                    "prices_skipped": skipped_prices,
+                    "fundamentals_skipped": skipped_fundamentals,
+                },
+            )
         logger.info(
             "ingestion_complete",
             extra={
@@ -176,9 +195,14 @@ class IngestionService:
 
     @staticmethod
     def _number(value):
-        if value is None or pd.isna(value):
+        """A finite float, or None for anything unusable (missing, NaN/inf,
+        or a non-numeric string a provider should never send but can)."""
+        try:
+            if value is None or pd.isna(value):
+                return None
+            number = float(value)
+        except (TypeError, ValueError):
             return None
-        number = float(value)
         return number if math.isfinite(number) else None
 
     @staticmethod
@@ -187,7 +211,14 @@ class IngestionService:
 
     @staticmethod
     def _date(value):
-        return None if value is None or pd.isna(value) else pd.Timestamp(value).date()
+        """A `date`, or None for a missing/unparseable value (never raises:
+        one bad cell must not abort a whole ticker's ingest)."""
+        try:
+            if value is None or pd.isna(value):
+                return None
+            return pd.Timestamp(value).date()
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     @staticmethod
     def _fundamental_hash(ticker: str, period: date, values: dict) -> str:

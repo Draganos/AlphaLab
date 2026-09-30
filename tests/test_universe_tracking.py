@@ -725,3 +725,65 @@ def test_adopt_cap_bounds_the_resulting_tracked_universe_including_tickers_outsi
     with pytest.raises(UniverseTooLargeToAdopt):
         adopt_current_research_tickers(engine, max_tickers=3)  # 2 tracked + 2 adopted = 4
     assert adopt_current_research_tickers(engine, max_tickers=4) == ["AAA", "BBB"]
+
+
+# --- keyed single-ticker research lookup (scale) -----------------------------
+
+
+def test_latest_current_payload_for_returns_only_that_tickers_latest_build_payload():
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        for ticker in ("AAA", "BBB"):
+            session.add(Security(ticker=ticker, is_tracked=True))
+        session.commit()
+    repo = Phase3Repository(engine)
+    assert repo.latest_current_payload_for("AAA") is None  # no build yet
+    old = _adopt_record("AAA").model_copy(update={"price": 1.0})
+    repo.save_current_research([old, _adopt_record("BBB")])
+    new = _adopt_record("AAA").model_copy(update={"price": 2.0})
+    repo.save_current_research([new])  # the latest build no longer contains BBB
+
+    assert repo.latest_current_payload_for("AAA")["price"] == 2.0
+    assert repo.latest_current_payload_for("BBB") is None  # older build is never consulted
+    assert repo.latest_current_payload_for("ZZZ") is None
+
+
+def test_get_stock_research_does_not_read_the_whole_universe(monkeypatch):
+    """Regression: `_find_record` used to deserialize every persisted record
+    to pick one, making each Company Research render and each
+    `get_research_state` call O(universe) (~1.3 s at 5,000 securities)."""
+    from alpha_lab.research import ResearchService
+
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="AAA", is_tracked=True))
+        session.commit()
+    Phase3Repository(engine).save_current_research([_adopt_record("AAA")])
+    service = ResearchService(engine, load_settings())
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("single-ticker lookup must not read the whole universe")
+
+    monkeypatch.setattr(service._screener, "read_current_research", _forbidden)
+    research = service.get_stock_research("aaa")
+    assert research is not None and research.ticker == "AAA"
+    assert service.get_stock_research("NOPE") is None
+
+
+def test_manage_universe_add_does_not_report_ok_when_analyst_consensus_failed(monkeypatch, manage_universe, capsys):
+    """Regression: `add` printed 'supplemental research ...: ok' even right
+    after printing that analyst consensus FAILED."""
+    monkeypatch.setenv("ALPHALAB_AI_PROVIDER", "disabled")
+    monkeypatch.delenv("ALPHALAB_SEC_USER_AGENT", raising=False)
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    monkeypatch.setattr(manage_universe, "YFinanceProvider", lambda: _FakeProvider())
+
+    assert manage_universe.add_tickers(engine, load_settings(), ["NEWCO"]) is True
+
+    out = capsys.readouterr().out
+    assert "analyst consensus: FAILED" in out
+    assert "supplemental research: INCOMPLETE" in out
+    assert "supplemental research (analyst/technical/AI/fund evidence): ok" not in out
