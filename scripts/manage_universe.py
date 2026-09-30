@@ -52,6 +52,7 @@ from alpha_lab.refresh import (  # noqa: E402
     UniverseTooLargeToAdopt,
     adopt_current_research_tickers,
     set_tracked_tickers,
+    stale_universe_tickers,
 )
 from alpha_lab.providers.sec_edgar import SECClient  # noqa: E402
 from alpha_lab.providers.sec_filings import SECFilingDocumentProvider  # noqa: E402
@@ -250,6 +251,13 @@ def set_tracked(engine, settings, tickers: list[str]) -> bool:
     print("Rebuilding current research for the tracked universe...")
     records = MarketScreenerService(engine, settings).rebuild_current_research()
     print(f"Research rebuilt for {len(records)} tracked securit(y/ies).")
+    needs_prices = stale_universe_tickers(engine, settings.data_quality["stale_price_days"])
+    if needs_prices:
+        print(
+            f"  {len(needs_prices)} tracked securit(y/ies) have no current price data and will show "
+            f"'missing price'/'stale price' until fetched: {', '.join(needs_prices)}\n"
+            "  Fix: press Full Refresh in the dashboard, or run `add TICKER ...` for them."
+        )
     return not result.missing
 
 
