@@ -240,7 +240,10 @@ if st.button("🔄 Full Refresh (price + fundamental data + research)"):
     if unexpected_error is not None:
         st.error(f"Full Refresh failed unexpectedly ({unexpected_error}); existing research is unchanged.")
     elif status is None:
-        st.warning("A refresh is already in progress for this session.")
+        st.warning(
+            "A refresh is already in progress (in this or another browser tab); "
+            "wait for it to finish, then reload."
+        )
     elif status.core.research_error is not None:
         st.error(
             f"Research rebuild failed ({status.core.research_error}); existing "

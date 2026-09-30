@@ -43,6 +43,7 @@ from typing import Any
 from collections import Counter
 import hashlib
 import json
+import threading
 
 import pandas as pd
 from sqlalchemy import Engine, select
@@ -406,6 +407,17 @@ def get_current_research_refresh_status(engine: Engine, *, scope: str = DEFAULT_
         return ResearchRefreshStatus.model_validate(row.payload)
 
 
+# Streamlit runs every browser session/tab in this one process, and
+# `state` (st.session_state) is per session, so the flag below cannot stop
+# the automatic on-session-start refresh of one tab from writing while
+# another tab's manual Full Refresh is mid-ingest -- two writers on one
+# SQLite file, which is how "database is locked" surfaced. This lock is the
+# process-wide counterpart (non-blocking: the loser is told, never queued).
+# Still in-process only: a separate script process relies on SQLite's busy
+# timeout (see alpha_lab.database.session).
+_PROCESS_REFRESH_LOCK = threading.Lock()
+
+
 def run_research_refresh_guarded(
     engine: Engine, settings: Settings, state: dict[str, Any], *, tickers: list[str] | None = None,
     force_core: bool = False, scope: str = DEFAULT_SCOPE,
@@ -418,6 +430,8 @@ def run_research_refresh_guarded(
     provider when a refresh is already in progress."""
     if state.get("research_refresh_in_progress"):
         return None
+    if not _PROCESS_REFRESH_LOCK.acquire(blocking=False):
+        return None
     state["research_refresh_in_progress"] = True
     try:
         return ResearchRefreshOrchestrator(engine, settings).run(
@@ -425,3 +439,4 @@ def run_research_refresh_guarded(
         )
     finally:
         state["research_refresh_in_progress"] = False
+        _PROCESS_REFRESH_LOCK.release()

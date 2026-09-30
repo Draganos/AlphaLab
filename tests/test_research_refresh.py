@@ -8,6 +8,8 @@ read-only, versioned cross-domain evidence status stamp reusing
 """
 from datetime import UTC, date, datetime, timedelta
 
+import threading
+
 import pandas as pd
 import pytest
 from sqlalchemy import select
@@ -321,3 +323,48 @@ def test_the_in_progress_flag_is_cleared_even_when_the_refresh_raises(monkeypatc
     with pytest.raises(RuntimeError):
         run_research_refresh_guarded(engine, settings, state)
     assert state["research_refresh_in_progress"] is False
+
+
+def test_a_second_tab_cannot_start_a_refresh_while_one_is_running(monkeypatch):
+    """`state` is per browser session but Streamlit sessions share one process
+    and one SQLite file: the automatic refresh of tab B must not write while
+    tab A's Full Refresh is mid-ingest ('database is locked')."""
+    import alpha_lab.research_refresh as module
+
+    entered, release, results = threading.Event(), threading.Event(), {}
+
+    class _Slow:
+        def __init__(self, engine, settings):
+            pass
+
+        def run(self, **kwargs):
+            entered.set()
+            release.wait(timeout=10)
+            return "done"
+
+    monkeypatch.setattr(module, "ResearchRefreshOrchestrator", _Slow)
+    first = threading.Thread(target=lambda: results.update(a=module.run_research_refresh_guarded(None, None, {})))
+    first.start()
+    assert entered.wait(timeout=10)
+    assert module.run_research_refresh_guarded(None, None, {}) is None  # other session: refused, not queued
+    release.set()
+    first.join(timeout=10)
+    assert results["a"] == "done"
+    assert module.run_research_refresh_guarded(None, None, {}) == "done"  # lock released afterwards
+
+
+def test_the_process_lock_is_released_when_the_refresh_raises(monkeypatch):
+    import alpha_lab.research_refresh as module
+
+    class _Boom:
+        def __init__(self, engine, settings):
+            pass
+
+        def run(self, **kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "ResearchRefreshOrchestrator", _Boom)
+    with pytest.raises(RuntimeError):
+        module.run_research_refresh_guarded(None, None, {})
+    assert module._PROCESS_REFRESH_LOCK.acquire(blocking=False)
+    module._PROCESS_REFRESH_LOCK.release()

@@ -139,6 +139,9 @@ def create_schema(engine: Engine) -> None:
                 if build_size <= _MAX_BACKFILL_TRACKED:
                     connection.execute(text(f"UPDATE securities SET is_tracked = 1 WHERE ticker IN ({in_build})"))
             connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_prices_ticker_date ON prices (ticker, date)")
+            )
+            connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_factor_scores_config_hash ON factor_scores (config_hash)"
                 )
