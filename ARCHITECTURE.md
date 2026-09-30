@@ -5583,3 +5583,32 @@ the same way, and nothing ever stopped the loop. The result line showed only
 
 Deliberately not changed: ingestion stays sequential (parallel requests would
 make throttling worse, not better).
+
+## 58. "database is locked" during refresh: per-row price lookups inside the write transaction
+
+**Incident:** the automatic stale-data refresh failed with `database is locked`
+(on `UPDATE securities SET market_cap ...`), and a 4-ticker Full Refresh took
+~5 minutes although the provider measured fast on the same machine
+(`scripts/diagnose_yfinance.py`: 0.3-1.6 s per call).
+
+**Cause:** `IngestionService.ingest` ran one `SELECT ... FROM prices WHERE
+ticker=? AND date=?` per incoming bar (~500 per ticker) *inside* the write
+transaction (the first autoflush takes SQLite's single write lock), so the lock
+was held for the whole loop. On a large price table the planner may use the
+`date` index (every ticker's row for that day); measured 2.4 s per re-ingest at
+1.5M rows and growing with the table. A second refresh (another tab's automatic
+on-session-start refresh, or a script) then waited past the 30 s busy timeout.
+Reproduced with 3 concurrent writers on a 1.5M-row DB and a 1 s timeout: old
+code 12/18 ingests failed (15 s), new code 0 failures (1.0 s).
+
+**Fixes:**
+- `ingest` reads the ticker's stored bars once and compares in memory (same
+  "newest `ingested_at`, then `id`" rule); re-ingest 2.4 s -> 0.15 s on 1.5M rows.
+- Composite `ix_prices_ticker_date` index (model + idempotent migration for
+  existing databases): 0.15 s -> 0.06 s.
+- `run_research_refresh_guarded` takes a process-wide non-blocking lock: the
+  per-session `state` flag could not stop two tabs of one Streamlit process
+  from writing at once. The loser returns `None` (existing messages apply).
+  Cross-process writers (scripts) still rely on WAL + the busy timeout.
+- `scripts/profile_ingest.py TICKER` prints DB size/row counts/indexes and
+  splits one real ingest into provider time vs database/CPU time.

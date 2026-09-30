@@ -99,6 +99,18 @@ class IngestionService:
                 security.is_tracked = True
             security.metadata_updated_at = datetime.now(UTC)
             skipped_prices = skipped_fundamentals = 0
+            # One read of this ticker's stored bars instead of one query per
+            # incoming row (~500 round trips per ticker, all inside the write
+            # transaction, so the lock was held for their whole duration and
+            # concurrent writers timed out with "database is locked"). Same
+            # "latest row per date" rule as before: newest ingested_at, then id.
+            latest_by_date: dict[date, Price] = {}
+            for stored in session.scalars(
+                select(Price)
+                .where(Price.ticker == symbol)
+                .order_by(Price.ingested_at.desc(), Price.id.desc())
+            ):
+                latest_by_date.setdefault(stored.date, stored)
             for index, row in prices.iterrows():
                 values = {
                     key: self._number(row.get(key))
@@ -120,12 +132,7 @@ class IngestionService:
                 if price_date is None:
                     skipped_prices += 1
                     continue
-                latest = session.scalars(
-                    select(Price)
-                    .where(Price.ticker == symbol, Price.date == price_date)
-                    .order_by(Price.ingested_at.desc(), Price.id.desc())
-                    .limit(1)
-                ).first()
+                latest = latest_by_date.get(price_date)
                 merged = {
                     field: values[field]
                     if values.get(field) is not None
@@ -136,7 +143,9 @@ class IngestionService:
                     _price_field_changed(merged[field], getattr(latest, field))
                     for field in _PRICE_FIELDS
                 ):
-                    session.add(Price(ticker=symbol, date=price_date, **merged))
+                    added = Price(ticker=symbol, date=price_date, **merged)
+                    session.add(added)
+                    latest_by_date[price_date] = added
             for row in financials.to_dict("records"):
                 period = self._date(row.pop("period", None))
                 if period is None:
