@@ -210,6 +210,36 @@ def test_screener_dataframe_is_populated_via_market_screener_services_canonical_
         module.engine.dispose()
 
 
+def test_etf_rows_show_fund_aum_and_category_with_market_cap_left_blank(monkeypatch, tmp_path):
+    from alpha_lab.screener.service import MarketScreenerService
+
+    etf = _record(category_scores=_FULL_CATEGORIES, overall_score=70.0).model_copy(update={
+        "ticker": "FTEC", "company": "Fidelity MSCI IT ETF", "asset_type": "ETF",
+        "market_cap": None, "sector": None, "industry": None,
+        "fund_aum": 21_250_689_024.0, "fund_category": "Technology",
+    })
+    stock = _record(category_scores=_FULL_CATEGORIES, overall_score=60.0)
+    monkeypatch.setattr(MarketScreenerService, "read_current_research", lambda self: [etf, stock])
+    module = _import_main(tmp_path / "etf.db", monkeypatch)
+    try:
+        rows = module.screen.set_index("Ticker")
+        assert rows.loc["FTEC", "Fund AUM"] == 21_250_689_024.0
+        assert rows.loc["FTEC", "Fund Category"] == "Technology"
+        assert rows.loc["FTEC", "Market Cap"] is None or rows.loc["FTEC", "Market Cap"] != rows.loc["FTEC", "Market Cap"]
+        assert rows.loc["AAPL", "Fund AUM"] is None or rows.loc["AAPL", "Fund AUM"] != rows.loc["AAPL", "Fund AUM"]
+        assert rows.loc["AAPL", "Market Cap"] == 2_700_000_000_000
+    finally:
+        module.engine.dispose()
+
+
+def test_a_research_record_persisted_before_fund_fields_still_validates():
+    payload = _record(category_scores=_FULL_CATEGORIES, overall_score=50.0).model_dump()
+    payload.pop("fund_aum")
+    payload.pop("fund_category")
+    restored = LiveResearchRecord.model_validate(payload)
+    assert restored.fund_aum is None and restored.fund_category is None
+
+
 def test_screener_never_imports_or_calls_historical_scoring_service():
     """Cheap static guard, kept alongside the dynamic test above as a fast
     fail-early signal: the fixed Stock Screener section must not import or

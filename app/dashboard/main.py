@@ -92,6 +92,8 @@ def build_screener() -> pd.DataFrame:
             "Company": item.company_name,
             "Price": indexed[item.ticker].price,
             "Market Cap": item.market_cap,
+            "Fund AUM": indexed[item.ticker].fund_aum,
+            "Fund Category": indexed[item.ticker].fund_category,
             "Sector": item.sector,
             "Industry": item.industry,
             "Overall Rating": item.overall_score,

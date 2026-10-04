@@ -101,6 +101,7 @@ class YFinanceProvider(
         )
         if not isinstance(info, dict):
             info = {}
+        is_fund = str(info.get("quoteType") or "").upper() in {"ETF", "MUTUALFUND"}
         return {
             "ticker": ticker.upper(),
             "company_name": _text(info.get("longName")),
@@ -111,6 +112,8 @@ class YFinanceProvider(
             "industry": _text(info.get("industry")),
             "asset_type": _text(info.get("quoteType")),
             "market_cap": _number(info.get("marketCap"), positive=True),
+            "fund_aum": _number(info.get("totalAssets"), positive=True) if is_fund else None,
+            "fund_category": _text(info.get("category")) if is_fund else None,
             "business_description": _text(info.get("longBusinessSummary")),
             "metadata_provider": self.provider_name,
             "metadata_source": "yfinance quoteSummary",

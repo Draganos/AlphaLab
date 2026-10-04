@@ -7,7 +7,6 @@ crash that aborts a whole ticker's refresh, and never a fabricated value."""
 import json
 from datetime import date
 
-import numpy as np
 import pandas as pd
 import pytest
 import yfinance
@@ -160,3 +159,27 @@ def test_tz_aware_price_index_is_normalized_to_naive_dates(provider):
     frame = provider.get_price_history("X", date(2024, 1, 1), date(2024, 2, 1))
     assert frame.index.tz is None and frame.index[0].date() == date(2024, 1, 2)
     assert "adjusted_close" in frame.columns
+
+
+def test_fund_aum_and_category_come_from_etf_info_but_never_from_a_stock(provider):
+    _FakeTicker.cfg = {"info": {
+        "quoteType": "ETF", "longName": "Fund", "marketCap": None, "sector": None,
+        "totalAssets": 21250689024, "category": "Technology",
+    }}
+    etf = provider.get_company_info("FTEC")
+    assert etf["fund_aum"] == 21250689024.0 and etf["fund_category"] == "Technology"
+    assert etf["market_cap"] is None and etf["sector"] is None  # never conflated
+
+    _FakeTicker.cfg = {"info": {
+        "quoteType": "EQUITY", "marketCap": 3e12, "totalAssets": 1e9, "category": "x",
+    }}
+    stock = provider.get_company_info("MSFT")
+    assert stock["fund_aum"] is None and stock["fund_category"] is None
+    assert stock["market_cap"] == 3e12
+
+
+@pytest.mark.parametrize("bad", [None, "n/a", NAN, float("inf"), -5, 0])
+def test_a_bad_fund_total_assets_is_none_not_a_fabricated_size(provider, bad):
+    _FakeTicker.cfg = {"info": {"quoteType": "ETF", "totalAssets": bad, "category": NAN}}
+    info = provider.get_company_info("FTEC")
+    assert info["fund_aum"] is None and info["fund_category"] is None

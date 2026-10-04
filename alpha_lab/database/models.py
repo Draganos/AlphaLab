@@ -49,6 +49,13 @@ class Security(Base):
     asset_type: Mapped[str | None] = mapped_column(String(64))
     industry: Mapped[str | None] = mapped_column(String(128))
     market_cap: Mapped[float | None] = mapped_column(Float)
+    # Funds (ETF/mutual fund) have no market cap, sector or industry; their
+    # size is total assets under management (raw currency units, as Yahoo
+    # `totalAssets`) and their classification is Yahoo's fund `category`.
+    # Deliberately separate from `market_cap`/`sector`: different quantities
+    # and taxonomies. Only ever set for fund quote types.
+    fund_aum: Mapped[float | None] = mapped_column(Float)
+    fund_category: Mapped[str | None] = mapped_column(String(128))
     business_description: Mapped[str | None] = mapped_column(Text)
     metadata_provider: Mapped[str | None] = mapped_column(String(64))
     metadata_source: Mapped[str | None] = mapped_column(String(512))
