@@ -348,3 +348,43 @@ def test_ingest_reads_stored_prices_once_not_once_per_incoming_row():
     assert len(price_selects) <= 2  # one read per ingest, regardless of the 60 bars
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(Price)) == 60
+
+
+def test_fund_aum_and_category_persist_and_are_not_cleared_by_a_later_blank(tmp_path):
+    class _Fund(MarketDataProvider):
+        provider_name = "fixture"
+        info: dict = {"company_name": "Fund", "currency": "USD", "fund_aum": 2.1e10, "fund_category": "Technology"}
+
+        def get_company_info(self, ticker):
+            return {"ticker": ticker, **self.info}
+
+        def get_price_history(self, ticker, start, end):
+            return pd.DataFrame({"close": [10.0], "adjusted_close": [10.0]}, index=pd.to_datetime(["2025-01-02"]))
+
+        def get_financials(self, ticker):
+            return pd.DataFrame()
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'f.db'}")
+    create_schema(engine)
+    provider = _Fund()
+    IngestionService(provider, engine).ingest("FTEC", date(2025, 1, 1), date(2025, 2, 1))
+    provider.info = {"company_name": "Fund", "currency": "USD", "fund_aum": None, "fund_category": None}
+    IngestionService(provider, engine).ingest("FTEC", date(2025, 1, 1), date(2025, 2, 1))
+    with Session(engine) as session:
+        security = session.get(Security, "FTEC")
+        assert security.fund_aum == 2.1e10 and security.fund_category == "Technology"
+        assert security.market_cap is None
+
+
+def test_securities_gain_fund_columns_on_migration(tmp_path):
+    from sqlalchemy import text
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm.db'}")
+    create_schema(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE securities DROP COLUMN fund_aum"))
+        connection.execute(text("ALTER TABLE securities DROP COLUMN fund_category"))
+    create_schema(engine)
+    with engine.connect() as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(securities)")}
+    assert {"fund_aum", "fund_category"} <= columns

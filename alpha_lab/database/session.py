@@ -57,6 +57,8 @@ def create_schema(engine: Engine) -> None:
             "metadata_source": "VARCHAR(512)",
             "metadata_updated_at": "DATETIME",
             "is_tracked": "BOOLEAN DEFAULT 0 NOT NULL",
+            "fund_aum": "FLOAT",
+            "fund_category": "VARCHAR(128)",
         },
         "prices": {
             "currency": "VARCHAR(8)",

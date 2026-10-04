@@ -5612,3 +5612,23 @@ code 12/18 ingests failed (15 s), new code 0 failures (1.0 s).
   Cross-process writers (scripts) still rely on WAL + the busy timeout.
 - `scripts/profile_ingest.py TICKER` prints DB size/row counts/indexes and
   splits one real ingest into provider time vs database/CPU time.
+
+## 59. ETF size and category in the screener (no market cap / sector for funds)
+
+Yahoo defines no `marketCap`, `sector` or `industry` for ETFs (verified live for
+FTEC, GDX, SPY: all `None`), so ETF rows in the Stock Screener table looked
+empty. They do report `totalAssets` (AUM) and `category`.
+
+- `Security.fund_aum` / `Security.fund_category` (additive migration), filled by
+  `YFinanceProvider.get_company_info` **only for ETF/MUTUALFUND quote types**;
+  `_number(..., positive=True)` / `_text`, so a bad value is `None`, never a
+  fabricated size. A later blank never clears a stored value (existing ingest
+  rule for metadata).
+- `LiveResearchRecord.fund_aum` / `fund_category` (default `None`, so records
+  persisted before these fields existed still validate) and two screener
+  columns, **Fund AUM** and **Fund Category**.
+- Deliberately NOT done: putting AUM in `market_cap` or the category in
+  `sector` (different quantities/taxonomies; would also feed valuation and the
+  sector filter). Scoring, ranking and coverage are untouched.
+- Values appear after the ticker's next ingest (Full Refresh ingests stale
+  tickers; `manage_universe.py add FTEC GDX` forces it) and a research rebuild.

@@ -153,6 +153,10 @@ class LiveResearchRecord(BaseModel):
     # consumer already treats the same conservative way as a missing
     # `market_cap`.
     market_cap_usd: float | None = None
+    # Fund-only size/classification (see `Security.fund_aum`); None for
+    # stocks and for payloads persisted before these fields existed.
+    fund_aum: float | None = None
+    fund_category: str | None = None
     country: str | None
     exchange: str | None
     sector: str | None
@@ -492,6 +496,8 @@ class MarketScreenerService:
             market_cap_usd=self.fx_rates.convert_to_usd(
                 market_cap, security.currency, evaluation
             ),
+            fund_aum=security.fund_aum,
+            fund_category=security.fund_category,
             country=security.country,
             exchange=security.exchange,
             sector=security.sector,
