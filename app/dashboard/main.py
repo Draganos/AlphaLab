@@ -21,6 +21,7 @@ from alpha_lab.refresh import (
     MAX_FULL_UNIVERSE_REFRESH_BATCH,
     is_universe_price_stale,
     stale_universe_tickers,
+    upgrade_stale_current_research,
 )
 from alpha_lab.research_refresh import get_current_research_refresh_status, run_research_refresh_guarded
 from alpha_lab.screener import MarketScreenerService
@@ -114,7 +115,12 @@ def build_screener() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+_schema_upgrade = upgrade_stale_current_research(engine, settings)
+if _schema_upgrade.rebuilt:
+    build_screener.clear()
 st.title("α AlphaLab")
+if _schema_upgrade.message:
+    getattr(st, _schema_upgrade.level)(_schema_upgrade.message)
 st.caption("Research and paper trading only — no brokerage execution")
 st.info("Primary research question: **Is AlphaLab actually outperforming after adjusting for risk and trading costs?**")
 left, right = st.columns(2)

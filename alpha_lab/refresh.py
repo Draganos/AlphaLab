@@ -307,6 +307,61 @@ def is_universe_price_stale(
 
 
 @dataclass
+class SchemaUpgradeResult:
+    """Outcome of `upgrade_stale_current_research`. `message` is None when
+    there was nothing to report (build current, or no build at all)."""
+
+    rebuilt: bool = False
+    message: str | None = None
+    level: str = "info"  # "info" | "warning" | "error"
+
+
+def upgrade_stale_current_research(engine: Engine, settings: Settings) -> SchemaUpgradeResult:
+    """One-time, explicit migration of a persisted research build written by
+    an older `LiveResearchRecord` schema. Fields added later cannot be
+    back-derived honestly -- e.g. a legacy record has no `currency`, so its
+    native `market_cap` cannot be assumed USD without mis-tiering a
+    non-USD security -- so the build is recomputed from the database (a local
+    recompute, no provider calls), never patched. Skipped with a visible
+    warning above `MAX_FULL_UNIVERSE_REFRESH_BATCH` tracked securities (too
+    slow to do during a page load; `scripts/rebuild_research.py` does it). A
+    failure is reported, never raised or hidden."""
+    screener = MarketScreenerService(engine, settings)
+    if not screener.current_research_schema_is_stale():
+        return SchemaUpgradeResult()
+    caveat = (
+        "Fields derived from them (USD market cap, size tier, fund AUM) may read as "
+        "unavailable until it is rebuilt."
+    )
+    tracked = len(configured_universe_tickers(engine))
+    if tracked > MAX_FULL_UNIVERSE_REFRESH_BATCH:
+        return SchemaUpgradeResult(
+            message=(
+                "The stored research build predates the current record format and the "
+                f"{tracked} tracked securities are too many to rebuild during a page load. "
+                f"Run `python scripts/rebuild_research.py`. {caveat}"
+            ),
+            level="warning",
+        )
+    try:
+        records = screener.rebuild_current_research()
+    except Exception as error:  # noqa: BLE001 -- must never take a page down; reported below
+        return SchemaUpgradeResult(
+            message=f"The stored research build predates the current record format and rebuilding it failed ({error}). {caveat}",
+            level="error",
+        )
+    if not records:  # nothing tracked: no new build was written, the old one remains
+        return SchemaUpgradeResult(
+            message=f"The stored research build predates the current record format and there are no tracked securities to rebuild it from. {caveat}",
+            level="warning",
+        )
+    return SchemaUpgradeResult(
+        rebuilt=True,
+        message="The stored research build predated the current record format; it was rebuilt once automatically.",
+    )
+
+
+@dataclass
 class CoreRefreshResult:
     tickers_attempted: list[str]
     tickers_succeeded: list[str] = field(default_factory=list)

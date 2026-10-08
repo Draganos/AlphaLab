@@ -11,6 +11,7 @@ import streamlit as st
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.phase3 import Phase3Repository
+from alpha_lab.refresh import upgrade_stale_current_research
 from alpha_lab.screener import MarketScreenerService
 from alpha_lab.scorecard import build_security_screener_verdict
 from alpha_lab.search import (
@@ -31,6 +32,9 @@ st.warning(
 settings = load_settings()
 engine = make_engine(settings.database_url)
 create_schema(engine)
+_schema_upgrade = upgrade_stale_current_research(engine, settings)
+if _schema_upgrade.message:
+    getattr(st, _schema_upgrade.level)(_schema_upgrade.message)
 try:
     repository = Phase3Repository(engine)
     saved = repository.list_screeners()
