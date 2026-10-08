@@ -250,6 +250,27 @@ class Phase3Repository:
                 )
             )
 
+    def latest_current_payload_keys(self) -> set[str] | None:
+        """Field names stored in one record of the latest current build, or
+        `None` when there is no build. A build is written atomically by one
+        code version from complete `model_dump`s, so one record's keys are the
+        schema every record in that build shares -- the cheap way to tell
+        whether the build predates the current `LiveResearchRecord`."""
+        with Session(self.engine, expire_on_commit=False) as session:
+            build_id = session.scalar(
+                select(CurrentResearchBuild.id).order_by(
+                    CurrentResearchBuild.built_at.desc(), CurrentResearchBuild.id.desc()
+                )
+            )
+            if build_id is None:
+                return None
+            payload = session.scalar(
+                select(CurrentResearchSnapshot.payload)
+                .where(CurrentResearchSnapshot.build_id == build_id)
+                .limit(1)
+            )
+            return None if payload is None else set(payload)
+
     def latest_current_payloads(self) -> tuple[CurrentResearchBuild | None, list[dict]]:
         """Read the latest complete build without invoking providers or writing state."""
         with Session(self.engine, expire_on_commit=False) as session:

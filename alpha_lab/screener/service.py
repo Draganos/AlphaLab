@@ -196,6 +196,16 @@ class MarketScreenerService:
         Phase3Repository(self.engine).save_current_research(records)
         return records
 
+    def current_research_schema_is_stale(self) -> bool:
+        """True when the latest persisted build was written before one or more
+        of today's `LiveResearchRecord` fields existed (e.g. `market_cap_usd`
+        and `currency`, added with FX support). Such a payload still
+        validates -- the new fields default to `None` -- but `None` there
+        means "this build never computed it", not "unknown": a USD security
+        would read as unconvertible and be tiered SPECULATIVE. Read-only."""
+        keys = Phase3Repository(self.engine).latest_current_payload_keys()
+        return keys is not None and not set(LiveResearchRecord.model_fields) <= keys
+
     def read_current_research(self) -> list[LiveResearchRecord]:
         """Read-only UI path; never calls a provider, AI, ethics, or theme derivation."""
         _, payloads = Phase3Repository(self.engine).latest_current_payloads()

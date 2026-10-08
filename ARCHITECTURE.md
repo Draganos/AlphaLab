@@ -5632,3 +5632,32 @@ empty. They do report `totalAssets` (AUM) and `category`.
   sector filter). Scoring, ranking and coverage are untouched.
 - Values appear after the ticker's next ingest (Full Refresh ingests stale
   tickers; `manage_universe.py add FTEC GDX` forces it) and a research rebuild.
+
+## 60. Legacy persisted research builds: one explicit rebuild, never a guessed USD cap
+
+**Review finding (PR #47, FX support):** `LiveResearchRecord` gained `currency`
+and `market_cap_usd` (default `None`) and `classify_tier` moved to
+`market_cap_usd`. A build persisted before that still validates -- but `None`
+there means "never computed", so a USD $50bn security read as unconvertible and
+was tiered SPECULATIVE instead of CORE. `read_current_research` is deliberately
+read-only, so nothing ever repaired it.
+
+**Why not derive `market_cap_usd` from the old `market_cap` (the reviewer's
+option A):** a legacy record has no `currency` either, so a JPY cap would be
+read as USD -- exactly the guess the evidence model forbids (tested).
+
+**Fix (option B):**
+- `MarketScreenerService.current_research_schema_is_stale()`: the latest build
+  is stale when one stored record lacks any field of today's
+  `LiveResearchRecord` (a build is written atomically by one code version from
+  complete dumps, so one sample record suffices; `Phase3Repository.
+  latest_current_payload_keys`). Generic, so it also covers `fund_aum` /
+  `fund_category` and any future field.
+- `alpha_lab.refresh.upgrade_stale_current_research`: recompute the build from
+  the database once (local, no provider calls). Skipped with a visible warning
+  above `MAX_FULL_UNIVERSE_REFRESH_BATCH` tracked securities (use
+  `scripts/rebuild_research.py`); a failure, or nothing tracked to rebuild
+  from, is reported, never raised or hidden.
+- Called at the top of the three dashboard entry points that read current
+  research (main, Market Screener, Company Research); main clears its
+  screener cache when it rebuilt.

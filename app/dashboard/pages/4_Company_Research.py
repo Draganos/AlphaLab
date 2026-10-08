@@ -19,6 +19,7 @@ from alpha_lab.news import NewsService, classify_article
 from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers import YFinanceProvider
 from alpha_lab.providers.errors import ProviderError
+from alpha_lab.refresh import upgrade_stale_current_research
 from alpha_lab.research import CATEGORY_LABELS, CATEGORY_ORDER, ResearchService
 from alpha_lab.research.ai_rating import DIMENSION_NAMES
 from alpha_lab.research.analyst_events import AnalystEventsService
@@ -758,6 +759,9 @@ def _render_comparison(comparison) -> None:
 settings = load_settings()
 engine = make_engine(settings.database_url)
 create_schema(engine)
+_schema_upgrade = upgrade_stale_current_research(engine, settings)
+if _schema_upgrade.message:
+    getattr(st, _schema_upgrade.level)(_schema_upgrade.message)
 try:
     service = ResearchService(engine, settings)
     quotes = service.list_current_research()
