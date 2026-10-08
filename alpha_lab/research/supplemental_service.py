@@ -35,7 +35,9 @@ from alpha_lab.database.models import (
 )
 from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.providers.base import MarketDataProvider
-from alpha_lab.providers.errors import ProviderError
+from pydantic import ValidationError
+
+from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
 from alpha_lab.research.ai_rating import (
     AIResearchAssessment,
     build_ai_research_assessment,
@@ -226,7 +228,18 @@ class SupplementalResearchService:
         raw = provider.get_fund_data(symbol)
         if raw is None:
             return None
-        evidence = build_fund_evidence(raw)
+        try:
+            evidence = build_fund_evidence(raw)
+        except ValidationError as error:
+            # A provider payload that fails our schema is a bad response, not
+            # a reason to crash the caller's loop: report it like any other
+            # provider failure (existing evidence stays untouched).
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                provider.provider_name,
+                f"fund data failed validation: {error.errors()[0]['loc']} {error.errors()[0]['msg']}",
+                cause=error,
+            ) from error
         if evidence is None:
             return None
         self._upsert(CurrentFundEvidence, symbol, evidence.model_dump(mode="json"))

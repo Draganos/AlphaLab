@@ -139,3 +139,48 @@ def test_never_produces_a_second_overall_score():
     assert not hasattr(evidence, "score")
     assert not hasattr(evidence, "composite_score")
     assert not hasattr(evidence, "rating")
+
+
+def test_a_small_negative_allocation_is_kept_as_reported():
+    """Observed live: FTEC reports otherPosition = -0.0079 (net derivatives/
+    liabilities). It must be stored as reported -- not rejected (which used to
+    abort the whole ticker's refresh) and not clamped to zero."""
+    evidence = build_fund_evidence(_raw(other_position=-0.007900001))
+    assert evidence is not None
+    assert evidence.asset_allocation.other == -0.007900001
+    assert evidence.asset_allocation.stock == 0.9991
+
+
+def test_an_absurd_allocation_is_still_rejected():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        build_fund_evidence(_raw(other_position=-5.0))
+
+
+def test_a_payload_failing_validation_is_a_handled_provider_error_not_a_crash(tmp_path):
+    """refresh_all/refresh scripts only handle ProviderError: a raw pydantic
+    ValidationError used to escape and abort every remaining ticker."""
+    import pytest
+
+    from alpha_lab.database import create_schema, make_engine
+    from alpha_lab.providers.base import MarketDataProvider
+    from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
+    from alpha_lab.research.supplemental_service import SupplementalResearchService
+
+    class _BadFund(MarketDataProvider):
+        provider_name = "fixture"
+
+        def get_company_info(self, ticker): return {}
+        def get_price_history(self, ticker, start, end): raise NotImplementedError
+        def get_financials(self, ticker): raise NotImplementedError
+        def get_fund_data(self, ticker): return _raw(other_position=-5.0)
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'f.db'}")
+    create_schema(engine)
+    service = SupplementalResearchService(engine)
+    with pytest.raises(ProviderError) as caught:
+        service.refresh_fund_evidence("FTEC", _BadFund())
+    assert caught.value.kind is ProviderErrorKind.INVALID_RESPONSE
+    assert service.get_fund_evidence("FTEC") is None  # nothing half-written

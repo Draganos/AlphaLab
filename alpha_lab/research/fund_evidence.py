@@ -53,12 +53,17 @@ class AssetAllocation(BaseModel):
     (all six fields None) when yfinance returned no asset-class data at
     all for this fund."""
 
-    cash: float | None = Field(None, ge=0, le=1)
-    stock: float | None = Field(None, ge=0, le=1)
-    bond: float | None = Field(None, ge=0, le=1)
-    preferred: float | None = Field(None, ge=0, le=1)
-    convertible: float | None = Field(None, ge=0, le=1)
-    other: float | None = Field(None, ge=0, le=1)
+    # Lower bound is -1, not 0: a fund can genuinely report a small negative
+    # position (derivatives/liabilities netted into "other", leverage in
+    # "cash"). Observed live: FTEC otherPosition = -0.0079. The reported value
+    # is kept as is -- never clamped to 0 or dropped, which would misstate
+    # the fund. Out-of-range garbage (beyond +-100%) is still rejected.
+    cash: float | None = Field(None, ge=-1, le=1)
+    stock: float | None = Field(None, ge=-1, le=1)
+    bond: float | None = Field(None, ge=-1, le=1)
+    preferred: float | None = Field(None, ge=-1, le=1)
+    convertible: float | None = Field(None, ge=-1, le=1)
+    other: float | None = Field(None, ge=-1, le=1)
 
     def is_present(self) -> bool:
         return any(

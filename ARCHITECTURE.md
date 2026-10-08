@@ -5661,3 +5661,19 @@ read as USD -- exactly the guess the evidence model forbids (tested).
 - Called at the top of the three dashboard entry points that read current
   research (main, Market Screener, Company Research); main clears its
   screener cache when it rebuilt.
+
+## 61. Fund data with a negative allocation aborted the refresh
+
+Found while building Phase 8's real-data set: `refresh_all` for FTEC raised a
+pydantic `ValidationError` -- Yahoo reports `otherPosition = -0.0079` (net
+derivatives/liabilities) and `AssetAllocation` required every fraction in
+[0, 1]. `ValidationError` is not a `ProviderError`, so it escaped
+`refresh_all` and `scripts/refresh_supplemental_research.py`, aborting every
+remaining ticker in the loop.
+
+- `AssetAllocation` fractions now accept [-1, 1]; the reported value is kept
+  as is (never clamped to 0 or dropped). Beyond +-100% is still rejected.
+- `SupplementalResearchService.refresh_fund_evidence` converts any schema
+  failure into `ProviderError(INVALID_RESPONSE)`, which `refresh_all` already
+  handles (`fund_evidence_error`, existing evidence untouched, AI refresh not
+  blocked).
