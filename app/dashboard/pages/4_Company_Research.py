@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from alpha_lab.alignment import AlignmentService
 from alpha_lab.calibration.sector_alignment import get_sector_tier_weights_for_ticker
 from alpha_lab.config import load_settings
+from alpha_lab.conviction import FAMILY_LABELS, ConflictStrength, ConvictionAssessment
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import AIResearchAnalysis, EthicalEvaluation
 from alpha_lab.news import NewsService, classify_article
@@ -376,7 +377,93 @@ def _render_research_stance_panel(research, stance: "ResearchStance | None") -> 
     st.dataframe(rows, width="stretch", hide_index=True)
 
 
-def _render_stock_research(research, *, quote=None, stance: "ResearchStance | None" = None) -> None:
+_AGREEMENT_DISPLAY: dict[str, tuple[str, str]] = {
+    "CONVERGENT": ("Convergent", "All three independent evidence families are established and point the same way."),
+    "LEANING": ("Leaning", "At least two independent families agree and none oppose, but the evidence is not yet fully convergent."),
+    "CONTESTED": ("Contested", "Independent evidence families — or two sources inside one family — disagree outright."),
+    "MIXED": ("Mixed", "Opposite readings that involve thin evidence, or only one family has a direction."),
+    "NEUTRAL": ("Neutral", "Every assessed family reads neutral."),
+    "INSUFFICIENT": ("Insufficient evidence", "Fewer than two independent evidence families could be assessed."),
+}
+
+
+def _short_provenance(value: str | None) -> str:
+    return "—" if not value else f"{value[:12]}…"
+
+
+def _side_rows(sides) -> list[dict]:
+    return [
+        {
+            "Domain": side.domain.replace("_", " ").title(),
+            "Assessment": side.label.replace("_", " "),
+            "Lean": side.lean.title(),
+            "Field status": side.status,
+            "Provenance": _short_provenance(side.provenance_id),
+        }
+        for side in sides
+    ]
+
+
+def _render_conviction_panel(conviction: "ConvictionAssessment | None") -> None:
+    """Roadmap Phase 8: how independent evidence families agree or conflict.
+    Categorical only — see `alpha_lab.conviction`'s module docstring for the
+    family model, the sufficiency rule and the gates (no score, no weights,
+    never an input to ratings/rankings/backtests). `None` for a historical
+    snapshot view, which does not assemble a point-in-time research state."""
+    st.subheader("Conviction & Conflicts")
+    if conviction is None:
+        st.caption("Conviction & Conflicts is computed for the current research only, not for a historical snapshot.")
+        return
+    st.caption(
+        "A categorical read of how independent evidence families agree or conflict — never a score, "
+        "never an input to ratings, rankings or backtests, and not yet validated against outcomes."
+    )
+    label, meaning = _AGREEMENT_DISPLAY[conviction.agreement.value]
+    columns = st.columns(2)
+    columns[0].metric("Agreement", label)
+    columns[1].metric("Direction", "—" if conviction.direction.value == "NONE" else conviction.direction.value.title())
+    st.caption(meaning)
+    st.dataframe(
+        [
+            {
+                "Evidence family": FAMILY_LABELS[family.family],
+                "Status": family.status.value.title(),
+                "Lean": "—" if family.lean.value == "NONE" else family.lean.value.title(),
+                "Evidence coverage": "—" if family.coverage is None else f"{family.coverage:.0%}",
+                "Basis": family.reason,
+                "Detail": family.detail or "",
+            }
+            for family in conviction.families
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "Established = enough evidence to count fully; Provisional = thin or stale, so it can join an agreement "
+        "but not establish one; Unassessed = no usable evidence (never guessed)."
+    )
+    if not conviction.conflicts:
+        st.success("No conflicts detected between the evidence families.")
+    for conflict in conviction.conflicts:
+        kind = conflict.kind.value.replace("_", " ").title()
+        text = f"**{conflict.strength.value.title()} · {kind}** — {conflict.explanation}"
+        (st.warning if conflict.strength is not ConflictStrength.CONTEXT else st.info)(text)
+        with st.expander(f"Evidence behind this conflict ({conflict.rule_id})"):
+            st.dataframe(_side_rows(conflict.sides), width="stretch", hide_index=True)
+    if conviction.context or conviction.synthesis:
+        with st.expander("Context and cross-checks (shown for reference, never counted)"):
+            if conviction.context:
+                st.markdown("**Market regime** — identical for every security")
+                st.dataframe(_side_rows(conviction.context), width="stretch", hide_index=True)
+            if conviction.synthesis:
+                st.markdown("**Syntheses built from the families above** — can flag divergence, never vote")
+                st.dataframe(_side_rows(conviction.synthesis), width="stretch", hide_index=True)
+
+
+def _render_stock_research(
+    research, *, quote=None, stance: "ResearchStance | None" = None,
+    conviction: "ConvictionAssessment | None" = None,
+) -> None:
     """Render one StockResearch object. Shared, read-only rendering for both
     the current-research view and a selected historical snapshot's detail —
     the same evidence-first presentation either way, never re-derived per
@@ -414,6 +501,8 @@ def _render_stock_research(research, *, quote=None, stance: "ResearchStance | No
     if research.fund_evidence is not None:
         st.divider()
     _render_research_stance_panel(research, stance)
+    st.divider()
+    _render_conviction_panel(conviction)
     st.divider()
     st.subheader("AlphaLab Fundamental Research")
     st.caption(
@@ -797,7 +886,11 @@ try:
     stance = build_research_stance(
         research, news_articles=stance_news_articles, alignment=stance_alignment
     )
-    _render_stock_research(research, quote=quote, stance=stance)
+    _render_stock_research(
+        research, quote=quote, stance=stance,
+        conviction=None if research_state.conviction is None
+        else ConvictionAssessment.model_validate(research_state.conviction),
+    )
 
     st.divider()
     st.subheader("Donatien External Calibration — sector context (audit-only)")

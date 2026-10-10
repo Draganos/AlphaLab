@@ -166,6 +166,16 @@ def create_schema(engine: Engine) -> None:
                     "ON company_documents (content_hash) WHERE content_hash IS NOT NULL"
                 )
             )
+            # The conviction audit table is append-only by construction, not
+            # by convention: any UPDATE or DELETE aborts.
+            for action in ("UPDATE", "DELETE"):
+                connection.execute(
+                    text(
+                        f"CREATE TRIGGER IF NOT EXISTS conviction_assessments_no_{action.lower()} "
+                        f"BEFORE {action} ON conviction_assessments "
+                        "BEGIN SELECT RAISE(ABORT, 'conviction_assessments is append-only'); END"
+                    )
+                )
 
 
 def _migrate_legacy_fundamentals(engine: Engine) -> None:

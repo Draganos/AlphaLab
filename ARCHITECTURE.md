@@ -5742,3 +5742,35 @@ only after history accumulates (NOT_TESTABLE until then).
   of the newest bar, additive/optional) and the price-behaviour staleness gate
   uses it; an unrecorded date (summary persisted before the field existed) is
   never assumed fresh -> PROVISIONAL until technicals are refreshed.
+
+## 63. Conviction layer, PR B: Company Research section and the immutable audit trail
+
+**UI.** Company Research gains "Conviction & Conflicts" below Research Stance
+(stance untouched): the Agreement/Direction, the three evidence families
+(status, lean, coverage, the basis in plain words, the category counts for
+Fundamentals), every typed conflict with an expander showing both sides (native
+label, field status, provenance), and a collapsed "context and cross-checks"
+block (regime, AI, composite: shown, never counted). Always captioned as
+categorical, not a score, not a rating/ranking/backtest input, not yet validated.
+Historical snapshot views say it is computed for current research only.
+
+**Audit table `conviction_assessments` (`ConvictionAssessmentRecord`).**
+Append-only *by construction*: SQLite triggers abort any UPDATE or DELETE
+(created idempotently by `create_schema`). One row per distinct
+`(ticker, evaluation_date, methodology_version, content_hash)`; an identical
+re-record is a no-op (explicit check, backstopped by the unique constraint), a
+changed assessment for the same date appends. Columns: ticker, evaluation date,
+methodology version, agreement, direction, the full assessment, the typed
+conflicts, the provenance ids cited, `input_fingerprint` (sha256 of every
+evidence field's status+provenance id, the methodology and the sufficiency
+thresholds) and `content_hash` (sha256 of the assessment), `recorded_at`.
+`assessment_history(engine, ticker, as_of=)` bounds on `recorded_at`, so a
+later write never appears in an earlier view.
+
+**Not a source of truth.** Nothing in `get_research_state`, the dashboard or any
+scoring path reads the table (tested by capturing the SQL of a state assembly).
+Only `scripts/assess_conviction.py` writes it (`--dry-run` assesses and prints;
+default universe = tracked securities; re-running with unchanged evidence adds
+nothing). It exists so a later Phase 7-style frozen validation can test what the
+layer said and when; that protocol is deliberately not built until history
+accumulates (it would report NOT_TESTABLE today).

@@ -19,6 +19,12 @@ from alpha_lab.conviction.assessment import (
     FamilyStatus,
     assess_conviction,
 )
+from alpha_lab.conviction.audit import (
+    assessment_history,
+    content_hash,
+    input_fingerprint,
+    record_assessment,
+)
 
 __all__ = [
     "CONVICTION_METHODOLOGY_VERSION",
@@ -37,4 +43,8 @@ __all__ = [
     "FamilyLean",
     "FamilyStatus",
     "assess_conviction",
+    "assessment_history",
+    "content_hash",
+    "input_fingerprint",
+    "record_assessment",
 ]
