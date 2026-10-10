@@ -102,8 +102,10 @@ def _revisions(direction: RevisionDirection) -> AnalystResearchSummary:
     )
 
 
-def _technical(rating: TechnicalRating, *, coverage: float = 1.0, as_of: date = EVALUATION) -> TechnicalSummary:
+def _technical(rating: TechnicalRating, *, coverage: float = 1.0, as_of: date = EVALUATION,
+               price_through: date | None = EVALUATION) -> TechnicalSummary:
     return TechnicalSummary(
+        price_data_through=price_through,
         ticker="TST", overall_score=0.5, overall_rating=rating,
         moving_average_score=0.5, moving_average_rating=rating,
         oscillator_score=0.5, oscillator_rating=rating,
@@ -132,7 +134,7 @@ def _research(
     consensus: AnalystRating | None = AnalystRating.BUY, consensus_coverage: float = 1.0,
     revisions: RevisionDirection | None = RevisionDirection.IMPROVING,
     technical: TechnicalRating | None = TechnicalRating.BUY, technical_coverage: float = 1.0,
-    technical_as_of: date = EVALUATION, ai: AIDimensionValue | None = None,
+    price_through: date | None = EVALUATION, ai: AIDimensionValue | None = None,
     interpretation: str = "Strong", extras: float = 50.0,
 ) -> StockResearch:
     return StockResearch(
@@ -150,7 +152,7 @@ def _research(
         analyst_consensus=None if consensus is None else _consensus(consensus, consensus_coverage),
         analyst_research=None if revisions is None else _revisions(revisions),
         technical_summary=None if technical is None else _technical(
-            technical, coverage=technical_coverage, as_of=technical_as_of
+            technical, coverage=technical_coverage, price_through=price_through
         ),
         ai_research_assessment=None if ai is None else _ai(ai),
     )
@@ -295,10 +297,42 @@ def test_fundamentals_below_the_minimum_coverage_are_unassessed():
 
 
 def test_stale_price_evidence_is_provisional():
-    stale = _assess(_research(technical_as_of=EVALUATION - timedelta(days=STALE_DAYS + 1)))
+    stale = _assess(_research(price_through=EVALUATION - timedelta(days=STALE_DAYS + 1)))
     assert _family(stale, Family.PRICE_BEHAVIOUR).status is FamilyStatus.PROVISIONAL
-    fresh = _assess(_research(technical_as_of=EVALUATION - timedelta(days=STALE_DAYS)))
+    assert "older than" in _family(stale, Family.PRICE_BEHAVIOUR).reason
+    fresh = _assess(_research(price_through=EVALUATION - timedelta(days=STALE_DAYS)))
     assert _family(fresh, Family.PRICE_BEHAVIOUR).status is FamilyStatus.ESTABLISHED
+
+
+def test_freshness_follows_the_newest_price_bar_not_the_compute_date():
+    """Review finding: technicals rebuilt today from old stored prices carry
+    today's `as_of` -- they must not read as fresh."""
+    research = _research(price_through=EVALUATION - timedelta(days=30))
+    assert research.technical_summary.as_of == EVALUATION  # computed "today"
+    result = _assess(research)
+    assert _family(result, Family.PRICE_BEHAVIOUR).status is FamilyStatus.PROVISIONAL
+    assert result.agreement is Agreement.LEANING  # a stale family cannot establish CONVERGENT
+
+
+def test_an_unrecorded_price_date_is_never_assumed_fresh():
+    result = _assess(_research(price_through=None))  # e.g. a summary persisted before the field existed
+    price = _family(result, Family.PRICE_BEHAVIOUR)
+    assert price.status is FamilyStatus.PROVISIONAL and "not recorded" in price.reason
+    assert result.agreement is Agreement.LEANING
+
+
+def test_a_hard_conflict_is_surfaced_even_when_only_one_family_is_assessed():
+    """Review finding: market opinion alone (no fundamentals, no technicals)
+    with consensus vs revisions in established disagreement is CONTESTED, not
+    INSUFFICIENT -- the detected contest must not be hidden."""
+    result = _assess(_research(
+        applicable=False, technical=None, consensus=AnalystRating.BUY, revisions=RevisionDirection.DETERIORATING,
+    ))
+    assert [f.status for f in result.families].count(FamilyStatus.UNASSESSED) == 2
+    assert result.agreement is Agreement.CONTESTED and result.direction is Direction.NONE
+    assert [c.kind for c in result.conflicts] == [ConflictKind.INTRA_FAMILY]
+    # ... while no conflict and one assessed family stays INSUFFICIENT
+    assert _assess(_research(applicable=False, technical=None, revisions=None)).agreement is Agreement.INSUFFICIENT
 
 
 # --- independence ------------------------------------------------------------
@@ -342,6 +376,15 @@ def test_regime_context_flags_conflict_with_the_security_but_never_votes():
     risk_on = _assess(_research(), alignment=_alignment(MacroRegime.RISK_ON, DonatienLean.CONSTRUCTIVE))
     assert not [c for c in risk_on.conflicts if c.kind is ConflictKind.REGIME_VS_SECURITY]
     assert _assess(_research()).context == []  # no alignment evidence: nothing invented
+
+
+def test_regime_flags_cite_the_alignment_field_they_were_read_from():
+    """Review finding: both regime lines come from the alignment assessment;
+    attaching `state.macro`'s provenance would cite a different snapshot."""
+    result = _assess(_research(), alignment=_alignment(MacroRegime.RISK_OFF, DonatienLean.DEFENSIVE))
+    assert {side.provenance_id for side in result.context} == {"prov-donatien_alignment"}
+    flags = [c for c in result.conflicts if c.kind is ConflictKind.REGIME_VS_SECURITY]
+    assert {side.provenance_id for flag in flags for side in flag.sides} == {"prov-donatien_alignment"}
 
 
 def test_context_flags_need_a_direction():

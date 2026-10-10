@@ -5729,3 +5729,16 @@ always shown. It is a count, not a magnitude average.
 PR B (not in this change): UI section and the immutable
 `conviction_assessments` audit table; a Phase 7-style validation protocol comes
 only after history accumulates (NOT_TESTABLE until then).
+
+**Review follow-ups on PR A (Codex, all verified against the code and fixed):**
+- A HARD conflict is now surfaced as CONTESTED even when fewer than two
+  families are assessed (previously the `INSUFFICIENT` early return hid it).
+- Regime context sides cite the `donatien_alignment` field (both regime lines
+  are read from the alignment assessment), not `state.macro`'s separate
+  snapshot.
+- `TechnicalSummary.as_of` is the compute date: `refresh_technical_summary`
+  passes `date.today()` even when rebuilding from old stored prices, which made
+  stale prices look fresh. `TechnicalSummary` gains `price_data_through` (date
+  of the newest bar, additive/optional) and the price-behaviour staleness gate
+  uses it; an unrecorded date (summary persisted before the field existed) is
+  never assumed fresh -> PROVISIONAL until technicals are refreshed.

@@ -33,7 +33,8 @@ Family sufficiency (reuses existing, configured thresholds; invents none):
                (Fundamental family coverage = the mean of its applicable
                categories' own evidence coverage.)
   PROVISIONAL  assessed but thin: coverage below `coverage.full_confidence_at`,
-               price-derived evidence older than `data_quality.stale_price_days`,
+               newest price bar older than `data_quality.stale_price_days` (or
+               its date not recorded),
                or a two-member family with one member unassessed.
   ESTABLISHED  everything else.
 Only price staleness has a configured freshness policy today, so analyst and
@@ -355,9 +356,14 @@ def _price_behaviour_family(
     if coverage is not None and coverage < coverage_settings.full_confidence_at:
         status = FamilyStatus.PROVISIONAL
         reasons.append(f"indicator coverage {coverage:.0%}")
-    if summary is not None and assess_freshness("price", summary.as_of, state.evaluation_date, stale_price_days):
-        status = FamilyStatus.PROVISIONAL
-        reasons.append(f"price data as of {summary.as_of} is older than {stale_price_days} days")
+    if summary is not None:
+        # Freshness of the newest price bar, not `summary.as_of` (compute date).
+        if summary.price_data_through is None:
+            status = FamilyStatus.PROVISIONAL
+            reasons.append("date of the newest price bar not recorded; refresh technicals")
+        elif assess_freshness("price", summary.price_data_through, state.evaluation_date, stale_price_days):
+            status = FamilyStatus.PROVISIONAL
+            reasons.append(f"newest price bar {summary.price_data_through} is older than {stale_price_days} days")
     return FamilyAssessment(
         family=Family.PRICE_BEHAVIOUR, status=status, lean=lean, reason="; ".join(reasons),
         members=[_side(state, "technicals", "technicals", line.label, line.lean.value)], coverage=coverage,
@@ -390,10 +396,12 @@ def _cross_family_conflicts(families: list[FamilyAssessment]) -> list[Conflict]:
 
 def _agreement(families: list[FamilyAssessment], conflicts: list[Conflict]) -> tuple[Agreement, Direction]:
     assessed = [family for family in families if family.status is not FamilyStatus.UNASSESSED]
-    if len(assessed) < 2:
-        return Agreement.INSUFFICIENT, Direction.NONE
+    # A detected HARD disagreement is positive evidence of a contest, so it
+    # is surfaced even when too few families are assessed to call agreement.
     if any(conflict.strength is ConflictStrength.HARD for conflict in conflicts):
         return Agreement.CONTESTED, Direction.NONE
+    if len(assessed) < 2:
+        return Agreement.INSUFFICIENT, Direction.NONE
     leans = [family.lean for family in assessed]
     signs = {_SIGN[lean] for lean in leans if lean in _SIGN}
     if len(signs) > 1 or FamilyLean.CONFLICTED in leans:
@@ -420,7 +428,10 @@ def _non_voting(
     synthesis: list[EvidenceSide] = []
     conflicts: list[Conflict] = []
     wanted = (
-        ("macro", "macro", context, ConflictKind.REGIME_VS_SECURITY, "X3-regime-vs-security"),
+        # Both regime lines are read from the alignment assessment, so they cite
+        # the alignment field's status/provenance -- not `state.macro`, a
+        # separate snapshot that can be refreshed independently.
+        ("macro", "donatien_alignment", context, ConflictKind.REGIME_VS_SECURITY, "X3-regime-vs-security"),
         ("external_calibration", "donatien_alignment", context, ConflictKind.REGIME_VS_SECURITY, "X3-regime-vs-security"),
         ("ai_research", "ai_rating", synthesis, ConflictKind.SYNTHESIS_DIVERGENCE, "X4-synthesis-divergence"),
         ("fundamentals", "fundamentals", synthesis, ConflictKind.SYNTHESIS_DIVERGENCE, "X4-synthesis-divergence"),
