@@ -381,7 +381,11 @@ _AGREEMENT_DISPLAY: dict[str, tuple[str, str]] = {
     "CONVERGENT": ("Convergent", "All three independent evidence families are established and point the same way."),
     "LEANING": ("Leaning", "At least two independent families agree and none oppose, but the evidence is not yet fully convergent."),
     "CONTESTED": ("Contested", "Independent evidence families — or two sources inside one family — disagree outright."),
-    "MIXED": ("Mixed", "Opposite readings that involve thin evidence, or only one family has a direction."),
+    "MIXED": (
+        "Mixed",
+        "Opposite readings that involve thin evidence, an unresolved family, or only one family with a "
+        "direction while the others are neutral or unassessed.",
+    ),
     "NEUTRAL": ("Neutral", "Every assessed family reads neutral."),
     "INSUFFICIENT": ("Insufficient evidence", "Fewer than two independent evidence families could be assessed."),
 }
@@ -412,7 +416,10 @@ def _render_conviction_panel(conviction: "ConvictionAssessment | None") -> None:
     snapshot view, which does not assemble a point-in-time research state."""
     st.subheader("Conviction & Conflicts")
     if conviction is None:
-        st.caption("Conviction & Conflicts is computed for the current research only, not for a historical snapshot.")
+        st.caption(
+            "Conviction & Conflicts is not available for this view (a historical snapshot, or the assessment "
+            "could not be computed — see the application log)."
+        )
         return
     st.caption(
         "A categorical read of how independent evidence families agree or conflict — never a score, "

@@ -248,3 +248,46 @@ def test_screener_never_imports_or_calls_historical_scoring_service():
     text = _MAIN_PATH.read_text()
     assert "import HistoricalScoringService" not in text
     assert "HistoricalScoringService(" not in text
+
+
+def test_the_home_screener_cache_follows_the_latest_build_not_a_ttl(tmp_path, monkeypatch):
+    """Review finding: another page's schema upgrade (or any rebuild) used to
+    leave the home page serving rows from a superseded build until the 15
+    minute TTL. The cache is now keyed by the latest build id."""
+    from sqlalchemy.orm import Session
+
+    from alpha_lab.config import load_settings
+    from alpha_lab.database import create_schema, make_engine
+    from alpha_lab.database.models import Security
+    from alpha_lab.screener.service import MarketScreenerService
+
+    db_path = tmp_path / "cache.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    with Session(engine) as session:
+        session.add(Security(ticker="CCC", is_tracked=True))
+        session.commit()
+    real_service = MarketScreenerService(engine, load_settings())
+    real_service.rebuild_current_research()  # build 1
+    current_name = ["First Name Corp"]
+
+    def sentinel(self):
+        return [_record(category_scores=_FULL_CATEGORIES, overall_score=80.0).model_copy(
+            update={"ticker": "CCC", "company": current_name[0]}
+        )]
+
+    monkeypatch.setattr(MarketScreenerService, "read_current_research", sentinel)
+    module = _import_main(db_path, monkeypatch)
+    try:
+        assert list(module.screen["Company"]) == ["First Name Corp"]
+    finally:
+        module.engine.dispose()
+
+    current_name[0] = "Second Name Corp"
+    real_service.rebuild_current_research()  # build 2, from "elsewhere": nobody clears the page's cache
+    module = _import_main(db_path, monkeypatch)
+    try:
+        assert list(module.screen["Company"]) == ["Second Name Corp"]
+    finally:
+        module.engine.dispose()
+        engine.dispose()

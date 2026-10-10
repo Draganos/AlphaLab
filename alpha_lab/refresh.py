@@ -38,16 +38,19 @@ session (see `app/dashboard/main.py`'s own guard), not on every rerun.
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+import threading
 
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
+from alpha_lab.ai.research import OpenAIResearchProvider, configured_ai_research_provider
 from alpha_lab.config import Settings
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.database.models import Price, Security
 from alpha_lab.ingestion import IngestionService
 from alpha_lab.providers import ProviderError, YFinanceProvider
 from alpha_lab.providers.errors import ProviderErrorKind
+from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.screener import MarketScreenerService
 
 DEFAULT_INGESTION_YEARS = 2
@@ -316,30 +319,75 @@ class SchemaUpgradeResult:
     level: str = "info"  # "info" | "warning" | "error"
 
 
+# One upgrade attempt at a time per process (two browser sessions/pages loading
+# together must not rebuild concurrently), and a failed or skipped attempt is
+# remembered per (database, latest build id): without that, every Streamlit
+# rerun of three pages would repeat the same expensive, failing rebuild. A new
+# build (or an application restart) is what makes it try again.
+_UPGRADE_LOCK = threading.Lock()
+_UPGRADE_OUTCOMES: dict[tuple[str, int | None], "SchemaUpgradeResult"] = {}
+
+
+def _ai_provider_may_incur_cost() -> bool:
+    """True when the configured AI research provider is a paid/network one. A
+    rebuild runs `AIResearchService.ensure_all()`, which calls the provider for
+    any security lacking a current analysis; an automatic page-load action
+    must never spend money."""
+    return isinstance(configured_ai_research_provider(), OpenAIResearchProvider)
+
+
 def upgrade_stale_current_research(engine: Engine, settings: Settings) -> SchemaUpgradeResult:
     """One-time, explicit migration of a persisted research build written by
     an older `LiveResearchRecord` schema. Fields added later cannot be
     back-derived honestly -- e.g. a legacy record has no `currency`, so its
     native `market_cap` cannot be assumed USD without mis-tiering a
-    non-USD security -- so the build is recomputed from the database (a local
-    recompute, no provider calls), never patched. Skipped with a visible
-    warning above `MAX_FULL_UNIVERSE_REFRESH_BATCH` tracked securities (too
-    slow to do during a page load; `scripts/rebuild_research.py` does it). A
-    failure is reported, never raised or hidden."""
+    non-USD security -- so the build is recomputed from the database, never
+    patched. No market-data provider is called. Like every rebuild it also
+    runs the configured AI research provider for securities that lack a
+    current analysis (the default is the local rule-based provider: no
+    network, no cost), so it is skipped with a visible warning when a paid
+    provider is configured, and above `MAX_FULL_UNIVERSE_REFRESH_BATCH`
+    tracked securities (too slow for a page load): `scripts/rebuild_research.py`
+    does it explicitly. A failure is reported, never raised or hidden, and a
+    failed/skipped attempt is not repeated on every rerun (see
+    `_UPGRADE_OUTCOMES`)."""
     screener = MarketScreenerService(engine, settings)
     if not screener.current_research_schema_is_stale():
         return SchemaUpgradeResult()
+    key = (str(engine.url), Phase3Repository(engine).latest_current_build_id())
+    with _UPGRADE_LOCK:
+        if key in _UPGRADE_OUTCOMES:
+            return _UPGRADE_OUTCOMES[key]
+        if not screener.current_research_schema_is_stale():  # another session upgraded it while we waited
+            return SchemaUpgradeResult()
+        result = _attempt_upgrade(engine, screener)
+        if not result.rebuilt:
+            _UPGRADE_OUTCOMES[key] = result
+        return result
+
+
+def _attempt_upgrade(engine: Engine, screener: MarketScreenerService) -> SchemaUpgradeResult:
     caveat = (
         "Fields derived from them (USD market cap, size tier, fund AUM) may read as "
         "unavailable until it is rebuilt."
     )
+    explicit = "Run `python scripts/rebuild_research.py`."
     tracked = len(configured_universe_tickers(engine))
     if tracked > MAX_FULL_UNIVERSE_REFRESH_BATCH:
         return SchemaUpgradeResult(
             message=(
                 "The stored research build predates the current record format and the "
                 f"{tracked} tracked securities are too many to rebuild during a page load. "
-                f"Run `python scripts/rebuild_research.py`. {caveat}"
+                f"{explicit} {caveat}"
+            ),
+            level="warning",
+        )
+    if _ai_provider_may_incur_cost():
+        return SchemaUpgradeResult(
+            message=(
+                "The stored research build predates the current record format. Rebuilding runs the "
+                "configured paid AI research provider, so it is not done automatically on a page load. "
+                f"{explicit} {caveat}"
             ),
             level="warning",
         )
@@ -347,12 +395,18 @@ def upgrade_stale_current_research(engine: Engine, settings: Settings) -> Schema
         records = screener.rebuild_current_research()
     except Exception as error:  # noqa: BLE001 -- must never take a page down; reported below
         return SchemaUpgradeResult(
-            message=f"The stored research build predates the current record format and rebuilding it failed ({error}). {caveat}",
+            message=(
+                "The stored research build predates the current record format and rebuilding it failed "
+                f"({error}). Not retried until the next rebuild or restart; {explicit} {caveat}"
+            ),
             level="error",
         )
     if not records:  # nothing tracked: no new build was written, the old one remains
         return SchemaUpgradeResult(
-            message=f"The stored research build predates the current record format and there are no tracked securities to rebuild it from. {caveat}",
+            message=(
+                "The stored research build predates the current record format and there are no tracked "
+                f"securities to rebuild it from. {caveat}"
+            ),
             level="warning",
         )
     return SchemaUpgradeResult(

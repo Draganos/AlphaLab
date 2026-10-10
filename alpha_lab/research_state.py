@@ -73,6 +73,7 @@ from datetime import date, datetime, time
 from typing import Any
 import hashlib
 import json
+import logging
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -95,6 +96,8 @@ from alpha_lab.research.model import StockResearch
 from alpha_lab.refresh import configured_universe_tickers
 from alpha_lab.research_refresh import get_current_research_refresh_status
 from alpha_lab.strategy import HistoricalScoringService
+
+logger = logging.getLogger(__name__)
 
 RESEARCH_STATE_METHODOLOGY_VERSION = "research-state-v1"
 
@@ -271,9 +274,15 @@ def get_research_state(
         ai_rating=_ai_rating_field(ticker, evaluation_date, research),
         coverage=coverage,
     )
-    conviction = assess_conviction(
-        state, coverage=settings.coverage, stale_price_days=settings.data_quality["stale_price_days"]
-    )
+    try:
+        conviction = assess_conviction(
+            state, coverage=settings.coverage, stale_price_days=settings.data_quality["stale_price_days"]
+        )
+    except Exception:  # noqa: BLE001 -- the conviction layer is additive: a failure in it must never
+        # take down every caller of the state assembler. Logged loudly; `conflicts`/`conviction`
+        # stay None, which consumers already treat as "not available".
+        logger.exception("conviction assessment failed for %s; returning the state without it", ticker)
+        return state
     return state.model_copy(update={
         "conflicts": [conflict.model_dump(mode="json") for conflict in conviction.conflicts],
         "conviction": conviction.model_dump(mode="json"),

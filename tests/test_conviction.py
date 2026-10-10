@@ -5,7 +5,7 @@ integration test at the bottom. The gates from the package docstring each
 have a dedicated test.
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -300,3 +300,49 @@ def test_get_research_state_fills_conflicts_and_conviction_without_fabrication()
 @pytest.mark.parametrize("lean", list(FamilyLean))
 def test_every_family_lean_has_a_stable_string_value(lean):
     assert lean.value == lean.name
+
+
+def test_revisions_whose_periods_disagree_are_provisional_and_cannot_anchor_a_hard_conflict():
+    """Real data (AMZN, META, JPM): the nearest fiscal period is DETERIORATING
+    while the next is IMPROVING. One period of a split reading is not an
+    established direction."""
+    research = _research(consensus=AnalystRating.BUY, revisions=RevisionDirection.DETERIORATING)
+    later = research.analyst_research.revision_trend[0].model_copy(update={
+        "fiscal_period": date(2027, 12, 31), "direction": RevisionDirection.IMPROVING,
+    })
+    research = research.model_copy(update={
+        "analyst_research": research.analyst_research.model_copy(update={
+            "revision_trend": [research.analyst_research.revision_trend[0], later],
+        }),
+    })
+    result = _assess(research)
+    market = _family(result, Family.MARKET_OPINION)
+    assert market.lean is FamilyLean.CONFLICTED and market.status is FamilyStatus.PROVISIONAL
+    intra = [c for c in result.conflicts if c.kind is ConflictKind.INTRA_FAMILY]
+    assert len(intra) == 1 and intra[0].strength is ConflictStrength.SOFT
+    assert "revision periods disagree" in market.reason
+    assert result.agreement is not Agreement.CONTESTED  # no HARD conflict: fundamentals/price agree here
+    # ... while consistent periods keep the HARD intra-family conflict
+    consistent = _assess(_research(consensus=AnalystRating.BUY, revisions=RevisionDirection.DETERIORATING))
+    assert [c.strength for c in consistent.conflicts if c.kind is ConflictKind.INTRA_FAMILY] == [ConflictStrength.HARD]
+
+
+def test_a_failing_conviction_layer_never_takes_down_the_research_state(monkeypatch, caplog):
+    """Review finding: get_research_state used to be a pure assembler of
+    independent fields; the additive layer must not be able to break it."""
+    import logging
+
+    import alpha_lab.research_state as research_state_module
+    from alpha_lab.config import load_settings
+    from alpha_lab.database import create_schema, make_engine
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("unexpected enum")
+
+    monkeypatch.setattr(research_state_module, "assess_conviction", boom)
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    with caplog.at_level(logging.ERROR, logger="alpha_lab.research_state"):
+        state = research_state_module.get_research_state(engine, load_settings(), "NOSUCH")
+    assert state.ticker == "NOSUCH" and state.conviction is None and state.conflicts is None
+    assert any("conviction assessment failed" in record.getMessage() for record in caplog.records)

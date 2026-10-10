@@ -863,19 +863,18 @@ class ConvictionAssessmentRecord(Base):
     It exists so a Phase 7-style validation can later test what the layer
     actually said, when, against what evidence.
 
-    One row per distinct `(ticker, evaluation_date, methodology_version,
-    content_hash)`; recording an identical assessment again is a no-op, a
-    changed one for the same date appends a new row. `input_fingerprint`
-    identifies the evidence (field provenance ids + thresholds) the
-    assessment was computed from; `recorded_at` is when AlphaLab wrote it
-    (the point-in-time key)."""
+    A row is appended whenever the assessment for `(ticker, evaluation_date,
+    methodology_version)` differs from the LATEST row for that key; recording
+    the same content as the latest row is a no-op. So the history is the
+    sequence of what the layer said, including a return to an earlier result
+    (A -> B -> A is three rows). Deliberately no uniqueness on `content_hash`
+    for that reason. `input_fingerprint` identifies the evidence (field
+    provenance ids, evaluation date, thresholds) the assessment was computed
+    from; `recorded_at` is when AlphaLab wrote it (the point-in-time key)."""
 
     __tablename__ = "conviction_assessments"
     __table_args__ = (
-        UniqueConstraint(
-            "ticker", "evaluation_date", "methodology_version", "content_hash",
-            name="uq_conviction_assessment",
-        ),
+        Index("ix_conviction_assessment_key", "ticker", "evaluation_date", "methodology_version"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     ticker: Mapped[str] = mapped_column(String(32), index=True)

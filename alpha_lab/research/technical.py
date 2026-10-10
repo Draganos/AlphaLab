@@ -323,10 +323,17 @@ def _threshold_oscillator(
 
 
 def _last_bar_date(price_history: pd.DataFrame) -> date | None:
+    """Date of the newest bar, or None when it cannot be determined (empty
+    history, a non-date index, NaT). Never raises: this field is metadata and
+    must not make a summary that used to build fail."""
     if price_history.empty:
         return None
-    newest = price_history.index.max()
-    return newest.date() if hasattr(newest, "date") else newest
+    try:
+        newest = price_history.index.max()
+        newest = newest.date() if hasattr(newest, "date") else newest
+        return newest if isinstance(newest, date) and not pd.isna(newest) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def build_technical_summary(

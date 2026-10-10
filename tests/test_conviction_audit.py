@@ -58,11 +58,26 @@ def test_an_identical_assessment_is_recorded_once_and_a_changed_one_is_appended(
     engine = _engine()
     state = _state(_research())
     assert _record(engine, state)[1] is True
-    assert _record(engine, state)[1] is False  # same evidence -> no-op
+    assert _record(engine, state)[1] is False  # same as the latest row -> no-op
     assert len(assessment_history(engine, "TST")) == 1
     changed = _state(_research(consensus=AnalystRating.SELL, revisions=RevisionDirection.DETERIORATING))
     assert _record(engine, changed)[1] is True  # same ticker/date, different content
     assert len(assessment_history(engine, "TST")) == 2
+
+
+def test_a_return_to_an_earlier_result_on_the_same_date_is_recorded():
+    """Review finding: deduping against ANY earlier row hid A -> B -> A, so the
+    history said B while the layer's current output was A."""
+    engine = _engine()
+    first = _state(_research())
+    second = _state(_research(consensus=AnalystRating.SELL, revisions=RevisionDirection.DETERIORATING))
+    assert _record(engine, first)[1] is True
+    assert _record(engine, second)[1] is True
+    assert _record(engine, first)[1] is True  # back to the first content
+    assert _record(engine, first)[1] is False  # ... and now it is the latest, so a repeat is a no-op
+    history = assessment_history(engine, "TST")
+    assert [row.agreement for row in history] == ["CONVERGENT", "CONTESTED", "CONVERGENT"]
+    assert history[0].content_hash == history[2].content_hash != history[1].content_hash
 
 
 def test_the_fingerprint_tracks_the_evidence_and_the_thresholds():
@@ -70,6 +85,8 @@ def test_the_fingerprint_tracks_the_evidence_and_the_thresholds():
     base = input_fingerprint(state, coverage=COVERAGE, stale_price_days=STALE_DAYS)
     assert base == input_fingerprint(state, coverage=COVERAGE, stale_price_days=STALE_DAYS)
     assert base != input_fingerprint(state, coverage=COVERAGE, stale_price_days=STALE_DAYS + 1)
+    later = state.model_copy(update={"evaluation_date": state.evaluation_date + timedelta(days=30)})
+    assert base != input_fingerprint(later, coverage=COVERAGE, stale_price_days=STALE_DAYS)
     refreshed = state.model_copy(update={"technicals": state.technicals.model_copy(update={"provenance_id": "new"})})
     assert base != input_fingerprint(refreshed, coverage=COVERAGE, stale_price_days=STALE_DAYS)
 

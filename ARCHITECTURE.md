@@ -5654,13 +5654,20 @@ read as USD -- exactly the guess the evidence model forbids (tested).
   latest_current_payload_keys`). Generic, so it also covers `fund_aum` /
   `fund_category` and any future field.
 - `alpha_lab.refresh.upgrade_stale_current_research`: recompute the build from
-  the database once (local, no provider calls). Skipped with a visible warning
-  above `MAX_FULL_UNIVERSE_REFRESH_BATCH` tracked securities (use
+  the database once (no market-data provider is called; like every rebuild it
+  runs the configured AI research provider for securities lacking a current
+  analysis -- the default is the local rule-based one, no network or cost).
+  Skipped with a visible warning above `MAX_FULL_UNIVERSE_REFRESH_BATCH`
+  tracked securities, and when a paid AI provider (OpenAI) is configured (use
   `scripts/rebuild_research.py`); a failure, or nothing tracked to rebuild
-  from, is reported, never raised or hidden.
+  from, is reported, never raised or hidden. One attempt at a time per
+  process (lock), and a failed/skipped attempt is remembered per (database,
+  latest build id) so it is not repeated on every Streamlit rerun; a new build
+  or a restart retries.
 - Called at the top of the three dashboard entry points that read current
-  research (main, Market Screener, Company Research); main clears its
-  screener cache when it rebuilt.
+  research (main, Market Screener, Company Research). Main's screener cache is
+  keyed by the latest build id, so a rebuild from any page, session or script
+  is visible without waiting for the TTL.
 
 ## 61. Fund data with a negative allocation aborted the refresh
 
@@ -5756,10 +5763,12 @@ Historical snapshot views say it is computed for current research only.
 
 **Audit table `conviction_assessments` (`ConvictionAssessmentRecord`).**
 Append-only *by construction*: SQLite triggers abort any UPDATE or DELETE
-(created idempotently by `create_schema`). One row per distinct
-`(ticker, evaluation_date, methodology_version, content_hash)`; an identical
-re-record is a no-op (explicit check, backstopped by the unique constraint), a
-changed assessment for the same date appends. Columns: ticker, evaluation date,
+(created idempotently by `create_schema`). A row is appended
+whenever the assessment for `(ticker, evaluation_date, methodology_version)`
+differs from the LATEST row for that key; recording the same content as the
+latest row is a no-op. So a return to an earlier result is recorded (A -> B ->
+A is three rows) and the history never says B while the layer's output is A.
+There is deliberately no uniqueness on `content_hash`. Columns: ticker, evaluation date,
 methodology version, agreement, direction, the full assessment, the typed
 conflicts, the provenance ids cited, `input_fingerprint` (sha256 of every
 evidence field's status+provenance id, the methodology and the sufficiency
@@ -5774,3 +5783,21 @@ default universe = tracked securities; re-running with unchanged evidence adds
 nothing). It exists so a later Phase 7-style frozen validation can test what the
 layer said and when; that protocol is deliberately not built until history
 accumulates (it would report NOT_TESTABLE today).
+
+**Code-review follow-ups (verified against the code and fixed in this PR):**
+- *Split revisions.* The revisions line reads the nearest fiscal period; on
+  real data (AMZN, META, JPM) the next period points the other way. A split
+  reading is not an established direction, so that member is PROVISIONAL and
+  the consensus-vs-revisions conflict is capped at SOFT. JPM moves from
+  CONTESTED to MIXED; AMZN and META stay CONTESTED through their genuine
+  fundamentals-vs-price conflict.
+- *Audit dedupe* compares with the latest row, not any earlier one (above);
+  the fingerprint also includes the evaluation date.
+- *`get_research_state` is guarded*: a failure in the additive conviction
+  layer is logged and leaves `conflicts`/`conviction` as None instead of
+  taking every caller down.
+- *Schema upgrade* (above): lock, remembered failures, paid-AI guard, and the
+  corrected "no provider" wording. The home screener cache follows the build id.
+- `TechnicalSummary.price_data_through` never raises on an unusual index.
+- *Considered and left as designed:* a lone directional family with the rest
+  neutral/unassessed stays MIXED (the approved design; the UI text now says so).

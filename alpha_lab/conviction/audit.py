@@ -12,7 +12,6 @@ from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from alpha_lab.config.settings import CoverageSettings
@@ -44,10 +43,14 @@ def input_fingerprint(
     state: "ResearchState", *, coverage: CoverageSettings, stale_price_days: int
 ) -> str:
     """Identity of the evidence and thresholds an assessment was computed
-    from: each evidence field's status + provenance id, the methodology
-    version, and the sufficiency thresholds. Same evidence -> same value."""
+    from: each evidence field's status + provenance id, the evaluation date
+    (freshness is judged against it), the methodology version, and the
+    sufficiency thresholds. Same evidence -> same value. The computed fields'
+    provenance ids already cover their full values (category scores,
+    `price_data_through`); the snapshot-backed ones carry the snapshot id."""
     return _sha256({
         "methodology": CONVICTION_METHODOLOGY_VERSION,
+        "evaluation_date": state.evaluation_date.isoformat(),
         "thresholds": {
             "insufficient_below": coverage.insufficient_below,
             "full_confidence_at": coverage.full_confidence_at,
@@ -75,19 +78,23 @@ def record_assessment(
     engine: Engine, state: "ResearchState", assessment: ConvictionAssessment,
     *, coverage: CoverageSettings, stale_price_days: int,
 ) -> bool:
-    """Append `assessment`; returns False (and writes nothing) when an
-    identical assessment for the same ticker/date/methodology already exists."""
+    """Append `assessment`; returns False (and writes nothing) when it is
+    identical to the LATEST row already on file for the same ticker, evaluation
+    date and methodology. Comparing with the latest row (not any earlier one)
+    keeps the history faithful: a return to an earlier result is recorded."""
     digest = content_hash(assessment)
     with Session(engine) as session:
-        already = session.scalar(
-            select(ConvictionAssessmentRecord.id).where(
+        latest = session.scalar(
+            select(ConvictionAssessmentRecord.content_hash)
+            .where(
                 ConvictionAssessmentRecord.ticker == assessment.ticker,
                 ConvictionAssessmentRecord.evaluation_date == assessment.evaluation_date,
                 ConvictionAssessmentRecord.methodology_version == assessment.methodology_version,
-                ConvictionAssessmentRecord.content_hash == digest,
             )
+            .order_by(ConvictionAssessmentRecord.recorded_at.desc(), ConvictionAssessmentRecord.id.desc())
+            .limit(1)
         )
-        if already is not None:
+        if latest == digest:
             return False
         session.add(ConvictionAssessmentRecord(
             ticker=assessment.ticker,
@@ -101,11 +108,7 @@ def record_assessment(
             input_fingerprint=input_fingerprint(state, coverage=coverage, stale_price_days=stale_price_days),
             content_hash=digest,
         ))
-        try:
-            session.commit()
-        except IntegrityError:  # a concurrent writer recorded the identical row first
-            session.rollback()
-            return False
+        session.commit()
     return True
 
 

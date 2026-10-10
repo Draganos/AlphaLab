@@ -272,6 +272,16 @@ def _fundamental_family(state: "ResearchState", coverage_settings: CoverageSetti
     )
 
 
+def _revision_periods_disagree(research) -> bool:
+    """True when the stored EPS-revision periods contain both an improving and
+    a deteriorating direction (STABLE and REVIEW periods do not count)."""
+    summary = research.analyst_research
+    if summary is None:
+        return False
+    directions = {period.direction.value for period in summary.revision_trend}
+    return {"IMPROVING", "DETERIORATING"} <= directions
+
+
 def _market_opinion_family(
     state: "ResearchState", lines: dict[str, Any], coverage_settings: CoverageSettings
 ) -> tuple[FamilyAssessment, list[Conflict]]:
@@ -297,6 +307,12 @@ def _market_opinion_family(
             if coverage is not None and coverage < coverage_settings.full_confidence_at
             else FamilyStatus.ESTABLISHED
         )
+        if line.domain == "revisions" and _revision_periods_disagree(research):
+            # The stance reads the nearest fiscal period, but the later
+            # period(s) point the other way: a split reading is not an
+            # established direction, so it cannot anchor a HARD conflict.
+            member_status = FamilyStatus.PROVISIONAL
+            notes.append("revision periods disagree")
         members.append((_side(state, field_name, line.domain, line.label, line.lean.value), lean, member_status))
 
     if not members:

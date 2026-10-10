@@ -250,6 +250,16 @@ class Phase3Repository:
                 )
             )
 
+    def latest_current_build_id(self) -> int | None:
+        """Id of the latest current build (None when there is none) -- a cheap
+        cache key that changes exactly when a new build is persisted."""
+        with Session(self.engine, expire_on_commit=False) as session:
+            return session.scalar(
+                select(CurrentResearchBuild.id).order_by(
+                    CurrentResearchBuild.built_at.desc(), CurrentResearchBuild.id.desc()
+                )
+            )
+
     def latest_current_payload_keys(self) -> set[str] | None:
         """Field names stored in one record of the latest current build, or
         `None` when there is no build. A build is written atomically by one
