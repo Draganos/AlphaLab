@@ -5677,3 +5677,55 @@ remaining ticker in the loop.
   failure into `ProviderError(INVALID_RESPONSE)`, which `refresh_all` already
   handles (`fund_evidence_error`, existing evidence untouched, AI refresh not
   blocked).
+
+## 62. Conviction / Conflict Layer, PR A (roadmap Phase 8): `alpha_lab.conviction`
+
+Approved design, implemented as a **pure function of a `ResearchState`**
+(`assess_conviction(state, coverage=, stale_price_days=)`); `get_research_state`
+now fills the field Phase 5 reserved (`conflicts`, typed conflict dumps) and a
+new `conviction` field. No score, no weights, no I/O, no AI; nothing in
+scoring/ranking/backtest/portfolio imports it (static test). Supersedes §51's
+"`conflicts` reserved, always None". Research Stance (§PR #31) is unchanged.
+
+**Evidence families (agreement is counted across independent families):**
+Fundamental (five fundamentals-only categories), Market opinion (analyst
+consensus + revisions, one family), Price behaviour (technicals). Regime
+(Macro, Donatien) is context only; the AI rating and the composite score are
+cross-checks only; news/ethics/coverage have no direction.
+
+**Correction found at implementation time (disclosed):** Stance's
+"fundamentals" line is the *composite* score label, which is 15% analyst
+revisions + 15% momentum + 10% AI research, so using it as the Fundamental
+family would have double counted the other families (and for an ETF, whose five
+fundamentals categories are NOT_APPLICABLE, it is momentum alone). The
+Fundamental family is therefore built only from its own five categories,
+read with the system's existing `strategy.scoring.interpretation` labels; the
+composite is demoted to a cross-check. An ETF now has no Fundamental family.
+
+**Sufficiency (existing configured thresholds only):** UNASSESSED = domain label
+REVIEW/insufficient, not applicable, or family coverage below
+`coverage.insufficient_below` (0.40); PROVISIONAL = coverage below
+`coverage.full_confidence_at` (0.70), price evidence older than
+`data_quality.stale_price_days`, or a two-member family missing one member;
+else ESTABLISHED. Fundamental family coverage = mean of its applicable
+categories' own evidence coverage. Only price staleness has a configured
+freshness policy, so analyst/fundamentals ages are not gated on.
+
+**Conflicts (typed, each side cites its native label, field status and
+provenance_id):** CROSS_FAMILY and INTRA_FAMILY are HARD when both sides are
+ESTABLISHED, else SOFT; REGIME_VS_SECURITY and SYNTHESIS_DIVERGENCE are
+CONTEXT (informational, never change the state).
+
+**State:** CONVERGENT (all three families assessed, same sign, all ESTABLISHED,
+no conflicts), LEANING (>=2 agree, none oppose), CONTESTED (any HARD conflict),
+MIXED (opposite signs with a PROVISIONAL side, an unresolved family, or a lone
+directional family), NEUTRAL (all assessed families neutral), INSUFFICIENT
+(<2 assessed). `NEUTRAL` is the one state added after the approved list.
+
+**The one aggregation:** inside the Fundamental family the lean is the sign of
+(#positive - #negative) category readings; a tie is NEUTRAL; the counts are
+always shown. It is a count, not a magnitude average.
+
+PR B (not in this change): UI section and the immutable
+`conviction_assessments` audit table; a Phase 7-style validation protocol comes
+only after history accumulates (NOT_TESTABLE until then).

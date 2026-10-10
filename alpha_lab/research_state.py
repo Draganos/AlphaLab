@@ -60,9 +60,12 @@ against -- distinct from `research_refresh_version_id`, which identifies
 the whole tracked-universe refresh cycle this state was assembled during,
 not any one field's own evidence.
 
-**`conflicts`**: reserved for roadmap Phase 8 (the Conviction/Conflict
-Layer). Always `None` here -- this phase does not compute it, and never
-fabricates a placeholder score in its place.
+**`conflicts` / `conviction`**: roadmap Phase 8 (the Conviction/Conflict
+Layer, `alpha_lab.conviction`). Computed here, purely, from the other fields
+of this same state: `conflicts` is the typed conflict list (each side cites
+its provenance_id), `conviction` the full categorical assessment. Neither is a
+score; see that package's docstring for the gates. Both are plain dumps so the
+state stays JSON-serializable.
 """
 
 from dataclasses import asdict
@@ -78,6 +81,7 @@ from pydantic import BaseModel
 from alpha_lab.alignment import AlignmentAssessment, AlignmentService
 from alpha_lab.calibration import ExternalCalibrationService
 from alpha_lab.config import Settings
+from alpha_lab.conviction import assess_conviction
 from alpha_lab.database.models import AIResearchAnalysis
 from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
 from alpha_lab.evidence_coverage import build_security_coverage_summary, SecurityCoverageSummary
@@ -143,6 +147,7 @@ class ResearchState(BaseModel):
     ai_rating: ResearchField
     coverage: SecurityCoverageSummary | None = None
     conflicts: list[dict] | None = None
+    conviction: dict | None = None
     methodology_version: str = RESEARCH_STATE_METHODOLOGY_VERSION
 
 
@@ -247,7 +252,7 @@ def get_research_state(
 
     refresh_status = get_current_research_refresh_status(engine)
 
-    return ResearchState(
+    state = ResearchState(
         ticker=ticker,
         evaluation_date=evaluation_date,
         research_refresh_version_id=None if refresh_status is None else refresh_status.version_id,
@@ -266,6 +271,13 @@ def get_research_state(
         ai_rating=_ai_rating_field(ticker, evaluation_date, research),
         coverage=coverage,
     )
+    conviction = assess_conviction(
+        state, coverage=settings.coverage, stale_price_days=settings.data_quality["stale_price_days"]
+    )
+    return state.model_copy(update={
+        "conflicts": [conflict.model_dump(mode="json") for conflict in conviction.conflicts],
+        "conviction": conviction.model_dump(mode="json"),
+    })
 
 
 def _fundamentals_field(ticker: str, evaluation_date: date, research: StockResearch | None) -> ResearchField:
