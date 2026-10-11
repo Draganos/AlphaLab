@@ -18,6 +18,7 @@ from alpha_lab.config.settings import CoverageSettings
 from alpha_lab.conviction.assessment import (
     CONVICTION_METHODOLOGY_VERSION,
     ConvictionAssessment,
+    composite_provenance_id,
 )
 from alpha_lab.database.models import ConvictionAssessmentRecord
 
@@ -60,6 +61,10 @@ def input_fingerprint(
             name: [getattr(state, name).status, getattr(state, name).provenance_id]
             for name in _EVIDENCE_FIELDS
         },
+        "composite": (
+            None if state.stock_research is None
+            else composite_provenance_id(state.stock_research, state.ticker, state.evaluation_date)
+        ),
     })
 
 

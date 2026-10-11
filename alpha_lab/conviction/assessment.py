@@ -51,6 +51,8 @@ aggregation in the layer, it is a count not a magnitude average, and it is
 visible in `FamilyAssessment.detail`.
 """
 
+import hashlib
+import json
 from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -200,6 +202,23 @@ def _family_lean(lean: StanceLean) -> FamilyLean:
     }.get(lean, FamilyLean.NONE)
 
 
+def composite_provenance_id(research: Any, ticker: str, evaluation_date: date) -> str:
+    """Identity of the composite-score evidence (overall score, its coverage-
+    qualified label, and the rating version/configuration that produced it).
+    The `fundamentals` field's provenance hashes only the category dumps, so a
+    rating-weight change would leave it unchanged while the composite moves."""
+    identity = {
+        "domain": "composite_score",
+        "ticker": ticker,
+        "evaluation_date": evaluation_date.isoformat(),
+        "overall_score": research.overall_score,
+        "score_interpretation": research.score_interpretation,
+        "rating_version": research.rating_version,
+        "configuration_hash": research.configuration_hash,
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _side(state: "ResearchState", field_name: str, domain: str, label: str, lean: str) -> EvidenceSide:
     field = getattr(state, field_name)
     return EvidenceSide(
@@ -302,6 +321,9 @@ def _market_opinion_family(
         if lean is FamilyLean.NONE:
             notes.append(f"{line.label_display} unassessed ({line.label})")
             continue
+        if coverage is not None and coverage < coverage_settings.insufficient_below:
+            notes.append(f"{line.label_display} unassessed (coverage {coverage:.0%} below the minimum)")
+            continue
         member_status = (
             FamilyStatus.PROVISIONAL
             if coverage is not None and coverage < coverage_settings.full_confidence_at
@@ -367,6 +389,14 @@ def _price_behaviour_family(
     coverage = None if summary is None else summary.coverage
     if lean is FamilyLean.NONE:
         return _unassessed(Family.PRICE_BEHAVIOUR, f"technicals unassessed ({line.label})", coverage=coverage)
+    if coverage is not None and coverage < coverage_settings.insufficient_below:
+        # The domain's own gate (50%) already catches this under the default
+        # configuration; a stricter configured minimum must hold too.
+        return _unassessed(
+            Family.PRICE_BEHAVIOUR,
+            f"indicator coverage {coverage:.0%} is below the {coverage_settings.insufficient_below:.0%} minimum",
+            coverage=coverage,
+        )
     reasons = [line.label]
     status = FamilyStatus.ESTABLISHED
     if coverage is not None and coverage < coverage_settings.full_confidence_at:
@@ -460,6 +490,10 @@ def _non_voting(
         # is a synthesis here, never the Fundamental family.
         domain = "composite_score" if line_key == "fundamentals" else line_key
         side = _side(state, field_name, domain, line.label, line.lean.value)
+        if line_key == "fundamentals" and state.stock_research is not None:
+            side = side.model_copy(update={
+                "provenance_id": composite_provenance_id(state.stock_research, state.ticker, state.evaluation_date),
+            })
         bucket.append(side)
         line_direction = {StanceLean.POSITIVE: Direction.POSITIVE, StanceLean.NEGATIVE: Direction.NEGATIVE}.get(line.lean)
         if direction is not Direction.NONE and line_direction is not None and line_direction is not direction:

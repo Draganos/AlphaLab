@@ -5801,3 +5801,17 @@ accumulates (it would report NOT_TESTABLE today).
 - `TechnicalSummary.price_data_through` never raises on an unusual index.
 - *Considered and left as designed:* a lone directional family with the rest
   neutral/unassessed stays MIXED (the approved design; the UI text now says so).
+
+**Second Codex pass on the same PR (three more findings, all verified and fixed):**
+- The insufficiency gate (`coverage.insufficient_below`) now applies to the
+  price family and the consensus member directly, so a configured minimum
+  stricter than the technicals' own 50% gate holds (default behaviour unchanged).
+- The composite score cites its own provenance (`composite_provenance_id`:
+  overall score, coverage-qualified label, rating version, configuration hash),
+  not the `fundamentals` field whose hash covers only the category dumps; the
+  audit `input_fingerprint` includes it too, so a rating-weight change is
+  attributable.
+- `analyst_activity` is no longer NOT_COMPUTED when only revision/rating-change
+  history exists (no consensus): its status/observed_at follow whichever
+  analyst evidence is present, so a revisions-only market member cites a
+  consistent status.

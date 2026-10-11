@@ -315,11 +315,13 @@ def _analyst_activity_field(ticker: str, evaluation_date: date, research: StockR
         "consensus": None if consensus is None else consensus.model_dump(mode="json"),
         "history": None if history is None else history.model_dump(mode="json"),
     }
+    # Status reflects whichever analyst evidence exists: revision/rating-change
+    # history without a consensus is still evidence, not "never computed".
     return ResearchField(
         value=value,
         source=None if consensus is None else consensus.source,
-        observed_at=_iso(consensus.as_of) if consensus is not None else None,
-        status=_status_for(None if consensus is None else consensus.coverage),
+        observed_at=_iso(consensus.as_of if consensus is not None else history.as_of),
+        status=_status_for(consensus.coverage if consensus is not None else history.coverage),
         provenance_id=_computed_provenance_id("analyst_activity", ticker, evaluation_date, value),
     )
 

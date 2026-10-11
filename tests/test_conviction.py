@@ -21,6 +21,7 @@ from conviction_fixtures import (
 )
 
 from alpha_lab.alignment.alignment import DonatienLean
+from alpha_lab.config.settings import CoverageSettings
 from alpha_lab.conviction import (
     Agreement,
     Conflict,
@@ -346,3 +347,62 @@ def test_a_failing_conviction_layer_never_takes_down_the_research_state(monkeypa
         state = research_state_module.get_research_state(engine, load_settings(), "NOSUCH")
     assert state.ticker == "NOSUCH" and state.conviction is None and state.conflicts is None
     assert any("conviction assessment failed" in record.getMessage() for record in caplog.records)
+
+
+def test_an_insufficiency_threshold_stricter_than_the_domain_gate_still_holds():
+    """Review finding: with insufficient_below=0.60 a technical summary at 53%
+    indicator coverage (BUY by its own 50% gate) must be UNASSESSED, not a
+    provisional vote -- the stated rule is family coverage < insufficient_below."""
+    strict = CoverageSettings(insufficient_below=0.60, full_confidence_at=0.70)
+    research = _research(technical_coverage=0.53, consensus_coverage=0.55)
+    result = assess_conviction(_state(research), coverage=strict, stale_price_days=STALE_DAYS)
+    price = _family(result, Family.PRICE_BEHAVIOUR)
+    assert price.status is FamilyStatus.UNASSESSED and price.lean is FamilyLean.NONE
+    assert "below the 60% minimum" in price.reason
+    market = _family(result, Family.MARKET_OPINION)
+    assert "unassessed (coverage 55% below the minimum)" in market.reason  # the consensus member
+    # the default configuration is unchanged: 53% is a provisional vote
+    default = _assess(_research(technical_coverage=0.53))
+    assert _family(default, Family.PRICE_BEHAVIOUR).status is FamilyStatus.PROVISIONAL
+
+
+def test_the_composite_score_cites_its_own_provenance_not_the_category_hash():
+    """Review finding: a rating-weight change moves the composite while the
+    category payload (and so the `fundamentals` provenance) stays identical."""
+    base = _research(ai=AIDimensionValue.NEGATIVE, interpretation="Weak")
+    reweighted = base.model_copy(update={"configuration_hash": "other-config", "overall_score": 41.0})
+    first = _assess(base)
+    second = _assess(reweighted)
+
+    def composite_side(result):
+        return next(side for side in result.synthesis if side.domain == "composite_score")
+
+    assert composite_side(first).provenance_id != "prov-fundamentals"
+    assert composite_side(first).provenance_id != composite_side(second).provenance_id
+    assert composite_side(first).provenance_id == composite_side(_assess(base)).provenance_id  # stable
+
+
+def test_the_audit_fingerprint_changes_when_only_the_composite_inputs_change():
+    from alpha_lab.conviction import input_fingerprint
+
+    base = _research()
+    reweighted = base.model_copy(update={"configuration_hash": "other-config"})
+    assert input_fingerprint(_state(base), coverage=COVERAGE, stale_price_days=STALE_DAYS) != input_fingerprint(
+        _state(reweighted), coverage=COVERAGE, stale_price_days=STALE_DAYS
+    )
+
+
+def test_revision_only_analyst_activity_is_available_evidence_not_not_computed():
+    """Review finding: with no consensus but a revision trend, the combined
+    `analyst_activity` field used to read NOT_COMPUTED while its revisions
+    drove a market-opinion member, so the audit cited a contradictory status."""
+    from alpha_lab.research_state import _analyst_activity_field
+
+    revisions_only = _research(consensus=None, revisions=RevisionDirection.IMPROVING)
+    field = _analyst_activity_field("TST", EVALUATION, revisions_only)
+    assert field.status != "NOT_COMPUTED" and field.provenance_id is not None
+    assert field.observed_at == revisions_only.analyst_research.as_of.isoformat()
+    with_consensus = _analyst_activity_field("TST", EVALUATION, _research())
+    assert with_consensus.status == "FULL"  # unchanged when a consensus exists
+    nothing = _analyst_activity_field("TST", EVALUATION, _research(consensus=None, revisions=None))
+    assert nothing.status == "NOT_COMPUTED"
