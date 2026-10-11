@@ -35,22 +35,25 @@ page -- the automatic trigger still only ever calls it once per browser
 session (see `app/dashboard/main.py`'s own guard), not on every rerun.
 """
 
+import threading
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-import threading
 
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
-from alpha_lab.ai.research import OpenAIResearchProvider, configured_ai_research_provider
+from alpha_lab.ai.research import (
+    OpenAIResearchProvider,
+    configured_ai_research_provider,
+)
 from alpha_lab.config import Settings
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.database.models import Price, Security
 from alpha_lab.ingestion import IngestionService
+from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers import ProviderError, YFinanceProvider
 from alpha_lab.providers.errors import ProviderErrorKind
-from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.screener import MarketScreenerService
 
 DEFAULT_INGESTION_YEARS = 2

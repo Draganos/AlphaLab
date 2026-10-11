@@ -383,8 +383,10 @@ _AGREEMENT_DISPLAY: dict[str, tuple[str, str]] = {
     "CONTESTED": ("Contested", "Independent evidence families — or two sources inside one family — disagree outright."),
     "MIXED": (
         "Mixed",
-        "Opposite readings that involve thin evidence, an unresolved family, or only one family with a "
-        "direction while the others are neutral or unassessed.",
+        (
+            "Opposite readings that involve thin evidence, an unresolved family, or only one family with a "
+            "direction while the others are neutral or unassessed."
+        ),
     ),
     "NEUTRAL": ("Neutral", "Every assessed family reads neutral."),
     "INSUFFICIENT": ("Insufficient evidence", "Fewer than two independent evidence families could be assessed."),

@@ -278,7 +278,7 @@ def get_research_state(
         conviction = assess_conviction(
             state, coverage=settings.coverage, stale_price_days=settings.data_quality["stale_price_days"]
         )
-    except Exception:  # noqa: BLE001 -- the conviction layer is additive: a failure in it must never
+    except Exception:  # the conviction layer is additive: a failure in it must never
         # take down every caller of the state assembler. Logged loudly; `conflicts`/`conviction`
         # stay None, which consumers already treat as "not available".
         logger.exception("conviction assessment failed for %s; returning the state without it", ticker)

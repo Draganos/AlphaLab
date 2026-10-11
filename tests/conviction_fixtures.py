@@ -175,5 +175,3 @@ def _assess(research: StockResearch | None, **kwargs) -> ConvictionAssessment:
 
 def _family(assessment: ConvictionAssessment, family: Family) -> FamilyAssessment:
     return next(item for item in assessment.families if item.family is family)
-
-
