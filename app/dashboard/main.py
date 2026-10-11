@@ -15,6 +15,7 @@ from alpha_lab.config import load_settings
 from alpha_lab.database.models import Price
 from alpha_lab.database.session import create_schema, make_engine
 from alpha_lab.data_quality import assess_freshness
+from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.refresh import (
     configured_universe_tickers,
     MAX_AUTO_REFRESH_TICKERS,
@@ -40,7 +41,7 @@ create_schema(engine)
 
 
 @st.cache_data(ttl=900)
-def build_screener() -> pd.DataFrame:
+def build_screener(build_id: int | None) -> pd.DataFrame:
     """Canonical current-research read -- same MarketScreenerService.read_current_research()
     + ScreenRecord/apply_screen mapping used by app/dashboard/pages/3_Market_Screener.py,
     so both pages agree on ticker/company/price/market cap/category scores/overall
@@ -50,7 +51,12 @@ def build_screener() -> pd.DataFrame:
     safe to cache and safe on every page load. Returns an empty DataFrame when no
     current research build has been persisted yet; callers must not fabricate rows
     for that case. This intentionally does not touch HistoricalScoringService --
-    that engine remains reserved for the point-in-time backtester."""
+    that engine remains reserved for the point-in-time backtester.
+
+    `build_id` is the latest current build's id and exists only as a cache key:
+    any rebuild from anywhere (another page's schema upgrade, a script, another
+    session's Full Refresh) changes it, so this cache can never keep serving
+    rows from a superseded build."""
     records = MarketScreenerService(engine, settings).read_current_research()
     if not records:
         return pd.DataFrame()
@@ -348,7 +354,7 @@ if _current_research_status is not None:
         )
 
 st.header("Stock Screener")
-screen = build_screener()
+screen = build_screener(Phase3Repository(engine).latest_current_build_id())
 if screen.empty:
     st.info(
         "No persisted current research build exists. Run "

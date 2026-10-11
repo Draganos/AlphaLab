@@ -5654,13 +5654,20 @@ read as USD -- exactly the guess the evidence model forbids (tested).
   latest_current_payload_keys`). Generic, so it also covers `fund_aum` /
   `fund_category` and any future field.
 - `alpha_lab.refresh.upgrade_stale_current_research`: recompute the build from
-  the database once (local, no provider calls). Skipped with a visible warning
-  above `MAX_FULL_UNIVERSE_REFRESH_BATCH` tracked securities (use
+  the database once (no market-data provider is called; like every rebuild it
+  runs the configured AI research provider for securities lacking a current
+  analysis -- the default is the local rule-based one, no network or cost).
+  Skipped with a visible warning above `MAX_FULL_UNIVERSE_REFRESH_BATCH`
+  tracked securities, and when a paid AI provider (OpenAI) is configured (use
   `scripts/rebuild_research.py`); a failure, or nothing tracked to rebuild
-  from, is reported, never raised or hidden.
+  from, is reported, never raised or hidden. One attempt at a time per
+  process (lock), and a failed/skipped attempt is remembered per (database,
+  latest build id) so it is not repeated on every Streamlit rerun; a new build
+  or a restart retries.
 - Called at the top of the three dashboard entry points that read current
-  research (main, Market Screener, Company Research); main clears its
-  screener cache when it rebuilt.
+  research (main, Market Screener, Company Research). Main's screener cache is
+  keyed by the latest build id, so a rebuild from any page, session or script
+  is visible without waiting for the TTL.
 
 ## 61. Fund data with a negative allocation aborted the refresh
 
@@ -5677,3 +5684,134 @@ remaining ticker in the loop.
   failure into `ProviderError(INVALID_RESPONSE)`, which `refresh_all` already
   handles (`fund_evidence_error`, existing evidence untouched, AI refresh not
   blocked).
+
+## 62. Conviction / Conflict Layer, PR A (roadmap Phase 8): `alpha_lab.conviction`
+
+Approved design, implemented as a **pure function of a `ResearchState`**
+(`assess_conviction(state, coverage=, stale_price_days=)`); `get_research_state`
+now fills the field Phase 5 reserved (`conflicts`, typed conflict dumps) and a
+new `conviction` field. No score, no weights, no I/O, no AI; nothing in
+scoring/ranking/backtest/portfolio imports it (static test). Supersedes §51's
+"`conflicts` reserved, always None". Research Stance (§PR #31) is unchanged.
+
+**Evidence families (agreement is counted across independent families):**
+Fundamental (five fundamentals-only categories), Market opinion (analyst
+consensus + revisions, one family), Price behaviour (technicals). Regime
+(Macro, Donatien) is context only; the AI rating and the composite score are
+cross-checks only; news/ethics/coverage have no direction.
+
+**Correction found at implementation time (disclosed):** Stance's
+"fundamentals" line is the *composite* score label, which is 15% analyst
+revisions + 15% momentum + 10% AI research, so using it as the Fundamental
+family would have double counted the other families (and for an ETF, whose five
+fundamentals categories are NOT_APPLICABLE, it is momentum alone). The
+Fundamental family is therefore built only from its own five categories,
+read with the system's existing `strategy.scoring.interpretation` labels; the
+composite is demoted to a cross-check. An ETF now has no Fundamental family.
+
+**Sufficiency (existing configured thresholds only):** UNASSESSED = domain label
+REVIEW/insufficient, not applicable, or family coverage below
+`coverage.insufficient_below` (0.40); PROVISIONAL = coverage below
+`coverage.full_confidence_at` (0.70), price evidence older than
+`data_quality.stale_price_days`, or a two-member family missing one member;
+else ESTABLISHED. Fundamental family coverage = mean of its applicable
+categories' own evidence coverage. Only price staleness has a configured
+freshness policy, so analyst/fundamentals ages are not gated on.
+
+**Conflicts (typed, each side cites its native label, field status and
+provenance_id):** CROSS_FAMILY and INTRA_FAMILY are HARD when both sides are
+ESTABLISHED, else SOFT; REGIME_VS_SECURITY and SYNTHESIS_DIVERGENCE are
+CONTEXT (informational, never change the state).
+
+**State:** CONVERGENT (all three families assessed, same sign, all ESTABLISHED,
+no conflicts), LEANING (>=2 agree, none oppose), CONTESTED (any HARD conflict),
+MIXED (opposite signs with a PROVISIONAL side, an unresolved family, or a lone
+directional family), NEUTRAL (all assessed families neutral), INSUFFICIENT
+(<2 assessed). `NEUTRAL` is the one state added after the approved list.
+
+**The one aggregation:** inside the Fundamental family the lean is the sign of
+(#positive - #negative) category readings; a tie is NEUTRAL; the counts are
+always shown. It is a count, not a magnitude average.
+
+PR B (not in this change): UI section and the immutable
+`conviction_assessments` audit table; a Phase 7-style validation protocol comes
+only after history accumulates (NOT_TESTABLE until then).
+
+**Review follow-ups on PR A (Codex, all verified against the code and fixed):**
+- A HARD conflict is now surfaced as CONTESTED even when fewer than two
+  families are assessed (previously the `INSUFFICIENT` early return hid it).
+- Regime context sides cite the `donatien_alignment` field (both regime lines
+  are read from the alignment assessment), not `state.macro`'s separate
+  snapshot.
+- `TechnicalSummary.as_of` is the compute date: `refresh_technical_summary`
+  passes `date.today()` even when rebuilding from old stored prices, which made
+  stale prices look fresh. `TechnicalSummary` gains `price_data_through` (date
+  of the newest bar, additive/optional) and the price-behaviour staleness gate
+  uses it; an unrecorded date (summary persisted before the field existed) is
+  never assumed fresh -> PROVISIONAL until technicals are refreshed.
+
+## 63. Conviction layer, PR B: Company Research section and the immutable audit trail
+
+**UI.** Company Research gains "Conviction & Conflicts" below Research Stance
+(stance untouched): the Agreement/Direction, the three evidence families
+(status, lean, coverage, the basis in plain words, the category counts for
+Fundamentals), every typed conflict with an expander showing both sides (native
+label, field status, provenance), and a collapsed "context and cross-checks"
+block (regime, AI, composite: shown, never counted). Always captioned as
+categorical, not a score, not a rating/ranking/backtest input, not yet validated.
+Historical snapshot views say it is computed for current research only.
+
+**Audit table `conviction_assessments` (`ConvictionAssessmentRecord`).**
+Append-only *by construction*: SQLite triggers abort any UPDATE or DELETE
+(created idempotently by `create_schema`). A row is appended
+whenever the assessment for `(ticker, evaluation_date, methodology_version)`
+differs from the LATEST row for that key; recording the same content as the
+latest row is a no-op. So a return to an earlier result is recorded (A -> B ->
+A is three rows) and the history never says B while the layer's output is A.
+There is deliberately no uniqueness on `content_hash`. Columns: ticker, evaluation date,
+methodology version, agreement, direction, the full assessment, the typed
+conflicts, the provenance ids cited, `input_fingerprint` (sha256 of every
+evidence field's status+provenance id, the methodology and the sufficiency
+thresholds) and `content_hash` (sha256 of the assessment), `recorded_at`.
+`assessment_history(engine, ticker, as_of=)` bounds on `recorded_at`, so a
+later write never appears in an earlier view.
+
+**Not a source of truth.** Nothing in `get_research_state`, the dashboard or any
+scoring path reads the table (tested by capturing the SQL of a state assembly).
+Only `scripts/assess_conviction.py` writes it (`--dry-run` assesses and prints;
+default universe = tracked securities; re-running with unchanged evidence adds
+nothing). It exists so a later Phase 7-style frozen validation can test what the
+layer said and when; that protocol is deliberately not built until history
+accumulates (it would report NOT_TESTABLE today).
+
+**Code-review follow-ups (verified against the code and fixed in this PR):**
+- *Split revisions.* The revisions line reads the nearest fiscal period; on
+  real data (AMZN, META, JPM) the next period points the other way. A split
+  reading is not an established direction, so that member is PROVISIONAL and
+  the consensus-vs-revisions conflict is capped at SOFT. JPM moves from
+  CONTESTED to MIXED; AMZN and META stay CONTESTED through their genuine
+  fundamentals-vs-price conflict.
+- *Audit dedupe* compares with the latest row, not any earlier one (above);
+  the fingerprint also includes the evaluation date.
+- *`get_research_state` is guarded*: a failure in the additive conviction
+  layer is logged and leaves `conflicts`/`conviction` as None instead of
+  taking every caller down.
+- *Schema upgrade* (above): lock, remembered failures, paid-AI guard, and the
+  corrected "no provider" wording. The home screener cache follows the build id.
+- `TechnicalSummary.price_data_through` never raises on an unusual index.
+- *Considered and left as designed:* a lone directional family with the rest
+  neutral/unassessed stays MIXED (the approved design; the UI text now says so).
+
+**Second Codex pass on the same PR (three more findings, all verified and fixed):**
+- The insufficiency gate (`coverage.insufficient_below`) now applies to the
+  price family and the consensus member directly, so a configured minimum
+  stricter than the technicals' own 50% gate holds (default behaviour unchanged).
+- The composite score cites its own provenance (`composite_provenance_id`:
+  overall score, coverage-qualified label, rating version, configuration hash),
+  not the `fundamentals` field whose hash covers only the category dumps; the
+  audit `input_fingerprint` includes it too, so a rating-weight change is
+  attributable.
+- `analyst_activity` is no longer NOT_COMPUTED when only revision/rating-change
+  history exists (no consensus): its status/observed_at follow whichever
+  analyst evidence is present, so a revisions-only market member cites a
+  consistent status.

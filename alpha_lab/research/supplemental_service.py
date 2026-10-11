@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING
 
 import pandas as pd
+from pydantic import ValidationError
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
@@ -35,8 +36,6 @@ from alpha_lab.database.models import (
 )
 from alpha_lab.database.queries import latest_price_per_date
 from alpha_lab.providers.base import MarketDataProvider
-from pydantic import ValidationError
-
 from alpha_lab.providers.errors import ProviderError, ProviderErrorKind
 from alpha_lab.research.ai_rating import (
     AIResearchAssessment,

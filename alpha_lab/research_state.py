@@ -60,9 +60,12 @@ against -- distinct from `research_refresh_version_id`, which identifies
 the whole tracked-universe refresh cycle this state was assembled during,
 not any one field's own evidence.
 
-**`conflicts`**: reserved for roadmap Phase 8 (the Conviction/Conflict
-Layer). Always `None` here -- this phase does not compute it, and never
-fabricates a placeholder score in its place.
+**`conflicts` / `conviction`**: roadmap Phase 8 (the Conviction/Conflict
+Layer, `alpha_lab.conviction`). Computed here, purely, from the other fields
+of this same state: `conflicts` is the typed conflict list (each side cites
+its provenance_id), `conviction` the full categorical assessment. Neither is a
+score; see that package's docstring for the gates. Both are plain dumps so the
+state stays JSON-serializable.
 """
 
 from dataclasses import asdict
@@ -70,6 +73,7 @@ from datetime import date, datetime, time
 from typing import Any
 import hashlib
 import json
+import logging
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -78,6 +82,7 @@ from pydantic import BaseModel
 from alpha_lab.alignment import AlignmentAssessment, AlignmentService
 from alpha_lab.calibration import ExternalCalibrationService
 from alpha_lab.config import Settings
+from alpha_lab.conviction import assess_conviction
 from alpha_lab.database.models import AIResearchAnalysis
 from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
 from alpha_lab.evidence_coverage import build_security_coverage_summary, SecurityCoverageSummary
@@ -91,6 +96,8 @@ from alpha_lab.research.model import StockResearch
 from alpha_lab.refresh import configured_universe_tickers
 from alpha_lab.research_refresh import get_current_research_refresh_status
 from alpha_lab.strategy import HistoricalScoringService
+
+logger = logging.getLogger(__name__)
 
 RESEARCH_STATE_METHODOLOGY_VERSION = "research-state-v1"
 
@@ -143,6 +150,7 @@ class ResearchState(BaseModel):
     ai_rating: ResearchField
     coverage: SecurityCoverageSummary | None = None
     conflicts: list[dict] | None = None
+    conviction: dict | None = None
     methodology_version: str = RESEARCH_STATE_METHODOLOGY_VERSION
 
 
@@ -247,7 +255,7 @@ def get_research_state(
 
     refresh_status = get_current_research_refresh_status(engine)
 
-    return ResearchState(
+    state = ResearchState(
         ticker=ticker,
         evaluation_date=evaluation_date,
         research_refresh_version_id=None if refresh_status is None else refresh_status.version_id,
@@ -266,6 +274,19 @@ def get_research_state(
         ai_rating=_ai_rating_field(ticker, evaluation_date, research),
         coverage=coverage,
     )
+    try:
+        conviction = assess_conviction(
+            state, coverage=settings.coverage, stale_price_days=settings.data_quality["stale_price_days"]
+        )
+    except Exception:  # the conviction layer is additive: a failure in it must never
+        # take down every caller of the state assembler. Logged loudly; `conflicts`/`conviction`
+        # stay None, which consumers already treat as "not available".
+        logger.exception("conviction assessment failed for %s; returning the state without it", ticker)
+        return state
+    return state.model_copy(update={
+        "conflicts": [conflict.model_dump(mode="json") for conflict in conviction.conflicts],
+        "conviction": conviction.model_dump(mode="json"),
+    })
 
 
 def _fundamentals_field(ticker: str, evaluation_date: date, research: StockResearch | None) -> ResearchField:
@@ -294,11 +315,13 @@ def _analyst_activity_field(ticker: str, evaluation_date: date, research: StockR
         "consensus": None if consensus is None else consensus.model_dump(mode="json"),
         "history": None if history is None else history.model_dump(mode="json"),
     }
+    # Status reflects whichever analyst evidence exists: revision/rating-change
+    # history without a consensus is still evidence, not "never computed".
     return ResearchField(
         value=value,
         source=None if consensus is None else consensus.source,
-        observed_at=_iso(consensus.as_of) if consensus is not None else None,
-        status=_status_for(None if consensus is None else consensus.coverage),
+        observed_at=_iso(consensus.as_of if consensus is not None else history.as_of),
+        status=_status_for(consensus.coverage if consensus is not None else history.coverage),
         provenance_id=_computed_provenance_id("analyst_activity", ticker, evaluation_date, value),
     )
 

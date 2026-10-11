@@ -140,6 +140,12 @@ class TechnicalSummary(BaseModel):
     # honestly labeled by its own indicator-level `as_of` values and by
     # `coverage`/`source`, never backdated to imply fresher data).
     as_of: date
+    # Date of the newest price bar this summary was computed from -- the
+    # honest freshness of the evidence, unlike `as_of` (compute date: a
+    # rebuild from old stored prices still carries today's `as_of`). `None`
+    # for an empty price history and for summaries persisted before this
+    # field existed (freshness unknown, never assumed fresh).
+    price_data_through: date | None = None
     source: str
     methodology_version: str = TECHNICAL_METHODOLOGY_VERSION
     # PR #27: how much the available indicators agree with each other,
@@ -316,6 +322,20 @@ def _threshold_oscillator(
     return _evidence(name, IndicatorCategory.OSCILLATOR, value, signal, as_of=as_of)
 
 
+def _last_bar_date(price_history: pd.DataFrame) -> date | None:
+    """Date of the newest bar, or None when it cannot be determined (empty
+    history, a non-date index, NaT). Never raises: this field is metadata and
+    must not make a summary that used to build fail."""
+    if price_history.empty:
+        return None
+    try:
+        newest = price_history.index.max()
+        newest = newest.date() if hasattr(newest, "date") else newest
+        return newest if isinstance(newest, date) and not pd.isna(newest) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def build_technical_summary(
     ticker: str,
     price_history: pd.DataFrame,
@@ -440,6 +460,7 @@ def build_technical_summary(
 
     return TechnicalSummary(
         ticker=ticker.upper(),
+        price_data_through=_last_bar_date(price_history),
         overall_score=overall_score,
         overall_rating=overall_rating,
         moving_average_score=ma_score,

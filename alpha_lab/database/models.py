@@ -853,3 +853,40 @@ class ResearchRefreshStatusSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), index=True
     )
+
+
+class ConvictionAssessmentRecord(Base):
+    """Immutable audit trail of Conviction/Conflict Layer outputs (roadmap
+    Phase 8). Append-only (database triggers reject UPDATE and DELETE) and
+    NOT a source of truth: nothing in live research ever reads it back --
+    `alpha_lab.research_state.get_research_state` recomputes from evidence.
+    It exists so a Phase 7-style validation can later test what the layer
+    actually said, when, against what evidence.
+
+    A row is appended whenever the assessment for `(ticker, evaluation_date,
+    methodology_version)` differs from the LATEST row for that key; recording
+    the same content as the latest row is a no-op. So the history is the
+    sequence of what the layer said, including a return to an earlier result
+    (A -> B -> A is three rows). Deliberately no uniqueness on `content_hash`
+    for that reason. `input_fingerprint` identifies the evidence (field
+    provenance ids, evaluation date, thresholds) the assessment was computed
+    from; `recorded_at` is when AlphaLab wrote it (the point-in-time key)."""
+
+    __tablename__ = "conviction_assessments"
+    __table_args__ = (
+        Index("ix_conviction_assessment_key", "ticker", "evaluation_date", "methodology_version"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    evaluation_date: Mapped[date] = mapped_column(Date, index=True)
+    methodology_version: Mapped[str] = mapped_column(String(32))
+    agreement: Mapped[str] = mapped_column(String(16))
+    direction: Mapped[str] = mapped_column(String(16))
+    assessment: Mapped[dict[str, Any]] = mapped_column(JSON)
+    conflicts: Mapped[list[Any]] = mapped_column(JSON)
+    provenance_ids: Mapped[list[Any]] = mapped_column(JSON)
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )

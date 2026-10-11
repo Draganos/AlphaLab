@@ -268,3 +268,36 @@ def test_technical_summary_persisted_before_pr27_still_validates():
     assert reloaded.indicator_agreement is None
     # Everything that existed before PR #27 is untouched.
     assert reloaded.overall_rating == TechnicalRating.STRONG_BUY
+
+
+def test_price_data_through_is_the_newest_bar_not_the_compute_date():
+    """`as_of` is when the summary was computed; a rebuild from old stored
+    prices must still report how old the newest bar really is."""
+    frame = _uptrend(60)
+    old_end = date(2025, 1, 31)
+    frame.index = pd.date_range(end=old_end, periods=len(frame), freq="D")
+    summary = build_technical_summary("TEST", frame, as_of=date(2026, 9, 19), source="AlphaLabPriceHistory")
+    assert summary.as_of == date(2026, 9, 19)
+    assert summary.price_data_through == old_end
+
+
+def test_price_data_through_is_none_without_price_history_and_for_legacy_payloads():
+    empty = build_technical_summary("TEST", pd.DataFrame(), as_of=date(2026, 9, 19), source="x")
+    assert empty.price_data_through is None
+    payload = build_technical_summary("TEST", _uptrend(60), as_of=date(2026, 9, 19), source="x").model_dump(mode="json")
+    payload.pop("price_data_through")  # persisted before the field existed
+    assert TechnicalSummary.model_validate(payload).price_data_through is None
+
+
+def test_price_data_through_never_breaks_a_summary_on_an_unusual_index():
+    """The newest-bar date is metadata: a string index or all-NaT index yields
+    None instead of failing the build."""
+    frame = _uptrend(60)
+    string_indexed = frame.copy()
+    string_indexed.index = [f"bar-{i}" for i in range(len(frame))]
+    summary = build_technical_summary("TEST", string_indexed, as_of=date(2026, 9, 19), source="x")
+    assert summary.price_data_through is None
+
+    nat_indexed = frame.copy()
+    nat_indexed.index = pd.DatetimeIndex([pd.NaT] * len(frame))
+    assert build_technical_summary("TEST", nat_indexed, as_of=date(2026, 9, 19), source="x").price_data_through is None
