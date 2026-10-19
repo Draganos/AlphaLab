@@ -5873,3 +5873,15 @@ evaluation date, with the mutable `Security` row used only when there is none
 and labelled "current catalogue (not point-in-time)"; `compare` rejects
 duplicate tickers after normalisation; error envelopes (caller-controlled tool
 and argument names) are cleaned and capped like every other answer.
+
+**Second review pass:** `compare` rejects `coverage` (read it with `get_domain`) and
+takes company names through the same point-in-time/labelled identity as the
+summary; `list_universe` is paged (50 per page, 100 max); short provider-supplied
+values (sector, industry, exchange, country, analyst firm and grades) are
+wrapped as untrusted too. **Known limitation, deliberately not changed here:**
+`HistoricalScoringService.score_universe_as_of` selects prices by market date
+without an `ingested_at` bound, so for a past `as_of` the deterministic score
+can reflect a bar backfilled after that date (the same scorer feeds the
+screener and backtests, so changing it is a scoring/PIT semantics change that
+needs its own decision). Historical answers say so in `limitations`, and the
+freshness block, which does apply the bound, is unaffected.

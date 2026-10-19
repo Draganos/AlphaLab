@@ -28,6 +28,9 @@ TEXT_KEYS = frozenset({
     "reasoning", "rationale", "thesis", "reason", "reasons", "exclusion_reasons",
     "review_reasons", "positives", "risks", "catalysts", "contradictions",
     "evidence_gaps", "strengths", "weaknesses", "publisher", "name", "url",
+    # short provider-supplied values: catalogue metadata and analyst events
+    "sector", "industry", "exchange", "country", "asset_type", "security_type",
+    "firm", "analyst", "action", "price_target_action", "from_grade", "to_grade",
 })
 
 # C0/C1 controls, zero-width characters, and the bidirectional

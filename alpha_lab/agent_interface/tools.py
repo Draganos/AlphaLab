@@ -101,6 +101,11 @@ class NoArgs(_Args):
     pass
 
 
+class ListUniverseArgs(_Args):
+    page: int = Field(1, ge=1)
+    page_size: int = Field(50, ge=1, le=100)
+
+
 class TickerArgs(_Args):
     ticker: str = Field(**_TICKER, description="Ticker symbol, e.g. MSFT.")
     as_of: date | None = Field(None, description="Point-in-time date (default: today). Future dates are refused.")
@@ -129,6 +134,13 @@ class CompareArgs(_Args):
     tickers: list[str] = Field(min_length=2, max_length=10)
     domains: list[Domain] | None = Field(None, max_length=len(DOMAINS))
     as_of: date | None = None
+
+    @field_validator("domains")
+    @classmethod
+    def no_coverage(cls, domains: list[str] | None) -> list[str] | None:
+        if domains is not None and "coverage" in domains:
+            raise ValueError("coverage is a derived summary: read it with get_domain, not compare")
+        return domains
 
     @field_validator("tickers")
     @classmethod
@@ -186,11 +198,21 @@ def _price_freshness(ctx: AgentContext, symbol: str, evaluation_date: date) -> d
         "price_status": status,
         "stale_after_days": limit,
         "evaluation_date": evaluation_date,
+        "point_in_time": evaluation_date < ctx.today(),
     }
+
+
+HISTORICAL_SCORE_NOTE = (
+    "Point-in-time caveat: the deterministic score (and the factors behind it) is computed by AlphaLab's "
+    "existing scorer from price bars by market date, without an ingestion-time bound, so a bar backfilled or "
+    "revised after the requested date can influence it. The freshness block does apply that bound."
+)
 
 
 def _limitations(state: ResearchState, security: Security, freshness: dict[str, Any]) -> list[str]:
     notes = [CONVICTION_CAVEAT]
+    if freshness.get("point_in_time"):
+        notes.append(HISTORICAL_SCORE_NOTE)
     if state.stock_research is None:
         notes.append("No research is computed for this security for the requested date.")
     if freshness["price_status"] == "stale":
@@ -339,14 +361,16 @@ def _identity(security: Security, state: ResearchState, symbol: str) -> dict[str
 
 # --- handlers ---------------------------------------------------------------
 
-def list_universe(ctx: AgentContext, args: NoArgs) -> ToolResult:
+def list_universe(ctx: AgentContext, args: ListUniverseArgs) -> ToolResult:
     today = ctx.today()
     with Session(ctx.engine, expire_on_commit=False) as session:
         securities = list(session.scalars(
             select(Security).where(Security.is_tracked.is_(True)).order_by(Security.ticker)
         ))
+    total = len(securities)
+    start, stop = (args.page - 1) * args.page_size, args.page * args.page_size
     rows = []
-    for security in securities:
+    for security in securities[start:stop]:
         freshness = _price_freshness(ctx, security.ticker, today)
         rows.append({
             "ticker": security.ticker,
@@ -359,9 +383,13 @@ def list_universe(ctx: AgentContext, args: NoArgs) -> ToolResult:
     stale = sum(1 for row in rows if row["price_status"] != "fresh")
     notes = []
     if stale:
-        notes.append(f"{stale} of {len(rows)} tracked securities have stale or missing price data.")
+        notes.append(f"{stale} of the {len(rows)} securities on this page have stale or missing price data.")
     return ToolResult(
-        data={"count": len(rows), "securities": rows, "stale_after_days": ctx.settings.data_quality["stale_price_days"]},
+        data={
+            "total_tracked": total, "page": args.page, "page_size": args.page_size, "has_more": stop < total,
+            "count": len(rows), "securities": rows,
+            "stale_after_days": ctx.settings.data_quality["stale_price_days"],
+        },
         freshness={"evaluation_date": today},
         limitations=notes,
     )
@@ -539,13 +567,17 @@ def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
     )
     names = tuple(args.domains) if args.domains else ()
     rows, notes = [], [CONVICTION_CAVEAT]
+    if evaluation_date < ctx.today():
+        notes.append(HISTORICAL_SCORE_NOTE)
     for symbol in symbols:
         state = _state(ctx, symbol, evaluation_date, universe_scores=universe_scores)
         freshness = _price_freshness(ctx, symbol, evaluation_date)
         conviction = _conviction_view(state)
+        identity = _identity(securities[symbol], state, symbol)
         row = {
             "ticker": symbol,
-            "company": securities[symbol].company_name,
+            "company": identity["company"],
+            "metadata_basis": identity["metadata_basis"],
             "agreement": None if conviction is None else conviction["agreement"],
             "direction": None if conviction is None else conviction["direction"],
             "families": None if conviction is None else {
@@ -558,7 +590,7 @@ def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
             "price_status": freshness["price_status"],
         }
         if names:
-            row["domains"] = _domain_rows(state, tuple(n for n in names if n != "coverage"))
+            row["domains"] = _domain_rows(state, names)
         rows.append(row)
         if freshness["price_status"] != "fresh":
             notes.append(f"{symbol}: price data is {freshness['price_status']}.")
@@ -634,7 +666,7 @@ class AgentTool:
 TOOLS: dict[str, AgentTool] = {
     tool.name: tool
     for tool in (
-        AgentTool("list_universe", "List the tracked securities with the freshness of each one's price data.", NoArgs, list_universe),
+        AgentTool("list_universe", "List the tracked securities (paged) with the freshness of each one's price data.", ListUniverseArgs, list_universe),
         AgentTool("get_research_summary", "Compact point-in-time research summary for one security: conviction headline, evidence families, conflicts, and every domain's status with provenance.", TickerArgs, get_research_summary),
         AgentTool("get_domain", "Detail for one research domain of one security (size-capped and paged).", DomainArgs, get_domain),
         AgentTool("get_conviction", "The full Conviction & Conflicts assessment for one security.", TickerArgs, get_conviction),
