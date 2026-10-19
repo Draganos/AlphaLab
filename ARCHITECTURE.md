@@ -5863,3 +5863,13 @@ Screening, ranking, refresh, writes, portfolio and trading are not tools.
 
 **Not done here:** conviction remains categorical and unvalidated; no aggregate
 or conviction score exists, and none is added.
+
+**Review fixes (Codex, same PR):** the resolved interface date is always passed to
+state assembly (never `None`), so `system_date`, freshness and the research
+describe one day; the historical freshness query bounds bars by
+`ingested_at <= end_of(as_of)` like the research reads, so a later backfill is
+not reported as known; identity comes from the research as computed at the
+evaluation date, with the mutable `Security` row used only when there is none
+and labelled "current catalogue (not point-in-time)"; `compare` rejects
+duplicate tickers after normalisation; error envelopes (caller-controlled tool
+and argument names) are cleaned and capped like every other answer.

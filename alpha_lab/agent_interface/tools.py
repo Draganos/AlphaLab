@@ -13,12 +13,13 @@ Free text from outside this codebase is wrapped as untrusted data (see
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
@@ -88,7 +89,8 @@ class AgentContext:
 
 # --- argument models --------------------------------------------------------
 
-_TICKER = {"min_length": 1, "max_length": 14, "pattern": r"^[A-Za-z0-9.\-^=]+$"}
+_TICKER_PATTERN = r"[A-Za-z0-9.\-^=]+"
+_TICKER = {"min_length": 1, "max_length": 14, "pattern": f"^{_TICKER_PATTERN}$"}
 
 
 class _Args(BaseModel):
@@ -128,6 +130,17 @@ class CompareArgs(_Args):
     domains: list[Domain] | None = Field(None, max_length=len(DOMAINS))
     as_of: date | None = None
 
+    @field_validator("tickers")
+    @classmethod
+    def distinct_tickers(cls, tickers: list[str]) -> list[str]:
+        normalized = [ticker.strip().upper() for ticker in tickers]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("tickers must be 2-10 distinct securities")
+        for ticker in normalized:
+            if not re.fullmatch(_TICKER_PATTERN, ticker) or len(ticker) > 14:
+                raise ValueError("each ticker must be a plain symbol such as MSFT")
+        return normalized
+
 
 # --- shared helpers ---------------------------------------------------------
 
@@ -147,15 +160,21 @@ def _require_security(ctx: AgentContext, ticker: str) -> tuple[str, Security]:
     return symbol, security
 
 
-def _state(ctx: AgentContext, symbol: str, as_of: date | None, **kwargs: Any) -> ResearchState:
-    return get_research_state(ctx.engine, ctx.settings, symbol, evaluation_date=as_of, **kwargs)
+def _state(ctx: AgentContext, symbol: str, evaluation_date: date, **kwargs: Any) -> ResearchState:
+    # Always the date `_resolve_as_of` returned, never None: get_research_state
+    # would otherwise read its own clock, and the envelope's system_date,
+    # freshness and the research could describe different days.
+    return get_research_state(ctx.engine, ctx.settings, symbol, evaluation_date=evaluation_date, **kwargs)
 
 
 def _price_freshness(ctx: AgentContext, symbol: str, evaluation_date: date) -> dict[str, Any]:
+    conditions = [Price.ticker == symbol, Price.date <= evaluation_date]
+    if evaluation_date < ctx.today():
+        # A bar backfilled or revised after the requested date was not known
+        # then (same bound the research reads use): do not count it.
+        conditions.append(Price.ingested_at <= datetime.combine(evaluation_date, time.max))
     with Session(ctx.engine) as session:
-        newest = session.scalar(
-            select(func.max(Price.date)).where(Price.ticker == symbol, Price.date <= evaluation_date)
-        )
+        newest = session.scalar(select(func.max(Price.date)).where(*conditions))
     limit = ctx.settings.data_quality["stale_price_days"]
     if newest is None:
         status = "missing"
@@ -182,8 +201,9 @@ def _limitations(state: ResearchState, security: Security, freshness: dict[str, 
     elif freshness["price_status"] == "missing":
         notes.append("No price history is stored for this security.")
     if not security.is_tracked:
-        notes.append("This security is not in the tracked research universe; its data may be stale or partial.")
-    if (security.asset_type or "").upper() in {"ETF", "MUTUALFUND"}:
+        notes.append("This security is not currently in the tracked research universe; its data may be stale or partial.")
+    kind = state.stock_research.security_type if state.stock_research is not None else security.asset_type
+    if (kind or "").upper() in {"ETF", "MUTUALFUND"}:
         notes.append(
             "This is a fund: fundamentals categories do not apply, so conviction rests on fewer evidence families."
         )
@@ -291,15 +311,29 @@ def _score_view(state: ResearchState) -> dict[str, Any] | None:
 
 
 def _identity(security: Security, state: ResearchState, symbol: str) -> dict[str, Any]:
+    """Who the security is. The `Security` catalogue is updated in place with
+    no as-of versioning, so for a point-in-time answer the identity comes from
+    the research as it was computed then; only when there is none does it fall
+    back to the current catalogue row, labelled as such."""
     research = state.stock_research
+    if research is not None:
+        return {
+            "ticker": symbol,
+            "company": research.company_name,
+            "sector": research.sector,
+            "industry": research.industry,
+            "security_type": research.security_type,
+            "metadata_basis": "research as of the evaluation date",
+            "tracked_now": bool(security.is_tracked),
+        }
     return {
         "ticker": symbol,
         "company": security.company_name,
         "sector": security.sector,
         "industry": security.industry,
-        "asset_type": security.asset_type,
-        "security_type": None if research is None else research.security_type,
-        "tracked": bool(security.is_tracked),
+        "security_type": security.asset_type,
+        "metadata_basis": "current catalogue (not point-in-time)",
+        "tracked_now": bool(security.is_tracked),
     }
 
 
@@ -336,7 +370,7 @@ def list_universe(ctx: AgentContext, args: NoArgs) -> ToolResult:
 def get_research_summary(ctx: AgentContext, args: TickerArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
     symbol, security = _require_security(ctx, args.ticker)
-    state = _state(ctx, symbol, args.as_of)
+    state = _state(ctx, symbol, evaluation_date)
     freshness = _price_freshness(ctx, symbol, evaluation_date)
     data = {
         "identity": _identity(security, state, symbol),
@@ -356,7 +390,7 @@ def get_research_summary(ctx: AgentContext, args: TickerArgs) -> ToolResult:
 def get_domain(ctx: AgentContext, args: DomainArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
     symbol, security = _require_security(ctx, args.ticker)
-    state = _state(ctx, symbol, args.as_of)
+    state = _state(ctx, symbol, evaluation_date)
     if args.domain == "coverage":
         summary = state.coverage
         field = {
@@ -395,7 +429,7 @@ def get_domain(ctx: AgentContext, args: DomainArgs) -> ToolResult:
 def get_conviction(ctx: AgentContext, args: TickerArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
     symbol, security = _require_security(ctx, args.ticker)
-    state = _state(ctx, symbol, args.as_of)
+    state = _state(ctx, symbol, evaluation_date)
     freshness = _price_freshness(ctx, symbol, evaluation_date)
     data = {
         "conviction": state.conviction,
@@ -435,8 +469,8 @@ def get_conviction_history(ctx: AgentContext, args: HistoryArgs) -> ToolResult:
     return ToolResult(data=data, ticker=symbol, requested_as_of=args.as_of, limitations=notes)
 
 
-def _evidence(ctx: AgentContext, symbol: str, as_of: date | None):
-    state = _state(ctx, symbol, as_of)
+def _evidence(ctx: AgentContext, symbol: str, evaluation_date: date):
+    state = _state(ctx, symbol, evaluation_date)
     bundle = build_evidence_payload_from_research_state(state)
     return state, bundle
 
@@ -444,7 +478,7 @@ def _evidence(ctx: AgentContext, symbol: str, as_of: date | None):
 def list_evidence(ctx: AgentContext, args: ListEvidenceArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
     symbol, security = _require_security(ctx, args.ticker)
-    state, bundle = _evidence(ctx, symbol, args.as_of)
+    state, bundle = _evidence(ctx, symbol, evaluation_date)
     start, stop = (args.page - 1) * args.page_size, args.page * args.page_size
     items = [
         {
@@ -474,7 +508,7 @@ def list_evidence(ctx: AgentContext, args: ListEvidenceArgs) -> ToolResult:
 def get_evidence(ctx: AgentContext, args: GetEvidenceArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
     symbol, security = _require_security(ctx, args.ticker)
-    state, bundle = _evidence(ctx, symbol, args.as_of)
+    state, bundle = _evidence(ctx, symbol, evaluation_date)
     item = next((i for i in bundle.items if i.evidence_id == args.evidence_id), None)
     if item is None:
         raise AgentToolError(
@@ -495,7 +529,7 @@ def get_evidence(ctx: AgentContext, args: GetEvidenceArgs) -> ToolResult:
 
 def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
-    symbols = list(dict.fromkeys(ticker.strip().upper() for ticker in args.tickers))
+    symbols = args.tickers  # already normalised and distinct (see CompareArgs)
     securities = {symbol: _require_security(ctx, symbol)[1] for symbol in symbols}
     with Session(ctx.engine) as session:
         tracked = list(session.scalars(select(Security.ticker).where(Security.is_tracked.is_(True))))
@@ -506,7 +540,7 @@ def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
     names = tuple(args.domains) if args.domains else ()
     rows, notes = [], [CONVICTION_CAVEAT]
     for symbol in symbols:
-        state = _state(ctx, symbol, args.as_of, universe_scores=universe_scores)
+        state = _state(ctx, symbol, evaluation_date, universe_scores=universe_scores)
         freshness = _price_freshness(ctx, symbol, evaluation_date)
         conviction = _conviction_view(state)
         row = {
@@ -625,9 +659,17 @@ def tool_catalog() -> list[dict[str, Any]]:
     ]
 
 
+def _bounded(text: str, limit: int) -> str:
+    cleaned = clean_text(text)
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
+
+
 def _error_envelope(ctx: AgentContext, name: str, code: str, message: str, **extra: Any) -> dict[str, Any]:
+    # `name` and parts of `message` are caller-controlled (an unknown tool or
+    # argument name), so errors are cleaned and capped like everything else.
     envelope = ToolEnvelope(
-        tool=name, ok=False, system_date=ctx.today(), error=ToolError(code=code, message=message), **extra
+        tool=_bounded(name, 64), ok=False, system_date=ctx.today(),
+        error=ToolError(code=code, message=_bounded(message, 400)), **extra,
     )
     return envelope.model_dump(mode="json")
 
