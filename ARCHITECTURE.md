@@ -5815,3 +5815,80 @@ accumulates (it would report NOT_TESTABLE today).
   history exists (no consensus): its status/observed_at follow whichever
   analyst evidence is present, so a revisions-only market member cites a
   consistent status.
+
+## 64. Agent Research Interface, PR A (roadmap Phase 9): `alpha_lab.agent_interface`
+
+A read-only, point-in-time, citeable view of what AlphaLab already computes,
+for an external agent. It adds no analysis: every answer is assembled from
+`get_research_state`, the conviction layer and its audit history. The MCP
+adapter and the call log are PR B; the ResearchNote validator is PR C (deferred
+out of Phase 9, but finished before Phase 10 starts).
+
+**Tools** (`TOOLS`, pinned by a test; `scripts/agent_tools.py list|call`):
+`list_universe`, `get_research_summary` (about 1-2k tokens: conviction headline,
+families, conflicts, every domain's status/observed_at/source/provenance),
+`get_domain` (paged, `page_size` <= 100), `get_conviction`,
+`get_conviction_history` (bounded by `recorded_at`), `list_evidence` /
+`get_evidence` (the Phase 6 evidence ids), `compare` (2-10 tickers,
+categorical, no ranking) and `get_methodology` (versions, thresholds,
+definitions, the unvalidated caveat, and the usage contract for an agent).
+Screening, ranking, refresh, writes, portfolio and trading are not tools.
+
+**Gates (each is a test):**
+- *Read-only by construction.* `make_readonly_engine` opens the SQLite file with
+  `mode=ro` and `PRAGMA query_only=ON`; a write raises "readonly database" and
+  the file is byte-identical after every tool. `call_tool` also refuses any tool
+  not registered `read_only`.
+- *No network, no provider.* Tools call no provider, refresh or AI code; the
+  package imports none of them (AST test), and a socket-level test proves it.
+- *Point in time.* `as_of` is forwarded to `get_research_state`; a future date is
+  refused (`future_as_of`); every envelope carries `system_date` and per-answer
+  freshness (`price_data_through`, age, fresh/stale/missing). Stale price data
+  is stated, because conviction ages with the clock.
+- *Provenance on every datum.* Domain rows and conflict sides always carry a
+  `provenance_id` key (null when the underlying field has none - never
+  invented), and the envelope lists every id cited. Evidence without a
+  per-item id says so.
+- *Untrusted text.* Strings under free-text keys, and any string over 120
+  characters, become `{"text", "untrusted": true, "truncated"}` after control,
+  zero-width and bidirectional-override characters are removed, whitespace is
+  flattened and length is capped. Only the methodology (AlphaLab's own static
+  text) is exempt.
+- *Bounded output.* Responses over 24 KB become a structured
+  `response_too_large` error; large values page.
+- *Errors are data.* Bad arguments, unknown tool/ticker/evidence id and
+  unexpected failures return `ok: false` with a stable code; no stack trace.
+- *Isolation.* Nothing outside the package imports it, so it cannot influence
+  scoring, ranking, backtests or portfolio code.
+
+**Not done here:** conviction remains categorical and unvalidated; no aggregate
+or conviction score exists, and none is added.
+
+**Review fixes (Codex, same PR):** the resolved interface date is always passed to
+state assembly (never `None`), so `system_date`, freshness and the research
+describe one day; the historical freshness query bounds bars by
+`ingested_at <= end_of(as_of)` like the research reads, so a later backfill is
+not reported as known; identity comes from the research as computed at the
+evaluation date, with the mutable `Security` row used only when there is none
+and labelled "current catalogue (not point-in-time)"; `compare` rejects
+duplicate tickers after normalisation; error envelopes (caller-controlled tool
+and argument names) are cleaned and capped like every other answer.
+
+**Second review pass:** `compare` rejects `coverage` (read it with `get_domain`) and
+takes company names through the same point-in-time/labelled identity as the
+summary; `list_universe` is paged (50 per page, 100 max); short provider-supplied
+values (sector, industry, exchange, country, analyst firm and grades) are
+wrapped as untrusted too. **Known limitation, deliberately not changed here:**
+`HistoricalScoringService.score_universe_as_of` selects prices by market date
+without an `ingested_at` bound, so for a past `as_of` the deterministic score
+can reflect a bar backfilled after that date (the same scorer feeds the
+screener and backtests, so changing it is a scoring/PIT semantics change that
+needs its own decision). Historical answers say so in `limitations`, and the
+freshness block, which does apply the bound, is unaffected.
+
+**Third review pass:** identity reports the snapshot's own date (`metadata_as_of`),
+since the latest snapshot by the requested date can be older than it; the
+composite score view carries `provenance_id` (the same id the conviction layer
+cites); and the historical note also says the score's percentile peers are
+today's tracked universe (`get_research_state`'s existing behaviour), another
+reason a past score is not strictly point-in-time.
