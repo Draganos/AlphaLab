@@ -323,7 +323,7 @@ def test_identity_is_point_in_time_from_research_and_labelled_when_it_is_not(ctx
     monkeypatch.setattr(tools_module, "get_research_state", with_research)
     identity = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})["data"]["identity"]
     assert identity["company"]["text"] == "Test"  # the research's own name, not the catalogue's "Test Co"
-    assert identity["metadata_basis"] == "research as of the evaluation date"
+    assert identity["metadata_basis"] == "latest research snapshot available by the evaluation date"
     assert "tracked" not in identity and identity["tracked_now"] is True
 
     def without_research(engine, settings, ticker, evaluation_date=None, **kwargs):
@@ -546,7 +546,7 @@ def test_compare_rejects_the_derived_coverage_domain_instead_of_silently_droppin
 def test_compare_company_names_are_point_in_time_or_labelled_and_wrapped(ctx, rich):
     rows = call_tool(ctx, "compare", {"tickers": ["TST", "UNT"], "as_of": "2026-09-01"})["data"]["rows"]
     assert all(row["company"]["untrusted"] is True for row in rows)
-    assert {row["metadata_basis"] for row in rows} == {"research as of the evaluation date"}
+    assert {row["metadata_basis"] for row in rows} == {"latest research snapshot available by the evaluation date"}
     assert rows[0]["company"]["text"] == "Test"  # the research's name, not the catalogue's "Test Co"
 
 
@@ -594,3 +594,26 @@ def test_list_universe_is_paged(db_url, settings):
     seen = [row["ticker"] for page in (1, 2, 3) for row in call_tool(context, "list_universe", {"page_size": 2, "page": page})["data"]["securities"]]
     assert seen == sorted(seen) and len(seen) == len(set(seen)) == 5
     engine.dispose()
+
+
+# --- review fixes, third pass ---------------------------------------------------
+
+def test_identity_reports_the_snapshot_date_it_actually_comes_from(ctx, rich):
+    identity = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-20"})["data"]["identity"]
+    assert identity["metadata_as_of"] == EVALUATION.isoformat()  # the snapshot's own date, not the requested one
+    row = call_tool(ctx, "compare", {"tickers": ["TST", "UNT"], "as_of": "2026-09-20"})["data"]["rows"][0]
+    assert row["metadata_as_of"] == EVALUATION.isoformat()
+
+
+def test_the_composite_score_carries_the_provenance_the_conviction_layer_cites(ctx, rich):
+    envelope = call_tool(ctx, "get_research_summary", {"ticker": "TST"})
+    score = envelope["data"]["deterministic_score"]
+    assert score["provenance_id"] and score["provenance_id"] in envelope["provenance_ids"]
+    row = call_tool(ctx, "compare", {"tickers": ["TST", "UNT"]})["data"]["rows"][0]
+    assert row["deterministic_score"]["provenance_id"]
+    assert row["deterministic_score"]["provenance_id"] in call_tool(ctx, "compare", {"tickers": ["TST", "UNT"]})["provenance_ids"]
+
+
+def test_the_historical_note_also_discloses_the_peer_universe(ctx, rich):
+    notes = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})["limitations"]
+    assert any("today's tracked universe" in note for note in notes)

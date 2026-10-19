@@ -5885,3 +5885,10 @@ can reflect a bar backfilled after that date (the same scorer feeds the
 screener and backtests, so changing it is a scoring/PIT semantics change that
 needs its own decision). Historical answers say so in `limitations`, and the
 freshness block, which does apply the bound, is unaffected.
+
+**Third review pass:** identity reports the snapshot's own date (`metadata_as_of`),
+since the latest snapshot by the requested date can be older than it; the
+composite score view carries `provenance_id` (the same id the conviction layer
+cites); and the historical note also says the score's percentile peers are
+today's tracked universe (`get_research_state`'s existing behaviour), another
+reason a past score is not strictly point-in-time.

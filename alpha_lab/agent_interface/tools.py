@@ -44,6 +44,7 @@ from alpha_lab.conviction import (
     FUNDAMENTAL_CATEGORIES,
     assessment_history,
 )
+from alpha_lab.conviction.assessment import composite_provenance_id
 from alpha_lab.data_quality import assess_freshness
 from alpha_lab.database.models import Price, Security
 from alpha_lab.research_state import (
@@ -205,7 +206,8 @@ def _price_freshness(ctx: AgentContext, symbol: str, evaluation_date: date) -> d
 HISTORICAL_SCORE_NOTE = (
     "Point-in-time caveat: the deterministic score (and the factors behind it) is computed by AlphaLab's "
     "existing scorer from price bars by market date, without an ingestion-time bound, so a bar backfilled or "
-    "revised after the requested date can influence it. The freshness block does apply that bound."
+    "revised after the requested date can influence it. Its percentile peers are also today's tracked "
+    "universe, not the universe on that date. The freshness block does apply the ingestion bound."
 )
 
 
@@ -328,6 +330,8 @@ def _score_view(state: ResearchState) -> dict[str, Any] | None:
         "overall_coverage": research.overall_coverage,
         "confidence_label": research.confidence_label,
         "score_interpretation": research.score_interpretation,
+        # The same id the conviction layer cites for the composite.
+        "provenance_id": composite_provenance_id(research, state.ticker, state.evaluation_date),
         "note": "The existing deterministic composite, unchanged; shown for reference.",
     }
 
@@ -345,7 +349,8 @@ def _identity(security: Security, state: ResearchState, symbol: str) -> dict[str
             "sector": research.sector,
             "industry": research.industry,
             "security_type": research.security_type,
-            "metadata_basis": "research as of the evaluation date",
+            "metadata_basis": "latest research snapshot available by the evaluation date",
+            "metadata_as_of": research.evaluation_date,
             "tracked_now": bool(security.is_tracked),
         }
     return {
@@ -355,6 +360,7 @@ def _identity(security: Security, state: ResearchState, symbol: str) -> dict[str
         "industry": security.industry,
         "security_type": security.asset_type,
         "metadata_basis": "current catalogue (not point-in-time)",
+        "metadata_as_of": None,
         "tracked_now": bool(security.is_tracked),
     }
 
@@ -578,6 +584,7 @@ def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
             "ticker": symbol,
             "company": identity["company"],
             "metadata_basis": identity["metadata_basis"],
+            "metadata_as_of": identity["metadata_as_of"],
             "agreement": None if conviction is None else conviction["agreement"],
             "direction": None if conviction is None else conviction["direction"],
             "families": None if conviction is None else {
