@@ -5951,3 +5951,48 @@ extra outside `requirements.lock` and CI: the newest `mcp` (2.x) needs
 is the newest line that resolves under the locked pins. Only `mcp_adapter.py`
 imports it (tested); the adapter tests skip where it is absent, the rest of the
 package and the call log do not need it.
+
+## 66. Point-in-time price versions for the historical scorer
+
+`HistoricalScoringService` (the percentile scorer behind the screener, backtests
+and the `deterministic_score` research-state field) read prices with
+`latest_price_per_date`: the newest stored version of each bar, for every
+evaluation date. `IngestionService.ingest` appends a new `Price` row when a
+re-ingested bar differs (a restated `adjusted_close` after a dividend, a
+corrected close), so a past date's score could use a revision stored months
+later: look-ahead through restatement.
+
+**The fix selects among versions, it does not exclude bars.** New
+`price_history_as_known(_statement)` in `database/queries.py`: per
+`(ticker, date)` take the newest version with `ingested_at <= end_of(as_of)`; if
+none was stored that early, take the **earliest** version. A bar's market date is
+when it was public; `ingested_at` is only when this system stored it, and a first
+ingestion backfills about two years in one go (the scratch databases have all
+6,012 bars stored in one session, zero revisions). A strict
+`ingested_at <= as_of` bound, as the technical-summary read uses (right for "what
+did AlphaLab hold then"), would leave the scorer, and every backtest through it,
+with no prices before the first load. Evaluating today (`as_of >= today`, the test
+`get_research_state` uses) is unbounded, so the UTC clock cannot exclude a
+revision stored "tomorrow" in UTC but still today locally. The backtest's
+*valuation* prices (`load_price_frames`) are deliberately unchanged: ex-post
+adjusted prices are the standard way to value a simulated portfolio; only the
+*signal* must not see the future.
+
+Honest limits: a backfilled history carries the adjustments of the day it was
+loaded (nothing can undo that), and a revision whose original version was never
+stored cannot be recovered.
+
+**Measuring it.** `scripts/compare_scorer_pit.py` re-scores the tracked universe
+on a date grid under both methods and reports changed scores, the largest and
+mean change, rank correlation, and top-N changes; `--backtests` re-runs every
+saved `backtest_runs` row under both methods and compares metrics and
+selections. On the scratch databases (no revisions) every delta is zero; run it
+on a database that has been refreshed over several weeks to see real movement.
+Tests (`test_scorer_point_in_time.py`, `test_compare_scorer_pit.py`) include the
+late revision, the all-backfilled history, and two dates on one series seeing the
+version held on each; the revision tests fail on the previous behaviour.
+
+**Not in this change:** the universe the percentiles are ranked against is still
+today's tracked set for a past date (no membership history exists yet), so the
+agent interface keeps withholding the historical `deterministic_score` until
+that is fixed (next).

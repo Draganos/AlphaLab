@@ -1,18 +1,19 @@
 """Shared point-in-time universe scoring for the screener and backtester."""
 
-from dataclasses import dataclass
-from datetime import date
-from typing import Any
 import hashlib
 import json
 import math
+from dataclasses import dataclass
+from datetime import date
+from typing import Any
+
 import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from alpha_lab.config import Settings
 from alpha_lab.database.models import Price, Security
-from alpha_lab.database.queries import latest_fundamentals_as_of, latest_price_per_date
+from alpha_lab.database.queries import latest_fundamentals_as_of, price_history_as_known
 from alpha_lab.factors import calculate_factors, percentile_scores
 from alpha_lab.factors.engine import FACTOR_VERSION
 from alpha_lab.portfolio import Candidate
@@ -72,8 +73,11 @@ class HistoricalScoringService:
             for security in securities:
                 if symbols is not None and security.ticker not in symbols:
                     continue
-                prices = latest_price_per_date(
-                    session, Price.ticker == security.ticker, Price.date <= evaluation_date
+                # The version of each bar AlphaLab held on the evaluation date: a
+                # later revision (a restated adjusted close) must not leak into
+                # a past score. See `price_history_as_known_statement`.
+                prices = price_history_as_known(
+                    session, evaluation_date, Price.ticker == security.ticker, Price.date <= evaluation_date
                 )
                 usable_prices = [item for item in prices if _price_value(item) is not None]
                 fundamentals = latest_fundamentals_as_of(session, security.ticker, evaluation_date)
