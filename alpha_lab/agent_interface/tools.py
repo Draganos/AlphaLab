@@ -49,6 +49,7 @@ from alpha_lab.data_quality import assess_freshness
 from alpha_lab.database.models import Price, Security
 from alpha_lab.research_state import (
     RESEARCH_STATE_METHODOLOGY_VERSION,
+    ResearchField,
     ResearchState,
     get_research_state,
 )
@@ -173,11 +174,28 @@ def _require_security(ctx: AgentContext, ticker: str) -> tuple[str, Security]:
     return symbol, security
 
 
+NOT_POINT_IN_TIME = "NOT_POINT_IN_TIME"
+# Short on purpose (under the free-text length): it is our own text, and the full
+# explanation is HISTORICAL_SCORE_NOTE in `limitations`.
+SCORER_WITHHELD_DETAIL = "Withheld: scorer is not point-in-time (no ingestion bound; today's peer universe)."
+
+
+def _withhold_historical_scorer(state: ResearchState) -> ResearchState:
+    """The `deterministic_score` field is the percentile scorer's output
+    (`HistoricalScoringService`), which is not point-in-time yet (two
+    documented gaps, see SCORER_WITHHELD_DETAIL), so a past date never
+    returns its number. Done once, here, so every route (summary, get_domain,
+    compare) agrees. The scorer itself is unchanged."""
+    withheld = ResearchField(status=NOT_POINT_IN_TIME, detail=SCORER_WITHHELD_DETAIL)
+    return state.model_copy(update={"deterministic_score": withheld})
+
+
 def _state(ctx: AgentContext, symbol: str, evaluation_date: date, **kwargs: Any) -> ResearchState:
     # Always the date `_resolve_as_of` returned, never None: get_research_state
     # would otherwise read its own clock, and the envelope's system_date,
     # freshness and the research could describe different days.
-    return get_research_state(ctx.engine, ctx.settings, symbol, evaluation_date=evaluation_date, **kwargs)
+    state = get_research_state(ctx.engine, ctx.settings, symbol, evaluation_date=evaluation_date, **kwargs)
+    return _withhold_historical_scorer(state) if evaluation_date < ctx.today() else state
 
 
 def _price_freshness(ctx: AgentContext, symbol: str, evaluation_date: date) -> dict[str, Any]:
@@ -199,21 +217,24 @@ def _price_freshness(ctx: AgentContext, symbol: str, evaluation_date: date) -> d
         "price_status": status,
         "stale_after_days": limit,
         "evaluation_date": evaluation_date,
-        "point_in_time": evaluation_date < ctx.today(),
+        # Describes the price bars only; it says nothing about score validity.
+        "historical_request": evaluation_date < ctx.today(),
+        "price_ingestion_bound_applied": evaluation_date < ctx.today(),
     }
 
 
 HISTORICAL_SCORE_NOTE = (
-    "Point-in-time caveat: the deterministic score (and the factors behind it) is computed by AlphaLab's "
-    "existing scorer from price bars by market date, without an ingestion-time bound, so a bar backfilled or "
-    "revised after the requested date can influence it. Its percentile peers are also today's tracked "
-    "universe, not the universe on that date. The freshness block does apply the ingestion bound."
+    "Historical request: the percentile-ranked deterministic_score domain is withheld "
+    f"(status {NOT_POINT_IN_TIME}) because AlphaLab's scorer has no ingestion-time bound on price bars and "
+    "ranks against today's tracked universe. The composite shown under deterministic_score in summaries and "
+    "comparisons is the research snapshot persisted by that date, and the price-freshness block applies the "
+    "ingestion bound."
 )
 
 
 def _limitations(state: ResearchState, security: Security, freshness: dict[str, Any]) -> list[str]:
     notes = [CONVICTION_CAVEAT]
-    if freshness.get("point_in_time"):
+    if freshness.get("historical_request"):
         notes.append(HISTORICAL_SCORE_NOTE)
     if state.stock_research is None:
         notes.append("No research is computed for this security for the requested date.")
@@ -332,7 +353,8 @@ def _score_view(state: ResearchState) -> dict[str, Any] | None:
         "score_interpretation": research.score_interpretation,
         # The same id the conviction layer cites for the composite.
         "provenance_id": composite_provenance_id(research, state.ticker, state.evaluation_date),
-        "note": "The existing deterministic composite, unchanged; shown for reference.",
+        "basis": "research snapshot of the evaluation date (live for today, as persisted for a past date)",
+        "note": "The existing research composite, unchanged; not the percentile-scorer domain.",
     }
 
 

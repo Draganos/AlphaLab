@@ -5892,3 +5892,22 @@ composite score view carries `provenance_id` (the same id the conviction layer
 cites); and the historical note also says the score's percentile peers are
 today's tracked universe (`get_research_state`'s existing behaviour), another
 reason a past score is not strictly point-in-time.
+
+**Historical scorer withheld (follow-up to PR A):** `HistoricalScoringService`
+(the percentile scorer behind the `deterministic_score` research-state field)
+reads price bars by market date with no `ingested_at` bound and ranks against
+today's tracked universe, so its number for a past date is not point-in-time.
+Disclosing that was not enough for an interface agents read as historical
+evidence, so for any `as_of` earlier than the interface date the
+`deterministic_score` field is replaced, in one place (`_state`), by
+`status: NOT_POINT_IN_TIME` with no value and no provenance, on every route
+(summary domain rows, `get_domain`, `compare` domain rows); the current date is
+unchanged. Not affected, and kept: the research *composite* shown under
+`deterministic_score` in summaries/compare is the research snapshot persisted
+by that date (`ResearchSnapshotRepository.get_latest_as_of`, bounded by
+`created_at`), so it is point-in-time; it now carries a `basis` saying so. The
+freshness block's old `point_in_time` flag is replaced by `historical_request`
+and `price_ingestion_bound_applied`, which describe the price bars only. The
+scorer itself, screener and backtests are untouched; making the scorer
+point-in-time (an ingestion bound plus a dated universe) remains a separate
+decision.
