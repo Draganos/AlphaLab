@@ -73,7 +73,9 @@ def _rich_state(ticker="TST", evaluation_date=EVALUATION, **research_kwargs) -> 
     from alpha_lab.conviction import assess_conviction
 
     assessment = assess_conviction(state, coverage=load_settings().coverage, stale_price_days=5)
+    scored = state.deterministic_score.model_copy(update={"value": {"score": 73.2, "percentile": 0.8}})
     return state.model_copy(update={
+        "deterministic_score": scored,
         "ticker": ticker,
         "conflicts": [c.model_dump(mode="json") for c in assessment.conflicts],
         "conviction": assessment.model_dump(mode="json"),
@@ -552,12 +554,12 @@ def test_compare_company_names_are_point_in_time_or_labelled_and_wrapped(ctx, ri
 
 def test_historical_answers_disclose_the_scorer_has_no_ingestion_bound(ctx, rich):
     historical = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})
-    assert historical["freshness"]["point_in_time"] is True
-    assert any("without an ingestion-time bound" in note for note in historical["limitations"])
-    assert any("without an ingestion-time bound" in note for note in call_tool(
+    assert historical["freshness"]["historical_request"] is True
+    assert any("no ingestion-time bound" in note for note in historical["limitations"])
+    assert any("no ingestion-time bound" in note for note in call_tool(
         ctx, "compare", {"tickers": ["TST", "UNT"], "as_of": "2026-09-01"})["limitations"])
     today = call_tool(ctx, "get_research_summary", {"ticker": "TST"})
-    assert today["freshness"]["point_in_time"] is False
+    assert today["freshness"]["historical_request"] is False
     assert not any("ingestion-time bound" in note for note in today["limitations"])
 
 
@@ -617,3 +619,62 @@ def test_the_composite_score_carries_the_provenance_the_conviction_layer_cites(c
 def test_the_historical_note_also_discloses_the_peer_universe(ctx, rich):
     notes = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})["limitations"]
     assert any("today's tracked universe" in note for note in notes)
+
+
+# --- historical scorer contract (reported after merge) ----------------------------
+
+def _scorer_numbers_anywhere(envelope) -> bool:
+    text = json.dumps(envelope)
+    return "73.2" in text or '"percentile": 0.8' in text
+
+
+def test_a_historical_request_never_returns_the_scorer_number_on_any_route(ctx, rich):
+    past = "2026-09-01"
+    routes = {
+        "summary": call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": past}),
+        "domain": call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "deterministic_score", "as_of": past}),
+        "compare": call_tool(ctx, "compare", {
+            "tickers": ["TST", "UNT"], "domains": ["deterministic_score"], "as_of": past}),
+    }
+    for name, envelope in routes.items():
+        assert envelope["ok"], name
+        assert not _scorer_numbers_anywhere(envelope), name
+    row = next(r for r in routes["summary"]["data"]["domains"] if r["domain"] == "deterministic_score")
+    assert row["status"] == "NOT_POINT_IN_TIME" and row["provenance_id"] is None and row["observed_at"] is None
+    domain = routes["domain"]["data"]
+    assert domain["status"] == "NOT_POINT_IN_TIME" and domain["value"] is None and domain["provenance_id"] is None
+    assert "not point-in-time" in domain["detail"]
+    for compared in routes["compare"]["data"]["rows"]:
+        scored = next(r for r in compared["domains"] if r["domain"] == "deterministic_score")
+        assert scored["status"] == "NOT_POINT_IN_TIME" and scored["provenance_id"] is None
+    for envelope in routes.values():
+        assert any("no ingestion-time bound" in note and "NOT_POINT_IN_TIME" in note for note in envelope["limitations"])
+
+
+def test_the_current_date_keeps_the_scorer_output_and_its_provenance(ctx, rich):
+    domain = call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "deterministic_score"})["data"]
+    assert domain["status"] == "FULL" and domain["provenance_id"] == "prov-deterministic_score"
+    assert domain["value"]["score"] == 73.2
+    summary = call_tool(ctx, "get_research_summary", {"ticker": "TST"})
+    row = next(r for r in summary["data"]["domains"] if r["domain"] == "deterministic_score")
+    assert row["status"] == "FULL" and row["provenance_id"] == "prov-deterministic_score"
+    assert "prov-deterministic_score" in summary["provenance_ids"]
+
+
+def test_the_research_composite_stays_available_for_a_past_date_and_says_what_it_is(ctx, rich):
+    summary = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})
+    composite = summary["data"]["deterministic_score"]
+    assert composite["overall_score"] == 70.0 and composite["provenance_id"]
+    assert "research snapshot" in composite["basis"] and "not the percentile-scorer" in composite["note"]
+
+
+def test_price_freshness_flags_do_not_claim_the_score_is_point_in_time(ctx, rich):
+    freshness = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})["freshness"]
+    assert freshness["historical_request"] is True and freshness["price_ingestion_bound_applied"] is True
+    assert "point_in_time" not in freshness
+    assert tools_module.SCORER_WITHHELD_DETAIL and len(tools_module.SCORER_WITHHELD_DETAIL) < 120
+
+
+def test_other_domains_are_unchanged_for_a_past_date(ctx, rich):
+    domain = call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "technicals", "as_of": "2026-09-01"})["data"]
+    assert domain["status"] == "FULL" and domain["provenance_id"] == "prov-technicals"
