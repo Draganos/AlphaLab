@@ -5911,3 +5911,43 @@ and `price_ingestion_bound_applied`, which describe the price bars only. The
 scorer itself, screener and backtests are untouched; making the scorer
 point-in-time (an ingestion bound plus a dated universe) remains a separate
 decision.
+
+## 65. Agent Research Interface, PR B (roadmap Phase 9): MCP adapter and call log
+
+Two additions around the read-only tools of §64; the tools, envelope and safety
+rules are unchanged.
+
+**`AgentService` (`service.py`)** is the transport-independent call path: run the
+tool via `call_tool`, then append the call to the log. Any transport is a thin
+shell around `AgentService.handle`, and it is testable without an MCP library.
+
+**Call log (`call_log.py`, stdlib only).** A separate SQLite file (default
+`data/agent_calls.db`, gitignored with the other databases), never the research
+database: that one stays read-only, and an audit trail should survive a research
+rebuild. `scripts/agent_mcp_server.py` refuses to log into the research file.
+Rows are insert-only (triggers reject UPDATE and DELETE, and re-opening does not
+weaken them) and record the time, client name, tool, arguments (canonical JSON,
+capped), ok/error code, ticker, requested as-of, system date, the provenance ids
+cited, the **exact response**, its size and SHA-256, and the duration. Storing the
+response is deliberate: the ResearchNote validator (PR C) must check that a note
+cites only evidence the agent was actually given, which needs what it was given.
+Growth is bounded by the 24 KB response cap. A failure to write a row is logged
+to stderr and never changes or withholds the answer: a missing row can only make
+a later citation check stricter.
+
+**MCP adapter (`mcp_adapter.py`, `scripts/agent_mcp_server.py`).** A stdio MCP
+server built on the SDK's low-level `Server`: it lists the nine registry tools
+(each annotated read-only, non-destructive, closed-world, with the tool's own
+JSON schema, `additionalProperties: false`) and routes calls through
+`AgentService`. SDK input validation is switched off so a malformed call reaches
+the tool's own argument model, gets the usual structured `invalid_arguments`
+envelope, and is still logged. The response text is the canonical JSON that the
+log hashes, so a response can be verified against its row. stdout is the protocol
+channel; diagnostics go to stderr.
+
+**Optional dependency.** `pip install "alpha-lab[mcp]"` (pinned `mcp==1.12.4`) is an
+extra outside `requirements.lock` and CI: the newest `mcp` (2.x) needs
+`pydantic>=2.12`, which conflicts with the project's `pydantic==2.10.4`, and 1.12.4
+is the newest line that resolves under the locked pins. Only `mcp_adapter.py`
+imports it (tested); the adapter tests skip where it is absent, the rest of the
+package and the call log do not need it.

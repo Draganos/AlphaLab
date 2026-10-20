@@ -15,6 +15,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest==8.3.4"]
+# The agent MCP server (scripts/agent_mcp_server.py). Optional and outside requirements.lock/CI:
+# the newest mcp needs pydantic>=2.12, which conflicts with the pydantic pin above.
+mcp = ["mcp==1.12.4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
