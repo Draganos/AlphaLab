@@ -5911,3 +5911,129 @@ and `price_ingestion_bound_applied`, which describe the price bars only. The
 scorer itself, screener and backtests are untouched; making the scorer
 point-in-time (an ingestion bound plus a dated universe) remains a separate
 decision.
+
+## 65. Agent Research Interface, PR B (roadmap Phase 9): MCP adapter and call log
+
+Two additions around the read-only tools of §64; the tools, envelope and safety
+rules are unchanged.
+
+**`AgentService` (`service.py`)** is the transport-independent call path: run the
+tool via `call_tool`, then append the call to the log. Any transport is a thin
+shell around `AgentService.handle`, and it is testable without an MCP library.
+
+**Call log (`call_log.py`, stdlib only).** A separate SQLite file (default
+`data/agent_calls.db`, gitignored with the other databases), never the research
+database: that one stays read-only, and an audit trail should survive a research
+rebuild. `scripts/agent_mcp_server.py` refuses to log into the research file.
+Rows are insert-only (triggers reject UPDATE and DELETE, and re-opening does not
+weaken them) and record the time, client name, tool, arguments (canonical JSON,
+capped), ok/error code, ticker, requested as-of, system date, the provenance ids
+cited, the **exact response**, its size and SHA-256, and the duration. Storing the
+response is deliberate: the ResearchNote validator (PR C) must check that a note
+cites only evidence the agent was actually given, which needs what it was given.
+Growth is bounded by the 24 KB response cap. A failure to write a row is logged
+to stderr and never changes or withholds the answer: a missing row can only make
+a later citation check stricter.
+
+**MCP adapter (`mcp_adapter.py`, `scripts/agent_mcp_server.py`).** A stdio MCP
+server built on the SDK's low-level `Server`: it lists the nine registry tools
+(each annotated read-only, non-destructive, closed-world, with the tool's own
+JSON schema, `additionalProperties: false`) and routes calls through
+`AgentService`. SDK input validation is switched off so a malformed call reaches
+the tool's own argument model, gets the usual structured `invalid_arguments`
+envelope, and is still logged. The response text is the canonical JSON that the
+log hashes, so a response can be verified against its row. stdout is the protocol
+channel; diagnostics go to stderr.
+
+**Optional dependency.** `pip install "alpha-lab[mcp]"` (pinned `mcp==1.12.4`) is an
+extra outside `requirements.lock` and CI: the newest `mcp` (2.x) needs
+`pydantic>=2.12`, which conflicts with the project's `pydantic==2.10.4`, and 1.12.4
+is the newest line that resolves under the locked pins. Only `mcp_adapter.py`
+imports it (tested); the adapter tests skip where it is absent, the rest of the
+package and the call log do not need it.
+
+## 66. Point-in-time price versions for the historical scorer
+
+`HistoricalScoringService` (the percentile scorer behind the screener, backtests
+and the `deterministic_score` research-state field) read prices with
+`latest_price_per_date`: the newest stored version of each bar, for every
+evaluation date. `IngestionService.ingest` appends a new `Price` row when a
+re-ingested bar differs (a restated `adjusted_close` after a dividend, a
+corrected close), so a past date's score could use a revision stored months
+later: look-ahead through restatement.
+
+**The fix selects among versions, it does not exclude bars.** New
+`price_history_as_known(_statement)` in `database/queries.py`: per
+`(ticker, date)` take the newest version with `ingested_at <= end_of(as_of)`; if
+none was stored that early, take the **earliest** version. A bar's market date is
+when it was public; `ingested_at` is only when this system stored it, and a first
+ingestion backfills about two years in one go (the scratch databases have all
+6,012 bars stored in one session, zero revisions). A strict
+`ingested_at <= as_of` bound, as the technical-summary read uses (right for "what
+did AlphaLab hold then"), would leave the scorer, and every backtest through it,
+with no prices before the first load. Evaluating today (`as_of >= today`, the test
+`get_research_state` uses) is unbounded, so the UTC clock cannot exclude a
+revision stored "tomorrow" in UTC but still today locally. The backtest's
+*valuation* prices (`load_price_frames`) are deliberately unchanged: ex-post
+adjusted prices are the standard way to value a simulated portfolio; only the
+*signal* must not see the future.
+
+Honest limits: a backfilled history carries the adjustments of the day it was
+loaded (nothing can undo that), and a revision whose original version was never
+stored cannot be recovered.
+
+**Measuring it.** `scripts/compare_scorer_pit.py` re-scores the tracked universe
+on a date grid under both methods and reports changed scores, the largest and
+mean change, rank correlation, and top-N changes; `--backtests` re-runs every
+saved `backtest_runs` row under both methods and compares metrics and
+selections. On the scratch databases (no revisions) every delta is zero; run it
+on a database that has been refreshed over several weeks to see real movement.
+Tests (`test_scorer_point_in_time.py`, `test_compare_scorer_pit.py`) include the
+late revision, the all-backfilled history, and two dates on one series seeing the
+version held on each; the revision tests fail on the previous behaviour.
+
+**Not in this change:** the universe the percentiles are ranked against is still
+today's tracked set for a past date (no membership history exists yet), so the
+agent interface keeps withholding the historical `deterministic_score` until
+that is fixed (next).
+
+## 67. Dated tracked-universe history
+
+The scorer's percentiles are ranked against a peer universe, but "tracked"
+(`Security.is_tracked`) is one current flag, so a past date's score was ranked
+against today's set and moved whenever a ticker was added or removed. New
+append-only table `universe_snapshots` (model `UniverseSnapshot`, triggers reject
+UPDATE/DELETE) stores the whole tracked set each time it changes;
+`alpha_lab/universe.py` records and reads it.
+
+- **Recording.** `record_universe_snapshot(engine, reason)` writes a row only when
+  the set differs from the latest snapshot. It is called after every code path
+  that changes the flag: ingestion (a newly tracked ticker), `adopt_current_
+  research_tickers`, `set_tracked_tickers`, `manage_universe remove`, and
+  `create_schema` (an initial snapshot for a database that has a tracked
+  universe and no history). A test scans the source and fails if any other file
+  writes `is_tracked`, so a new writer cannot forget.
+- **Lookup.** `tracked_universe_as_of(engine, date)`: today or later -> the current
+  flag (`live`); a past date -> the latest snapshot recorded by the end of that day
+  (`snapshot`); a past date before the first snapshot -> today's set, labelled
+  `current_fallback`. Nothing before the first snapshot is reconstructed: membership
+  history starts when recording began, and a database without the table reports the
+  fallback.
+- **Use.** `HistoricalScoringService.score_universe_as_of(date)` with no tickers and
+  `get_research_state` rank against the universe of the date. An explicit ticker
+  list (every backtest names its universe) is scored as given. The state's
+  `deterministic_score` value carries `universe: {basis, size,
+  snapshot_recorded_at}`, which is part of its provenance hash.
+- **Agent interface.** A past `deterministic_score` is returned (with provenance)
+  when its universe basis is `snapshot`, because prices are now read as held on the
+  date (§66) and the peers are a recorded set; with `current_fallback` or no label it
+  stays withheld as `NOT_POINT_IN_TIME` with the reason. `compare` ranks against the
+  universe of the date. In practice a database becomes eligible only for dates after
+  its first snapshot, so a past date works from the day after snapshots begin.
+- **Measuring.** `scripts/compare_scorer_pit.py` also reports the snapshot-history
+  state and, for dates that have a recorded universe different from today's, how
+  many scores and top-N picks change.
+
+Not covered: securities' fundamentals, ethics and other per-security inputs follow
+their own point-in-time rules; this change only fixes the peer set and (in §66) the
+price versions.

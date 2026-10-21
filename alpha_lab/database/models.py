@@ -890,3 +890,19 @@ class ConvictionAssessmentRecord(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )
+
+
+class UniverseSnapshot(Base):
+    """The whole tracked research universe at a moment, appended whenever it
+    changes (see `alpha_lab.universe`). Append-only (triggers reject UPDATE and
+    DELETE): it is the only record of past membership, since
+    `Security.is_tracked` is one current flag. A past date's universe is the
+    latest snapshot recorded by that date; there is no history before the
+    first snapshot and none is reconstructed."""
+
+    __tablename__ = "universe_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, index=True, default=lambda: datetime.now(UTC))
+    tickers: Mapped[list[Any]] = mapped_column(JSON)
+    size: Mapped[int] = mapped_column()
+    reason: Mapped[str] = mapped_column(String(64))

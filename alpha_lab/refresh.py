@@ -55,6 +55,7 @@ from alpha_lab.phase3 import Phase3Repository
 from alpha_lab.providers import ProviderError, YFinanceProvider
 from alpha_lab.providers.errors import ProviderErrorKind
 from alpha_lab.screener import MarketScreenerService
+from alpha_lab.universe import record_universe_snapshot
 
 DEFAULT_INGESTION_YEARS = 2
 
@@ -208,6 +209,7 @@ def adopt_current_research_tickers(engine: Engine, *, max_tickers: int = MAX_FUL
         for security in candidates:
             security.is_tracked = True
         session.commit()
+    record_universe_snapshot(engine, "adopt-current")
     return adopted
 
 
@@ -243,6 +245,7 @@ def set_tracked_tickers(engine: Engine, tickers: list[str]) -> SetTrackedResult:
         for security in others:
             security.is_tracked = False
         session.commit()
+        record_universe_snapshot(engine, "set-tracked")
         return SetTrackedResult(
             tracked=sorted(existing), newly_tracked=newly_tracked,
             untracked_count=len(others), missing=[t for t in wanted if t not in existing],

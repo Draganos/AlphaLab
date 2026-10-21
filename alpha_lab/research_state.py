@@ -68,16 +68,16 @@ score; see that package's docstring for the gates. Both are plain dumps so the
 state stays JSON-serializable.
 """
 
-from dataclasses import asdict
-from datetime import date, datetime, time
-from typing import Any
 import hashlib
 import json
 import logging
+from dataclasses import asdict
+from datetime import date, datetime, time
+from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
 
 from alpha_lab.alignment import AlignmentAssessment, AlignmentService
 from alpha_lab.calibration import ExternalCalibrationService
@@ -85,17 +85,20 @@ from alpha_lab.config import Settings
 from alpha_lab.conviction import assess_conviction
 from alpha_lab.database.models import AIResearchAnalysis
 from alpha_lab.ethics import EthicalClassificationService, load_ethics_policy
-from alpha_lab.evidence_coverage import build_security_coverage_summary, SecurityCoverageSummary
+from alpha_lab.evidence_coverage import (
+    SecurityCoverageSummary,
+    build_security_coverage_summary,
+)
 from alpha_lab.macro import MacroAssessment, MacroRegimeService
 from alpha_lab.news import NewsService
 from alpha_lab.news.impact import NewsImpact, classify_article
 from alpha_lab.providers.donatien import DonatienCalibration
 from alpha_lab.research import ResearchService
-from alpha_lab.research.snapshots import ResearchSnapshotRepository
 from alpha_lab.research.model import StockResearch
-from alpha_lab.refresh import configured_universe_tickers
+from alpha_lab.research.snapshots import ResearchSnapshotRepository
 from alpha_lab.research_refresh import get_current_research_refresh_status
 from alpha_lab.strategy import HistoricalScoringService
+from alpha_lab.universe import UniverseAsOf, tracked_universe_as_of
 
 logger = logging.getLogger(__name__)
 
@@ -230,10 +233,14 @@ def get_research_state(
     # historical query must still work). A caller assembling many states
     # computes `universe_scores` once and passes it in, keeping a loop O(N)
     # rather than O(N^2).
+    # The peers are the tracked universe on the evaluation date (today's flag,
+    # or a recorded snapshot for a past date; see `alpha_lab.universe`), not
+    # whatever is tracked now.
+    universe = tracked_universe_as_of(engine, evaluation_date)
     if universe_scores is None:
         universe_scores = HistoricalScoringService(engine, settings).score_universe_as_of(
             evaluation_date,
-            tickers=sorted(set(configured_universe_tickers(engine)) | {ticker}),
+            tickers=sorted(set(universe.tickers) | {ticker}),
             min_score=0, minimum_coverage=0,
         )
     score = next((item for item in universe_scores if item.ticker == ticker), None)
@@ -269,7 +276,7 @@ def get_research_state(
         donatien=_donatien_field(donatien_snapshot, donatien_calibration),
         donatien_alignment=_alignment_field(alignment_snapshot, alignment_assessment),
         ethics=_ethics_field(ethics_row),
-        deterministic_score=_score_field(ticker, evaluation_date, score, len(universe_scores)),
+        deterministic_score=_score_field(ticker, evaluation_date, score, len(universe_scores), universe),
         ai_research=_ai_research_field(ai_analysis),
         ai_rating=_ai_rating_field(ticker, evaluation_date, research),
         coverage=coverage,
@@ -419,10 +426,20 @@ def _ethics_field(ethics_row) -> ResearchField:
     )
 
 
-def _score_field(ticker: str, evaluation_date: date, score, universe_size: int = 0) -> ResearchField:
+def _score_field(ticker: str, evaluation_date: date, score, universe_size: int = 0,
+                 universe: UniverseAsOf | None = None) -> ResearchField:
     if score is None:
         return ResearchField(status="NOT_COMPUTED")
     value = asdict(score)
+    if universe is not None:
+        # Which peers the percentiles were ranked against, and whether that
+        # membership is a real record for the date. Part of the value, so it is
+        # part of the provenance hash too.
+        value["universe"] = {
+            "basis": universe.basis,
+            "size": universe_size,
+            "snapshot_recorded_at": None if universe.recorded_at is None else universe.recorded_at.isoformat(),
+        }
     # A percentile rank only means something relative to its universe; state
     # the size so a score ranked among 1-2 securities is never read as a
     # market-wide figure.
@@ -432,7 +449,8 @@ def _score_field(ticker: str, evaluation_date: date, score, universe_size: int =
         observed_at=_iso(score.evaluation_date),
         status=_status_for(score.coverage),
         provenance_id=_computed_provenance_id("deterministic_score", ticker, evaluation_date, value),
-        detail=ranked if not score.exclusion_reason else f"{ranked}; {score.exclusion_reason}",
+        detail=(ranked if universe is None else f"{ranked}; universe: {universe.basis}")
+        + ("" if not score.exclusion_reason else f"; {score.exclusion_reason}"),
     )
 
 
