@@ -58,8 +58,19 @@ def canonical_json(value: Any) -> str:
 
 
 class CallLog:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, read_only: bool = False):
+        """`read_only=True` opens an existing log that cannot be written (for
+        auditing and validation): no schema is touched and `record` is refused."""
         self.path = Path(path)
+        self.read_only = read_only
+        if read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(f"call log not found: {self.path}")
+            self._connection = sqlite3.connect(
+                f"file:{self.path.resolve().as_posix()}?mode=ro", uri=True, check_same_thread=False, timeout=30
+            )
+            self._lock = threading.Lock()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # One connection shared by the service's worker threads, serialised by a lock.
         self._connection = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
@@ -80,6 +91,8 @@ class CallLog:
     ) -> int:
         """Append one call and return its row id. `envelope` is the exact
         response dict handed to the agent."""
+        if self.read_only:
+            raise PermissionError("this call log was opened read-only")
         argument_text = canonical_json(arguments if arguments is not None else {})
         truncated = len(argument_text) > MAX_LOGGED_ARGUMENT_CHARS
         if truncated:
@@ -123,6 +136,34 @@ class CallLog:
             query += " WHERE tool = ?"
             params.append(tool)
         query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            cursor = self._connection.execute(query, params)
+            names = [column[0] for column in cursor.description]
+            rows = [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
+        for row in rows:
+            row["response"] = json.loads(row["response"])
+            row["provenance_ids"] = json.loads(row["provenance_ids"])
+        return rows
+
+    def entries_between(
+        self, *, since: datetime | None = None, until: datetime | None = None, client: str | None = None,
+        limit: int = 5_000,
+    ) -> list[dict[str, Any]]:
+        """Calls in `[since, until]` (UTC), oldest first, optionally from one
+        client; `response` and `provenance_ids` decoded. `limit` bounds what one
+        validation reads."""
+        query, params = "SELECT * FROM agent_calls WHERE 1=1", []
+        if since is not None:
+            query += " AND called_at >= ?"
+            params.append(since.astimezone(UTC).isoformat())
+        if until is not None:
+            query += " AND called_at <= ?"
+            params.append(until.astimezone(UTC).isoformat())
+        if client is not None:
+            query += " AND client = ?"
+            params.append(client)
+        query += " ORDER BY id ASC LIMIT ?"
         params.append(limit)
         with self._lock:
             cursor = self._connection.execute(query, params)

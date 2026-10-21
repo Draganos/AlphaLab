@@ -42,6 +42,11 @@ _UNSAFE = re.compile(
 _WHITESPACE = re.compile(r"\s+")
 
 
+def has_unsafe_characters(text: str) -> bool:
+    """True if `text` holds control, zero-width or bidirectional-override characters."""
+    return _UNSAFE.search(text) is not None
+
+
 def clean_text(text: str) -> str:
     """Remove unsafe characters and flatten whitespace (so a value cannot fake
     line structure such as a new "system:" line)."""

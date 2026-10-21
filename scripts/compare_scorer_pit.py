@@ -203,8 +203,13 @@ def compare_backtests(engine: Engine, settings: Settings, runner: Callable = _ru
             "metrics": deltas,
             "trades_before": before["trades"],
             "trades_after": after["trades"],
-            "rebalances_with_different_selection": sum(
-                1 for old, new in zip(before["selections"], after["selections"], strict=False) if old != new
+            # holdings: which names were chosen; ranking: the order of the chosen names (it only
+            # matters for the portfolio when it changes who is selected or, for score weighting, how much)
+            "rebalances_with_different_holdings": sum(
+                1 for (_, a), (_, b) in zip(before["selections"], after["selections"], strict=False) if set(a) != set(b)
+            ),
+            "rebalances_with_different_ranking": sum(
+                1 for (_, a), (_, b) in zip(before["selections"], after["selections"], strict=False) if a != b
             ),
             "rebalances": len(after["selections"]),
         })
