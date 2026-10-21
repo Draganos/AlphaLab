@@ -6049,3 +6049,42 @@ normalises to the same internally), with an end-to-end regression test.
 ranking changes (their order): with 10 positions out of 10 candidates the two methods can
 rank differently yet hold the same portfolio, and counting that as a changed selection
 would overstate the effect.
+
+## 68. ResearchNote and its validator, Phase 9 PR C
+
+The roadmap's last Phase 9 item and a prerequisite of Phase 10: an agent's written
+note may only cite evidence it was actually shown. `alpha_lab/agent_interface/
+research_note.py` defines the note and the check; `scripts/validate_research_note.py`
+runs it from the command line (exit 0 valid, 1 rejected, 2 unreadable).
+
+**The note** (`ResearchNote`, strict: unknown fields rejected). A ticker, an optional
+`as_of` (none means a live note), a summary, 1-30 claims, the data freshness the agent
+states, and limitations. Each claim has text, 1-10 typed citations (`provenance` or
+`evidence` plus an id) and optional quotes (an evidence id and the figure the claim
+states). There is deliberately no score, rating, ranking or recommendation field: the
+note is research prose with citations, and anything that acts on it (Phase 10) applies
+its own hard rules.
+
+**The check reads the call log (§65), not the research database.** The log holds the
+exact responses the agent received, so "served" is a fact, not an inference.
+- *Citations.* An id counts as served only if a successful logged call returned it for
+  the note's own **ticker and as-of date** (a live note and a note for a past date use
+  different calls; a `compare` response serves each row's ids to that row's ticker). A
+  citation that fails is `never_served`, or `served_for_other_scope` when the id
+  was served for another ticker/date (saying which), or `wrong_kind`. Only the page the
+  agent actually requested was served: ids on an unread page of `list_evidence` are not.
+- *Quotes.* The quoted figure must equal the served value (numbers to relative 1e-9);
+  `value_mismatch` otherwise, and `value_not_served` when the id was served without its
+  value (for instance inside an AI rating's supporting-evidence list).
+- *Freshness.* The stated `price_data_through` and `price_status` must equal the latest
+  freshness served for that ticker and date (`freshness_mismatch`, or
+  `freshness_not_served` if none was).
+- *Text.* Control, zero-width and bidirectional characters in the note are rejected.
+- *Window.* `--since/--until/--client` restrict which calls count, so a note can be held
+  to one session; failed calls serve nothing.
+
+It checks provenance, not truth: a note can still misread what served evidence means. What it
+guarantees is that nothing in it was invented, taken from another security or date, or
+never requested, and that it states the freshness it was given. The log is opened
+read-only for validation (`CallLog(read_only=True)`; `entries_between` filters by time and
+client).

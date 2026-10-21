@@ -9,7 +9,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conviction_fixtures import EVALUATION, _alignment, _research, _state
+from agent_fixtures import rich_state as _rich_state
+from conviction_fixtures import EVALUATION, _state
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -28,8 +29,6 @@ from alpha_lab.agent_interface.safety import MAX_RESPONSE_BYTES, collect_provena
 from alpha_lab.config import load_settings
 from alpha_lab.database import create_schema, make_engine
 from alpha_lab.database.models import Price, Security
-from alpha_lab.macro.regime import MacroRegime
-from alpha_lab.research_state import ResearchState
 
 TODAY = EVALUATION + timedelta(days=1)
 PACKAGE = Path(__file__).resolve().parents[1] / "alpha_lab" / "agent_interface"
@@ -66,23 +65,6 @@ def ctx(db_url, settings):
     engine = make_readonly_engine(db_url)
     yield AgentContext(engine=engine, settings=settings, today=lambda: TODAY)
     engine.dispose()
-
-
-def _rich_state(ticker="TST", evaluation_date=EVALUATION, universe_basis=None, **research_kwargs) -> ResearchState:
-    state = _state(_research(**research_kwargs), alignment=_alignment(MacroRegime.RISK_OFF), evaluation_date=evaluation_date)
-    from alpha_lab.conviction import assess_conviction
-
-    assessment = assess_conviction(state, coverage=load_settings().coverage, stale_price_days=5)
-    value = {"score": 73.2, "percentile": 0.8}
-    if universe_basis:
-        value["universe"] = {"basis": universe_basis, "size": 12, "snapshot_recorded_at": None}
-    scored = state.deterministic_score.model_copy(update={"value": value})
-    return state.model_copy(update={
-        "deterministic_score": scored,
-        "ticker": ticker,
-        "conflicts": [c.model_dump(mode="json") for c in assessment.conflicts],
-        "conviction": assessment.model_dump(mode="json"),
-    })
 
 
 @pytest.fixture
