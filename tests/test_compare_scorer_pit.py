@@ -84,13 +84,14 @@ def test_saved_backtests_are_rerun_under_both_methods_and_failures_are_reported_
 
         leaks = historical.price_history_as_known.__name__ == "_previous_price_selection"
         return {"metrics": {"total_return": 0.2 if leaks else 0.1, "label": "x"}, "trades": 5 if leaks else 4,
-                "selections": [("2024-07-01", ["A"] if leaks else ["B"])]}
+                "selections": [("2024-07-01", ["A"] if leaks else ["B"]), ("2024-08-01", ["A", "B"] if leaks else ["B", "A"])]}
 
     [compared] = tool.compare_backtests(engine, load_settings(), runner=fake_runner)
     assert compared["metrics"]["total_return"] == {"before": 0.2, "after": 0.1, "change": compared["metrics"]["total_return"]["change"]}
     assert abs(compared["metrics"]["total_return"]["change"] + 0.1) < 1e-9 and "label" not in compared["metrics"]
     assert (compared["trades_before"], compared["trades_after"]) == (5, 4)
-    assert compared["rebalances_with_different_selection"] == 1
+    assert compared["rebalances_with_different_holdings"] == 1  # July swapped A for B; August only reordered
+    assert compared["rebalances_with_different_ranking"] == 2 and compared["rebalances"] == 2
     engine.dispose()
 
 

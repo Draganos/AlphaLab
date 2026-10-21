@@ -45,7 +45,14 @@ def load_price_frames(engine: Engine, tickers: list[str] | tuple[str, ...], star
                 session, Price.ticker == ticker, Price.date >= start, Price.date <= end
             )
             if rows:
-                frames[ticker] = pd.DataFrame([adjusted_price_values(row) for row in rows]).set_index("date")
+                frame = pd.DataFrame([adjusted_price_values(row) for row in rows]).set_index("date")
+                # `Price.date` is a plain `date`, which pandas keeps as an object
+                # index; `run_database_backtest` (and the benchmark curve built
+                # from this frame) need a DatetimeIndex. Without this every
+                # database-backed run raised `AttributeError: 'datetime.date'
+                # object has no attribute 'date'`.
+                frame.index = pd.to_datetime(frame.index)
+                frames[ticker] = frame
     return frames
 
 

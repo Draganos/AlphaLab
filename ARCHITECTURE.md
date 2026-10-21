@@ -6037,3 +6037,15 @@ UPDATE/DELETE) stores the whole tracked set each time it changes;
 Not covered: securities' fundamentals, ethics and other per-security inputs follow
 their own point-in-time rules; this change only fixes the peer set and (in §66) the
 price versions.
+
+**Backtest runner fix (found while measuring §66/§67).** `run_database_backtest`, shared
+by `scripts/run_backtest.py` and the dashboard Backtests/Experiments pages, raised
+`AttributeError: 'datetime.date' object has no attribute 'date'` on every run: its price
+frames kept `Price.date` as a plain-`date` object index and the code called `.date()` on
+the benchmark curve's first label. No test exercised that path (the engine tests build
+their own frames). `load_price_frames` now returns a `DatetimeIndex` (the engine
+normalises to the same internally), with an end-to-end regression test.
+`compare_scorer_pit.py` now reports holdings changes (which names) separately from
+ranking changes (their order): with 10 positions out of 10 candidates the two methods can
+rank differently yet hold the same portfolio, and counting that as a changed selection
+would overstate the effect.
