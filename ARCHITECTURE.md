@@ -5996,3 +5996,44 @@ version held on each; the revision tests fail on the previous behaviour.
 today's tracked set for a past date (no membership history exists yet), so the
 agent interface keeps withholding the historical `deterministic_score` until
 that is fixed (next).
+
+## 67. Dated tracked-universe history
+
+The scorer's percentiles are ranked against a peer universe, but "tracked"
+(`Security.is_tracked`) is one current flag, so a past date's score was ranked
+against today's set and moved whenever a ticker was added or removed. New
+append-only table `universe_snapshots` (model `UniverseSnapshot`, triggers reject
+UPDATE/DELETE) stores the whole tracked set each time it changes;
+`alpha_lab/universe.py` records and reads it.
+
+- **Recording.** `record_universe_snapshot(engine, reason)` writes a row only when
+  the set differs from the latest snapshot. It is called after every code path
+  that changes the flag: ingestion (a newly tracked ticker), `adopt_current_
+  research_tickers`, `set_tracked_tickers`, `manage_universe remove`, and
+  `create_schema` (an initial snapshot for a database that has a tracked
+  universe and no history). A test scans the source and fails if any other file
+  writes `is_tracked`, so a new writer cannot forget.
+- **Lookup.** `tracked_universe_as_of(engine, date)`: today or later -> the current
+  flag (`live`); a past date -> the latest snapshot recorded by the end of that day
+  (`snapshot`); a past date before the first snapshot -> today's set, labelled
+  `current_fallback`. Nothing before the first snapshot is reconstructed: membership
+  history starts when recording began, and a database without the table reports the
+  fallback.
+- **Use.** `HistoricalScoringService.score_universe_as_of(date)` with no tickers and
+  `get_research_state` rank against the universe of the date. An explicit ticker
+  list (every backtest names its universe) is scored as given. The state's
+  `deterministic_score` value carries `universe: {basis, size,
+  snapshot_recorded_at}`, which is part of its provenance hash.
+- **Agent interface.** A past `deterministic_score` is returned (with provenance)
+  when its universe basis is `snapshot`, because prices are now read as held on the
+  date (§66) and the peers are a recorded set; with `current_fallback` or no label it
+  stays withheld as `NOT_POINT_IN_TIME` with the reason. `compare` ranks against the
+  universe of the date. In practice a database becomes eligible only for dates after
+  its first snapshot, so a past date works from the day after snapshots begin.
+- **Measuring.** `scripts/compare_scorer_pit.py` also reports the snapshot-history
+  state and, for dates that have a recorded universe different from today's, how
+  many scores and top-N picks change.
+
+Not covered: securities' fundamentals, ethics and other per-security inputs follow
+their own point-in-time rules; this change only fixes the peer set and (in §66) the
+price versions.

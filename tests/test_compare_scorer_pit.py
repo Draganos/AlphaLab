@@ -92,3 +92,27 @@ def test_saved_backtests_are_rerun_under_both_methods_and_failures_are_reported_
     assert (compared["trades_before"], compared["trades_after"]) == (5, 4)
     assert compared["rebalances_with_different_selection"] == 1
     engine.dispose()
+
+
+def test_the_universe_effect_is_reported_only_where_membership_history_exists():
+    from alpha_lab.database.models import UniverseSnapshot
+
+    tool, engine = _tool(), _engine(revise=False)
+    settings = load_settings()
+    assert tool.universe_history(engine)["snapshots"] == 0
+    days = [date(2024, 12, 5), date(2024, 12, 20), date(2025, 1, 3)]  # price data runs to 31 Dec
+    before_history = tool.compare_universe(engine, settings, days, 2)
+    assert [row["basis"] for row in before_history] == ["current_fallback"] * 3
+    assert not any(row["compared"] for row in before_history)
+
+    with Session(engine) as session:  # C and D joined later; A and B were the universe at first
+        session.add(UniverseSnapshot(recorded_at=datetime(2024, 12, 10, tzinfo=UTC), tickers=["A", "B"], size=2, reason="t"))
+        session.add(UniverseSnapshot(recorded_at=datetime(2025, 1, 2, tzinfo=UTC), tickers=["A", "B", "C", "D"], size=4, reason="t"))
+        session.commit()
+    assert tool.universe_history(engine)["snapshots"] == 2
+    early, middle, late = tool.compare_universe(engine, settings, days, 2)
+    assert early["basis"] == "current_fallback" and early["compared"] is False  # before the first snapshot
+    assert middle["compared"] is True and middle["recorded_size"] == 2 and middle["today_size"] == 4
+    assert middle["scores_changed"] > 0  # ranking against two peers instead of four moves the percentiles
+    assert late["compared"] is False and late["same_as_today"] is True
+    engine.dispose()

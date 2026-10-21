@@ -68,12 +68,15 @@ def ctx(db_url, settings):
     engine.dispose()
 
 
-def _rich_state(ticker="TST", evaluation_date=EVALUATION, **research_kwargs) -> ResearchState:
+def _rich_state(ticker="TST", evaluation_date=EVALUATION, universe_basis=None, **research_kwargs) -> ResearchState:
     state = _state(_research(**research_kwargs), alignment=_alignment(MacroRegime.RISK_OFF), evaluation_date=evaluation_date)
     from alpha_lab.conviction import assess_conviction
 
     assessment = assess_conviction(state, coverage=load_settings().coverage, stale_price_days=5)
-    scored = state.deterministic_score.model_copy(update={"value": {"score": 73.2, "percentile": 0.8}})
+    value = {"score": 73.2, "percentile": 0.8}
+    if universe_basis:
+        value["universe"] = {"basis": universe_basis, "size": 12, "snapshot_recorded_at": None}
+    scored = state.deterministic_score.model_copy(update={"value": value})
     return state.model_copy(update={
         "deterministic_score": scored,
         "ticker": ticker,
@@ -552,15 +555,15 @@ def test_compare_company_names_are_point_in_time_or_labelled_and_wrapped(ctx, ri
     assert rows[0]["company"]["text"] == "Test"  # the research's name, not the catalogue's "Test Co"
 
 
-def test_historical_answers_disclose_the_scorer_has_no_ingestion_bound(ctx, rich):
+def test_historical_answers_say_why_the_score_is_withheld(ctx, rich):
     historical = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})
     assert historical["freshness"]["historical_request"] is True
-    assert any("no ingestion-time bound" in note for note in historical["limitations"])
-    assert any("no ingestion-time bound" in note for note in call_tool(
+    assert any("no record of which securities were tracked" in note for note in historical["limitations"])
+    assert any("no record of which securities were tracked" in note for note in call_tool(
         ctx, "compare", {"tickers": ["TST", "UNT"], "as_of": "2026-09-01"})["limitations"])
     today = call_tool(ctx, "get_research_summary", {"ticker": "TST"})
     assert today["freshness"]["historical_request"] is False
-    assert not any("ingestion-time bound" in note for note in today["limitations"])
+    assert not any("tracked on that date" in note or "recorded on that date" in note for note in today["limitations"])
 
 
 def test_short_provider_metadata_and_analyst_firm_values_are_untrusted(ctx, monkeypatch):
@@ -616,9 +619,9 @@ def test_the_composite_score_carries_the_provenance_the_conviction_layer_cites(c
     assert row["deterministic_score"]["provenance_id"] in call_tool(ctx, "compare", {"tickers": ["TST", "UNT"]})["provenance_ids"]
 
 
-def test_the_historical_note_also_discloses_the_peer_universe(ctx, rich):
+def test_the_historical_note_says_the_peers_would_be_todays_set(ctx, rich):
     notes = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": "2026-09-01"})["limitations"]
-    assert any("today's tracked universe" in note for note in notes)
+    assert any("would be today's set" in note for note in notes)
 
 
 # --- historical scorer contract (reported after merge) ----------------------------
@@ -643,12 +646,12 @@ def test_a_historical_request_never_returns_the_scorer_number_on_any_route(ctx, 
     assert row["status"] == "NOT_POINT_IN_TIME" and row["provenance_id"] is None and row["observed_at"] is None
     domain = routes["domain"]["data"]
     assert domain["status"] == "NOT_POINT_IN_TIME" and domain["value"] is None and domain["provenance_id"] is None
-    assert "not point-in-time" in domain["detail"]
+    assert "today's set" in domain["detail"]
     for compared in routes["compare"]["data"]["rows"]:
         scored = next(r for r in compared["domains"] if r["domain"] == "deterministic_score")
         assert scored["status"] == "NOT_POINT_IN_TIME" and scored["provenance_id"] is None
     for envelope in routes.values():
-        assert any("no ingestion-time bound" in note and "NOT_POINT_IN_TIME" in note for note in envelope["limitations"])
+        assert any("NOT_POINT_IN_TIME" in note and "no record of which securities were tracked" in note for note in envelope["limitations"])
 
 
 def test_the_current_date_keeps_the_scorer_output_and_its_provenance(ctx, rich):
@@ -678,3 +681,68 @@ def test_price_freshness_flags_do_not_claim_the_score_is_point_in_time(ctx, rich
 def test_other_domains_are_unchanged_for_a_past_date(ctx, rich):
     domain = call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "technicals", "as_of": "2026-09-01"})["data"]
     assert domain["status"] == "FULL" and domain["provenance_id"] == "prov-technicals"
+
+
+# --- the score returns once its universe is a recorded snapshot ---------------------
+
+def _with_universe(monkeypatch, basis):
+    def fake(engine, settings, ticker, evaluation_date=None, **kwargs):
+        return _rich_state(ticker=ticker, evaluation_date=evaluation_date or EVALUATION, universe_basis=basis)
+
+    monkeypatch.setattr(tools_module, "get_research_state", fake)
+    monkeypatch.setattr(
+        tools_module, "HistoricalScoringService",
+        lambda engine, settings: type("S", (), {"score_universe_as_of": lambda self, *a, **k: []})(),
+    )
+
+
+def test_a_past_score_ranked_against_a_recorded_universe_snapshot_is_returned_with_provenance(ctx, monkeypatch):
+    _with_universe(monkeypatch, "snapshot")
+    past = "2026-09-01"
+    domain = call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "deterministic_score", "as_of": past})
+    assert domain["data"]["status"] == "FULL" and domain["data"]["provenance_id"] == "prov-deterministic_score"
+    assert domain["data"]["value"]["universe"]["basis"] == "snapshot"
+    summary = call_tool(ctx, "get_research_summary", {"ticker": "TST", "as_of": past})
+    row = next(r for r in summary["data"]["domains"] if r["domain"] == "deterministic_score")
+    assert row["status"] == "FULL" and row["provenance_id"] == "prov-deterministic_score"
+    assert any("recorded on that date" in note for note in summary["limitations"])
+    assert not any("is withheld" in note for note in summary["limitations"])
+    compared = call_tool(ctx, "compare", {"tickers": ["TST", "UNT"], "domains": ["deterministic_score"], "as_of": past})
+    assert all(r["domains"][0]["status"] == "FULL" for r in compared["data"]["rows"])
+
+
+def test_a_past_score_with_no_universe_record_or_a_fallback_universe_stays_withheld(ctx, monkeypatch):
+    for basis in (None, "current_fallback"):
+        _with_universe(monkeypatch, basis)
+        domain = call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "deterministic_score", "as_of": "2026-09-01"})
+        assert domain["data"]["status"] == "NOT_POINT_IN_TIME" and domain["data"]["value"] is None, basis
+
+
+def test_a_live_score_is_untouched_whatever_its_universe_label(ctx, monkeypatch):
+    _with_universe(monkeypatch, "live")
+    domain = call_tool(ctx, "get_domain", {"ticker": "TST", "domain": "deterministic_score"})
+    assert domain["data"]["status"] == "FULL" and domain["data"]["value"]["score"] == 73.2
+
+
+def test_compare_ranks_against_the_universe_on_the_date_not_todays_flag(db_url, settings, monkeypatch):
+    seen = {}
+
+    class Recorder:
+        def __init__(self, engine, settings):
+            pass
+
+        def score_universe_as_of(self, evaluation_date, tickers=None, **kwargs):
+            seen["tickers"] = list(tickers)
+            return []
+
+    monkeypatch.setattr(tools_module, "HistoricalScoringService", Recorder)
+    monkeypatch.setattr(tools_module, "get_research_state", lambda *a, **k: _rich_state(universe_basis="snapshot"))
+    monkeypatch.setattr(
+        tools_module, "tracked_universe_as_of",
+        lambda engine, as_of, today=None: type("U", (), {"tickers": ("OLD1", "OLD2")})(),
+    )
+    engine = make_readonly_engine(db_url)
+    context = AgentContext(engine, settings, lambda: TODAY)
+    assert call_tool(context, "compare", {"tickers": ["TST", "UNT"], "as_of": "2026-09-01"})["ok"]
+    assert seen["tickers"] == ["OLD1", "OLD2", "TST", "UNT"]  # the snapshot's members plus the compared tickers
+    engine.dispose()

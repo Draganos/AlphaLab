@@ -18,6 +18,7 @@ from alpha_lab.factors import calculate_factors, percentile_scores
 from alpha_lab.factors.engine import FACTOR_VERSION
 from alpha_lab.portfolio import Candidate
 from alpha_lab.strategy.scoring import composite_score
+from alpha_lab.universe import tracked_universe_as_of
 
 
 @dataclass(frozen=True)
@@ -54,24 +55,30 @@ class HistoricalScoringService:
                              *, min_score: float | None = None,
                              minimum_coverage: float | None = None) -> list[HistoricalScore]:
         """`tickers=None` (the live screener's own call, via `MarketScreener
-        Service.build_live_records`) scores the tracked research universe
-        (`Security.is_tracked`) -- never `scripts/load_universe.py`'s
+        Service.build_live_records`) scores the tracked research universe on
+        the evaluation date (`Security.is_tracked` for a live date; the
+        recorded `UniverseSnapshot` for a past one) -- never `scripts/load_universe.py`'s
         broader untracked catalog. An explicit `tickers` list (the
         backtester's own call, from its named CSV universe -- see `alpha_
         lab.research.universe.load_universe`) is scored exactly as given,
         completely independent of tracking status: a backtest study may
         legitimately name a ticker AlphaLab never marked as a live
         research candidate."""
-        symbols = {ticker.upper() for ticker in tickers} if tickers else None
+        # `tickers=None`: the tracked universe *as it stood on the evaluation
+        # date* (today's flag for a live date, a recorded snapshot for a past
+        # one), so percentiles are not ranked against peers added or removed
+        # since. See `alpha_lab.universe`.
+        symbols = (
+            {ticker.upper() for ticker in tickers}
+            if tickers
+            else set(tracked_universe_as_of(self.engine, evaluation_date).tickers)
+        )
         raw: dict[str, dict[str, float]] = {}
         metadata: dict[str, tuple[str | None, str | None, str | None]] = {}
         with Session(self.engine) as session:
-            statement = select(Security).order_by(Security.ticker)
-            if symbols is None:
-                statement = statement.where(Security.is_tracked.is_(True))
-            securities = session.scalars(statement).all()
+            securities = session.scalars(select(Security).order_by(Security.ticker)).all()
             for security in securities:
-                if symbols is not None and security.ticker not in symbols:
+                if security.ticker not in symbols:
                     continue
                 # The version of each bar AlphaLab held on the evaluation date: a
                 # later revision (a restated adjusted close) must not leak into

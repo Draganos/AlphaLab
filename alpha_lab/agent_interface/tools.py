@@ -57,6 +57,7 @@ from alpha_lab.research_state_ai_evidence import (
     build_evidence_payload_from_research_state,
 )
 from alpha_lab.strategy import HistoricalScoringService
+from alpha_lab.universe import tracked_universe_as_of
 
 logger = logging.getLogger(__name__)
 
@@ -177,15 +178,25 @@ def _require_security(ctx: AgentContext, ticker: str) -> tuple[str, Security]:
 NOT_POINT_IN_TIME = "NOT_POINT_IN_TIME"
 # Short on purpose (under the free-text length): it is our own text, and the full
 # explanation is HISTORICAL_SCORE_NOTE in `limitations`.
-SCORER_WITHHELD_DETAIL = "Withheld: scorer is not point-in-time (no ingestion bound; today's peer universe)."
+SCORER_WITHHELD_DETAIL = "Withheld: no tracked-universe record for that date, so peers would be today's set."
+
+
+def _scorer_is_point_in_time(field: ResearchField) -> bool:
+    """The percentile scorer reads prices as held on the date and ranks against
+    the tracked universe on the date. The universe part is only a real record
+    when a snapshot recorded by that date defined it (`alpha_lab.universe`)."""
+    universe = field.value.get("universe") if isinstance(field.value, dict) else None
+    return isinstance(universe, dict) and universe.get("basis") == "snapshot"
 
 
 def _withhold_historical_scorer(state: ResearchState) -> ResearchState:
-    """The `deterministic_score` field is the percentile scorer's output
-    (`HistoricalScoringService`), which is not point-in-time yet (two
-    documented gaps, see SCORER_WITHHELD_DETAIL), so a past date never
-    returns its number. Done once, here, so every route (summary, get_domain,
-    compare) agrees. The scorer itself is unchanged."""
+    """For a past date, keep the `deterministic_score` field only when its peer
+    universe is a recorded snapshot; otherwise replace it, in one place, so
+    every route (summary, get_domain, compare) agrees. A field with no value
+    asserts nothing and is left alone. The scorer itself is unchanged."""
+    field = state.deterministic_score
+    if field.value is None or _scorer_is_point_in_time(field):
+        return state
     withheld = ResearchField(status=NOT_POINT_IN_TIME, detail=SCORER_WITHHELD_DETAIL)
     return state.model_copy(update={"deterministic_score": withheld})
 
@@ -225,17 +236,29 @@ def _price_freshness(ctx: AgentContext, symbol: str, evaluation_date: date) -> d
 
 HISTORICAL_SCORE_NOTE = (
     "Historical request: the percentile-ranked deterministic_score domain is withheld "
-    f"(status {NOT_POINT_IN_TIME}) because AlphaLab's scorer has no ingestion-time bound on price bars and "
-    "ranks against today's tracked universe. The composite shown under deterministic_score in summaries and "
-    "comparisons is the research snapshot persisted by that date, and the price-freshness block applies the "
-    "ingestion bound."
+    f"(status {NOT_POINT_IN_TIME}) because no record of which securities were tracked on that date exists "
+    "(membership history only starts when snapshots began being recorded), so its peers would be today's set. "
+    "The composite shown under deterministic_score in summaries and comparisons is the research snapshot "
+    "persisted by that date, and the price-freshness block applies the ingestion bound."
 )
+HISTORICAL_SCORE_KEPT_NOTE = (
+    "Historical request: deterministic_score reads prices as AlphaLab held them on that date and ranks against "
+    "the tracked universe recorded on that date (see its universe field)."
+)
+
+
+def _score_note(state: ResearchState) -> str | None:
+    """The point-in-time note that matches what this state's score field is."""
+    field = state.deterministic_score
+    if field.status == NOT_POINT_IN_TIME:
+        return HISTORICAL_SCORE_NOTE
+    return HISTORICAL_SCORE_KEPT_NOTE if field.value is not None else None
 
 
 def _limitations(state: ResearchState, security: Security, freshness: dict[str, Any]) -> list[str]:
     notes = [CONVICTION_CAVEAT]
-    if freshness.get("historical_request"):
-        notes.append(HISTORICAL_SCORE_NOTE)
+    if freshness.get("historical_request") and (note := _score_note(state)):
+        notes.append(note)
     if state.stock_research is None:
         notes.append("No research is computed for this security for the requested date.")
     if freshness["price_status"] == "stale":
@@ -587,16 +610,14 @@ def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
     evaluation_date = _resolve_as_of(ctx, args.as_of)
     symbols = args.tickers  # already normalised and distinct (see CompareArgs)
     securities = {symbol: _require_security(ctx, symbol)[1] for symbol in symbols}
-    with Session(ctx.engine) as session:
-        tracked = list(session.scalars(select(Security.ticker).where(Security.is_tracked.is_(True))))
-    # Percentile ranking needs the universe; score it once, not once per ticker.
+    # Percentile ranking needs the universe as it was on the date; score it
+    # once, not once per ticker.
+    tracked = tracked_universe_as_of(ctx.engine, evaluation_date, today=ctx.today()).tickers
     universe_scores = HistoricalScoringService(ctx.engine, ctx.settings).score_universe_as_of(
         evaluation_date, tickers=sorted(set(tracked) | set(symbols)), min_score=0, minimum_coverage=0
     )
     names = tuple(args.domains) if args.domains else ()
     rows, notes = [], [CONVICTION_CAVEAT]
-    if evaluation_date < ctx.today():
-        notes.append(HISTORICAL_SCORE_NOTE)
     for symbol in symbols:
         state = _state(ctx, symbol, evaluation_date, universe_scores=universe_scores)
         freshness = _price_freshness(ctx, symbol, evaluation_date)
@@ -623,6 +644,8 @@ def compare(ctx: AgentContext, args: CompareArgs) -> ToolResult:
         rows.append(row)
         if freshness["price_status"] != "fresh":
             notes.append(f"{symbol}: price data is {freshness['price_status']}.")
+        if evaluation_date < ctx.today() and (note := _score_note(state)) and note not in notes:
+            notes.append(note)
     return ToolResult(
         data={"count": len(rows), "rows": rows},
         requested_as_of=args.as_of, freshness={"evaluation_date": evaluation_date}, limitations=notes,

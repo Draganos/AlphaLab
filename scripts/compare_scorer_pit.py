@@ -5,7 +5,9 @@ Re-scores the tracked universe on a grid of past dates twice -- with the
 previous price selection (the newest stored version of every bar, whatever the
 date) and with the corrected one (the version AlphaLab held on that date) --
 and reports how many scores moved, by how much, and whether rankings and the
-top-N changed. With `--backtests` it also re-runs every backtest saved in the
+top-N changed. It also reports the effect of ranking against the tracked
+universe recorded for each date instead of today's set (only dates after the
+first recorded snapshot can be compared; earlier dates have no history). With `--backtests` it also re-runs every backtest saved in the
 `backtest_runs` table under both selections and compares their metrics.
 
     python scripts/compare_scorer_pit.py [--db sqlite:///data/alpha_lab.db]
@@ -29,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 from sqlalchemy import Engine, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from alpha_lab.backtest.database_runner import run_database_backtest
@@ -39,6 +42,7 @@ from alpha_lab.database.queries import latest_price_per_date_statement
 from alpha_lab.research import load_universe
 from alpha_lab.strategy import HistoricalScoringService
 from alpha_lab.strategy import historical as historical_module
+from alpha_lab.universe import BASIS_SNAPSHOT, tracked_universe_as_of
 
 
 def _previous_price_selection(session, as_of, *conditions, live=None):
@@ -122,6 +126,46 @@ def compare_scores(engine: Engine, settings: Settings, tickers: list[str], days:
     }
 
 
+def universe_history(engine: Engine) -> dict:
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT COUNT(*), MIN(recorded_at), MAX(recorded_at) FROM universe_snapshots")
+            ).one()
+    except OperationalError:
+        return {"snapshots": 0, "note": "no universe_snapshots table: run any AlphaLab script once to create it"}
+    return {"snapshots": row[0], "first_recorded_at": row[1], "last_recorded_at": row[2]}
+
+
+def compare_universe(engine: Engine, settings: Settings, days: list[date], top_n: int) -> list[dict]:
+    """For each date with a recorded membership that differs from today's: the
+    default (tickers=None) scorer ranks against the recorded universe; the
+    previous behaviour ranked against today's set. Dates before the first
+    snapshot have no history and are reported as such, never reconstructed."""
+    current = tracked_tickers(engine)
+    rows = []
+    for day in days:
+        universe = tracked_universe_as_of(engine, day)
+        if universe.basis != BASIS_SNAPSHOT:
+            rows.append({"date": day.isoformat(), "basis": universe.basis, "compared": False})
+            continue
+        recorded = list(universe.tickers)
+        if set(recorded) == set(current):
+            rows.append({"date": day.isoformat(), "basis": universe.basis, "compared": False, "same_as_today": True})
+            continue
+        right, wrong = _scores(engine, settings, recorded, day), _scores(engine, settings, current, day)
+        both = sorted(t for t in right if right[t] is not None and wrong.get(t) is not None)
+        diffs = {t: abs(wrong[t] - right[t]) for t in both}
+        rows.append({
+            "date": day.isoformat(), "basis": universe.basis, "compared": True,
+            "recorded_size": len(recorded), "today_size": len(current),
+            "scores_changed": sum(1 for d in diffs.values() if d > 1e-9),
+            "max_abs_score_change": round(max(diffs.values(), default=0.0), 6),
+            "top_n_changed": len(_top_n(right, both, top_n) - _top_n(wrong, both, top_n)),
+        })
+    return rows
+
+
 def _run_backtest(engine: Engine, settings: Settings, parameters: dict) -> dict:
     universe = load_universe(parameters["universe"])
     result, _ = run_database_backtest(
@@ -186,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
             "scores": compare_scores(
                 engine, settings, tracked_tickers(engine), score_grid(options.start, options.end, options.step_days),
                 options.top_n,
+            ),
+            "universe_history": universe_history(engine),
+            "universe_effect": compare_universe(
+                engine, settings, score_grid(options.start, options.end, options.step_days), options.top_n
             ),
         }
         if options.backtests:

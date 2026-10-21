@@ -12,6 +12,7 @@ from alpha_lab.database.models import Fundamental, Price, Security
 from alpha_lab.database.session import session_scope
 from alpha_lab.providers.base import MarketDataProvider
 from alpha_lab.ingestion.universe import _canonical_exchange
+from alpha_lab.universe import record_universe_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ class IngestionService:
                         }:
                             continue
                         setattr(security, key, value)
+            newly_tracked = mark_tracked and not security.is_tracked
             if mark_tracked:
                 security.is_tracked = True
             security.metadata_updated_at = datetime.now(UTC)
@@ -181,6 +183,8 @@ class IngestionService:
                             **values,
                         )
                     )
+        if newly_tracked:
+            record_universe_snapshot(self.engine, "ingest")
         if skipped_prices or skipped_fundamentals:
             # A row with no usable date cannot be stored honestly; skipping it
             # (and saying so) beats aborting the ticker -- and rolling back

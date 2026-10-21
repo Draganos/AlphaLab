@@ -166,16 +166,23 @@ def create_schema(engine: Engine) -> None:
                     "ON company_documents (content_hash) WHERE content_hash IS NOT NULL"
                 )
             )
-            # The conviction audit table is append-only by construction, not
-            # by convention: any UPDATE or DELETE aborts.
-            for action in ("UPDATE", "DELETE"):
-                connection.execute(
-                    text(
-                        f"CREATE TRIGGER IF NOT EXISTS conviction_assessments_no_{action.lower()} "
-                        f"BEFORE {action} ON conviction_assessments "
-                        "BEGIN SELECT RAISE(ABORT, 'conviction_assessments is append-only'); END"
+            # The conviction audit table and the tracked-universe history are
+            # append-only by construction, not by convention: any UPDATE or
+            # DELETE aborts.
+            for table in ("conviction_assessments", "universe_snapshots"):
+                for action in ("UPDATE", "DELETE"):
+                    connection.execute(
+                        text(
+                            f"CREATE TRIGGER IF NOT EXISTS {table}_no_{action.lower()} "
+                            f"BEFORE {action} ON {table} "
+                            f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"
+                        )
                     )
-                )
+    # Membership history starts here for a database that has none: the first
+    # snapshot is the tracked set as of this migration, never a guess at the past.
+    from alpha_lab.universe import record_universe_snapshot
+
+    record_universe_snapshot(engine, "initial")
 
 
 def _migrate_legacy_fundamentals(engine: Engine) -> None:

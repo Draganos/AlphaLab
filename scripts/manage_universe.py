@@ -59,6 +59,7 @@ from alpha_lab.providers.sec_filings import SECFilingDocumentProvider  # noqa: E
 from alpha_lab.research import ResearchService  # noqa: E402
 from alpha_lab.research.analyst_events import AnalystEventsService  # noqa: E402
 from alpha_lab.research.security_type import SecurityType, normalize_security_type  # noqa: E402
+from alpha_lab.universe import record_universe_snapshot  # noqa: E402
 from alpha_lab.research.supplemental_service import SupplementalResearchService  # noqa: E402
 from alpha_lab.screener import MarketScreenerService  # noqa: E402
 from alpha_lab.utils.logging import configure_logging  # noqa: E402
@@ -279,6 +280,7 @@ def remove_tickers(engine, settings, tickers: list[str]) -> bool:
             security.is_tracked = False
             print(f"{ticker}: removed from the tracked universe (history preserved)")
         session.commit()
+    record_universe_snapshot(engine, "remove")
 
     print()
     print("Rebuilding current research for the full tracked universe...")
