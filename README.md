@@ -140,7 +140,8 @@ The core suite uses in-memory or temporary SQLite databases and deterministic lo
 Run a database-backed research backtest after loading the desired symbols and benchmark:
 
 ```bash
-python scripts/load_us_data.py SPY NVDA MA AAL FTEC GDX --years 10
+python scripts/load_us_data.py NVDA MA AAL FTEC GDX --years 10
+python scripts/load_us_data.py SPY --years 10 --no-track   # the benchmark: prices only, not a research security
 python scripts/run_backtest.py --start 2023-01-01 --end 2025-12-31 --benchmark SPY --weighting equal
 ```
 

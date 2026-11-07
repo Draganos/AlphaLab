@@ -6096,3 +6096,10 @@ and the newest version (median, 95th percentile and maximum relative change of `
 `adjusted_close`, and how many bars changed only in volume). It answers why a date's score
 moved: a date moves only if a revision stored after it touches a bar in its factor window.
 Measured at 0.5 s on 1.5 million price rows.
+
+**Loading a benchmark without tracking it.** `IngestionService.ingest` tracks whatever it loads, and
+the README told users to load `SPY` with the research tickers, which put the benchmark into the
+tracked research universe (screener, percentile peers, Full Refresh, universe snapshots).
+`scripts/load_us_data.py --no-track` loads prices and company data with `mark_tracked=False`, the
+same treatment the macro proxies get. A backtest's benchmark (`SPY`, `QQQ` or `VT`) needs prices but
+is not a research candidate; the README now loads it that way.

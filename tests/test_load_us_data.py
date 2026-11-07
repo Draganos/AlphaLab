@@ -121,3 +121,38 @@ def test_ingest_universe_does_not_erase_previously_ingested_data_on_later_failur
     assert after is not None
     assert after.close == before.close
     assert count == 1
+
+
+def test_no_track_loads_prices_without_adding_to_the_tracked_universe(loader_module):
+    engine = make_engine("sqlite:///:memory:")
+    create_schema(engine)
+    service = IngestionService(_FakeProvider(), engine)
+
+    assert loader_module._ingest_universe(service, ["SPY"], years=1, track=False) is True
+    assert loader_module._ingest_universe(service, ["AAPL"], years=1) is True  # default still tracks
+    with Session(engine) as session:
+        tracked = {s.ticker: s.is_tracked for s in session.scalars(select(Security))}
+        assert session.scalar(select(func.count()).select_from(Price).where(Price.ticker == "SPY")) == 1
+    assert tracked == {"SPY": False, "AAPL": True}
+
+
+def test_the_script_cli_accepts_no_track(loader_module, monkeypatch):
+    seen = {}
+
+    class Recorder:
+        def __init__(self, provider, engine):
+            pass
+
+        def ingest(self, ticker, start, end, mark_tracked=True):
+            seen[ticker] = mark_tracked
+
+    monkeypatch.setattr(loader_module, "IngestionService", Recorder)
+    monkeypatch.setattr(loader_module, "YFinanceProvider", lambda: None)
+    monkeypatch.setattr(loader_module, "make_engine", lambda url: make_engine("sqlite:///:memory:"))
+    monkeypatch.setattr(loader_module, "create_schema", lambda engine: None)
+    monkeypatch.setattr(loader_module, "configure_logging", lambda: None)
+    monkeypatch.setattr("sys.argv", ["load_us_data.py", "SPY", "--no-track", "--years", "1"])
+    assert loader_module.main() == 0
+    monkeypatch.setattr("sys.argv", ["load_us_data.py", "AAPL", "--years", "1"])
+    assert loader_module.main() == 0
+    assert seen == {"SPY": False, "AAPL": True}
