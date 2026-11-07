@@ -6088,3 +6088,11 @@ guarantees is that nothing in it was invented, taken from another security or da
 never requested, and that it states the freshness it was given. The log is opened
 read-only for validation (`CallLog(read_only=True)`; `entries_between` filters by time and
 client).
+
+**Revision drill-down.** `scripts/compare_scorer_pit.py` also prints `revision_detail`: how many
+bars have more than one stored version, which tickers carry them, the range of bar dates
+touched, the days the later versions were stored, and the size of the change between the first
+and the newest version (median, 95th percentile and maximum relative change of `close` and
+`adjusted_close`, and how many bars changed only in volume). It answers why a date's score
+moved: a date moves only if a revision stored after it touches a bar in its factor window.
+Measured at 0.5 s on 1.5 million price rows.
