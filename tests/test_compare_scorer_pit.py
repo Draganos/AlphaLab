@@ -117,3 +117,32 @@ def test_the_universe_effect_is_reported_only_where_membership_history_exists():
     assert middle["scores_changed"] > 0  # ranking against two peers instead of four moves the percentiles
     assert late["compared"] is False and late["same_as_today"] is True
     engine.dispose()
+
+
+def test_revision_detail_names_the_revised_bars_and_sizes_the_change():
+    tool = _tool()
+    assert tool.revision_detail(_engine(revise=False)) == {"revised_bars": 0}
+    engine = _engine(revise=True)  # A is scaled by 0.3*(1+i/100) and B by 3*(1+i/100) on the later version
+    detail = tool.revision_detail(engine, top=5)
+    assert detail["revised_bars"] == 600 and detail["tickers_affected"] == 2
+    assert detail["top_tickers"] == [("A", 300), ("B", 300)]
+    assert detail["revision_stored_on"] == [("2025-02-01", 600)]
+    assert detail["bar_dates"]["latest"] == EVALUATION.isoformat()
+    assert detail["adjusted_close_relative_change"]["max"] > 1.0  # B is roughly tripled and more
+    assert detail["adjusted_close_relative_change"]["unchanged"] == 0
+    assert detail["close_relative_change"]["max"] == detail["adjusted_close_relative_change"]["max"]
+    assert detail["volume_changed_bars"] == 0
+    engine.dispose()
+
+
+def test_revision_detail_separates_volume_only_revisions_from_price_restatements():
+    tool, engine = _tool(), _engine(revise=False)
+    with Session(engine) as session:
+        first = session.query(Price).filter_by(ticker="A").order_by(Price.date).first()
+        session.add(Price(ticker="A", date=first.date, open=first.open, close=first.close,
+                          adjusted_close=first.adjusted_close, volume=2_500, provider="test", ingested_at=REVISED))
+        session.commit()
+    detail = tool.revision_detail(engine)
+    assert detail["revised_bars"] == 1 and detail["volume_changed_bars"] == 1
+    assert detail["adjusted_close_relative_change"]["unchanged"] == 1 and detail["close_relative_change"]["median"] == 0.0
+    engine.dispose()

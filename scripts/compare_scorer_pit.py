@@ -71,6 +71,61 @@ def revision_statistics(engine: Engine) -> dict[str, int]:
     return {"price_rows": rows, "distinct_bars": bars, "bars_with_revisions": multi, "revision_rows": rows - bars}
 
 
+def revision_detail(engine: Engine, *, top: int = 10) -> dict:
+    """What the revised bars are: which tickers, which bar dates, when the
+    revision was stored, and how large the change was (first stored version vs
+    the newest one). Explains *why* a date's score moved: a date moves only if
+    a revision that was stored after it touches a bar in its window."""
+    query = text("""
+        WITH multi AS (SELECT ticker, date FROM prices GROUP BY ticker, date HAVING COUNT(*) > 1),
+        ranked AS (
+            SELECT p.ticker, p.date, p.close, p.adjusted_close, p.volume, p.ingested_at,
+                   ROW_NUMBER() OVER (PARTITION BY p.ticker, p.date ORDER BY p.ingested_at ASC, p.id ASC) AS first_rank,
+                   ROW_NUMBER() OVER (PARTITION BY p.ticker, p.date ORDER BY p.ingested_at DESC, p.id DESC) AS last_rank
+            FROM prices p JOIN multi m ON p.ticker = m.ticker AND p.date = m.date
+        )
+        SELECT ticker, date,
+               MAX(CASE WHEN first_rank = 1 THEN close END), MAX(CASE WHEN last_rank = 1 THEN close END),
+               MAX(CASE WHEN first_rank = 1 THEN adjusted_close END), MAX(CASE WHEN last_rank = 1 THEN adjusted_close END),
+               MAX(CASE WHEN first_rank = 1 THEN volume END), MAX(CASE WHEN last_rank = 1 THEN volume END),
+               MAX(CASE WHEN last_rank = 1 THEN ingested_at END)
+        FROM ranked GROUP BY ticker, date
+    """)
+    with engine.connect() as connection:
+        rows = connection.execute(query).all()
+    if not rows:
+        return {"revised_bars": 0}
+
+    def relative(old, new):
+        return None if not old or new is None else abs(new / old - 1.0)
+
+    by_ticker: dict[str, int] = {}
+    stored_on: dict[str, int] = {}
+    for ticker, _, _, _, _, _, _, _, stored in rows:
+        by_ticker[ticker] = by_ticker.get(ticker, 0) + 1
+        day = str(stored)[:10]
+        stored_on[day] = stored_on.get(day, 0) + 1
+    adjusted = sorted(r for r in (relative(row[4], row[5]) for row in rows) if r is not None)
+    closes = sorted(r for r in (relative(row[2], row[3]) for row in rows) if r is not None)
+
+    def quantile(values, q):
+        return None if not values else round(values[min(len(values) - 1, int(q * len(values)))], 6)
+
+    dates = sorted(str(row[1]) for row in rows)
+    return {
+        "revised_bars": len(rows),
+        "tickers_affected": len(by_ticker),
+        "top_tickers": sorted(by_ticker.items(), key=lambda item: (-item[1], item[0]))[:top],
+        "bar_dates": {"earliest": dates[0], "latest": dates[-1]},
+        "revision_stored_on": sorted(stored_on.items(), key=lambda item: (-item[1], item[0]))[:top],
+        "adjusted_close_relative_change": {"median": quantile(adjusted, 0.5), "p95": quantile(adjusted, 0.95),
+                                           "max": quantile(adjusted, 1.0), "unchanged": sum(1 for v in adjusted if v < 1e-12)},
+        "close_relative_change": {"median": quantile(closes, 0.5), "p95": quantile(closes, 0.95),
+                                  "max": quantile(closes, 1.0), "unchanged": sum(1 for v in closes if v < 1e-12)},
+        "volume_changed_bars": sum(1 for row in rows if row[6] != row[7]),
+    }
+
+
 def score_grid(start: date, end: date, step_days: int) -> list[date]:
     days, day = [], start
     while day <= end:
@@ -232,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = {
             "revision_statistics": revision_statistics(engine),
+            "revision_detail": revision_detail(engine),
             "scores": compare_scores(
                 engine, settings, tracked_tickers(engine), score_grid(options.start, options.end, options.step_days),
                 options.top_n,
