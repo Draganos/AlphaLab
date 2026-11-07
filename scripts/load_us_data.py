@@ -23,10 +23,12 @@ from alpha_lab.utils.logging import configure_logging
 logger = logging.getLogger(__name__)
 
 
-def _ingest_universe(service: IngestionService, tickers: list[str], years: int) -> bool:
+def _ingest_universe(service: IngestionService, tickers: list[str], years: int, *, track: bool = True) -> bool:
     """Ingest every ticker, continuing past individual failures.
 
-    Returns True only if every ticker succeeded.
+    Returns True only if every ticker succeeded. `track=False` loads prices and
+    company data without adding the ticker to the tracked research universe
+    (for benchmarks, which are not research candidates).
     """
     start = date.today() - timedelta(days=365 * years)
     end = date.today()
@@ -34,7 +36,7 @@ def _ingest_universe(service: IngestionService, tickers: list[str], years: int) 
     failed: dict[str, ProviderError] = {}
     for ticker in tickers:
         try:
-            service.ingest(ticker, start, end)
+            service.ingest(ticker, start, end, mark_tracked=track)
         except ProviderError as error:
             failed[ticker] = error
             logger.error(
@@ -67,6 +69,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("tickers", nargs="*", help="US tickers; defaults to configured universe")
     parser.add_argument("--years", type=int, default=5)
+    parser.add_argument(
+        "--no-track", action="store_true",
+        help="Load prices only; do not add the tickers to the tracked research universe "
+        "(use for benchmarks such as SPY, QQQ, VT)",
+    )
     args = parser.parse_args()
     configure_logging()
     settings = load_settings()
@@ -82,6 +89,7 @@ def main() -> int:
                 ticker,
                 date.today() - timedelta(days=365 * args.years),
                 date.today(),
+                mark_tracked=not args.no_track,
             )
         except ProviderError as error:
             print(f"ERROR: {ticker} ingestion failed")
@@ -96,7 +104,7 @@ def main() -> int:
         print("US ingestion complete\nSucceeded: 1\nFailed: 0")
         return 0
 
-    all_succeeded = _ingest_universe(service, tickers, args.years)
+    all_succeeded = _ingest_universe(service, tickers, args.years, track=not args.no_track)
     return 0 if all_succeeded else 1
 
 
